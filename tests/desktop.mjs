@@ -27,6 +27,7 @@ async function launch(scale = 1) {
   // --no-sandbox is ONLY used by this disposable CI harness; production keeps it enabled.
   desktop.process().stderr.on('data', buffer => errors.push(buffer.toString()));
   page = await desktop.firstWindow();
+  page.setDefaultTimeout(30000);
   page.on('pageerror', error => errors.push(error.message));
   await page.waitForFunction(() => !!window.workspace);
 }

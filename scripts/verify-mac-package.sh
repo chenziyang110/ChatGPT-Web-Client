@@ -11,8 +11,8 @@ verify_app() {
   local app="$1"
   codesign --verify --deep --strict --verbose=2 "$app"
   codesign --verify --strict --verbose=2 "$app/Contents/Resources/agent/chatgpt-agent"
-  lipo -verify_arch "$macho_arch" "$app/Contents/MacOS/ChatGPT Web Client"
-  lipo -verify_arch "$macho_arch" "$app/Contents/Resources/agent/chatgpt-agent"
+  lipo "$app/Contents/MacOS/ChatGPT Web Client" -verify_arch "$macho_arch"
+  lipo "$app/Contents/Resources/agent/chatgpt-agent" -verify_arch "$macho_arch"
   "$app/Contents/Resources/agent/chatgpt-agent" --help
   node tests/updates-desktop.mjs "$app/Contents/MacOS/ChatGPT Web Client"
 }

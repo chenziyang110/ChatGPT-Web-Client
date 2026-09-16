@@ -19,7 +19,7 @@ Agent 位于 Windows / Linux 的 `resources/agent/` 或 macOS 的 `Contents/Reso
 1. 同步修改 package.json 和 package-lock.json 的稳定版本号，增加该版本发布说明。
 2. 执行 npm audit、npm test、npm run test:agent、npm run build、npm run test:desktop。核对隐私、截图和 Git diff。
 3. 提交推送并创建匹配的 vX.Y.Z 标签。
-4. 在 Actions 运行 **Release Desktop**，输入标签。六个矩阵任务分别执行测试和打包；桌面测试运行在构建机架构，不代表另一 CPU 的原生验收。
+4. 在 Actions 运行 **Release Desktop**，输入标签并启用 publish。也可输入分支并保持 publish 关闭，仅生成待验证产物。六个矩阵任务分别执行测试和打包；桌面测试运行在构建机架构，不代表另一 CPU 的原生验收。
 5. 全部任务成功后，发布任务验证 10 个指定安装包/归档，无缺失、无额外文件、无空文件，生成 SHA256SUMS.txt，上传草稿，再发布为 Latest。已有 Release 不覆盖；失败保持未发布。
 6. 验证下载和旧客户端“检查更新”。若云端构建因账户限制无法启动，不能将未生成的安装包宣称为已发布。
 

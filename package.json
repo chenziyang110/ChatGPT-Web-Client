@@ -1,23 +1,64 @@
 {
   "name": "chatgpt-web-client",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "description": "Local-first desktop AI workspace with isolated accounts and an agent gateway",
   "private": true,
   "type": "module",
-  "main": "src/main/main.ts",
+  "main": "dist-electron/main.cjs",
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev.mjs",
+    "start": "electron .",
     "electron": "electron .",
-    "build": "vite build"
+    "build": "npm run typecheck && node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:desktop": "node tests/desktop.mjs",
+    "cli": "node --import tsx src/cli/index.ts",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder"
+  },
+  "build": {
+    "appId": "com.chenziyang.chatgptwebclient",
+    "productName": "ChatGPT Web Client",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "npmRebuild": false,
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Utility"
+    }
   },
   "dependencies": {
-    "electron": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "better-sqlite3": "latest"
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
   },
   "devDependencies": {
-    "typescript": "latest",
-    "vite": "latest",
-    "@vitejs/plugin-react": "latest"
+    "@types/node": "24.13.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "electron": "44.4.1",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
+    "playwright": "1.63.0",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3",
+    "vite": "8.3.0"
   }
 }

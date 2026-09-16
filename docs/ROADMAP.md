@@ -1,38 +1,26 @@
-# Development Roadmap
+# Roadmap
 
-## Phase 1 - Foundation
+## Implemented in v0.2
 
-- Electron project initialization
-- React renderer
-- TypeScript configuration
-- Build pipeline
+- [x] Electron/React/TypeScript foundation and compiled main/preload/CLI
+- [x] Locked dependencies and development/build/package commands
+- [x] Isolated profiles, account creation/rename/switch/delete
+- [x] SQLite metadata, active account/page/window restoration
+- [x] Bounded task queue, results, cancellation, crash recovery
+- [x] Authenticated HTTP API, validated IPC, JSON CLI
+- [x] Generic CLI/HTTP integration for AnythingCLI and other tools
+- [x] Browser navigate/snapshot/fill/click and draft/submit tasks
+- [x] Core/API/CLI tests and offline Electron integration test
+- [x] Three-platform CI/build/package configuration
 
-## Phase 2 - Account Runtime
+## Release acceptance
 
-- Chromium profile isolation
-- Account manager
-- Account switching UI
+- [ ] Live login and third-party OAuth on each target OS
+- [ ] Live prompt automation against the current ChatGPT DOM
+- [ ] Signed/notarized installers and production update channel
 
-## Phase 3 - Session Runtime
+These require a real login/desktop environment or publisher credentials. Offline fixtures do not verify third-party service behavior.
 
-- Session database
-- Restore last workspace
-- Startup optimization
+## Future extensions in product requirements
 
-## Phase 4 - Agent Runtime
-
-- Local API server
-- Task management
-- CLI gateway
-
-## Phase 5 - Automation
-
-- AnythingCLI integration
-- Browser automation
-- Tool execution
-
-## Phase 6 - Ecosystem
-
-- MCP support
-- Plugin system
-- Multiple AI providers
+MCP, plugin discovery/permissions, multiple AI providers, expanded browser adapters, and opt-in microphone/camera permissions UI.

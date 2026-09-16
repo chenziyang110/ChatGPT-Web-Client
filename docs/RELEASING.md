@@ -8,7 +8,7 @@
 | macOS | x64、ARM64 | DMG、ZIP |
 | Linux | x64、ARM64 | AppImage、tar.gz |
 
-`npm run dist:win`、`npm run dist:mac`、`npm run dist:linux` 分别生成对应系统的两个架构。macOS 安装包请在 Mac 上构建；Linux 安装包建议在 Linux 上构建。发布工作流使用对应操作系统的构建机，目标 CPU 可不同于构建机 CPU。
+`npm run dist:win`、`npm run dist:mac`、`npm run dist:linux` 分别生成对应系统的两个架构。AppImage 的 x64 文件名采用 Linux 惯例 `x86_64`，其他格式使用 `x64`。macOS 安装包请在 Mac 上构建；Linux 安装包建议在 Linux 上构建。发布工作流使用对应操作系统的构建机，目标 CPU 可不同于构建机 CPU。
 
 每次打包的 beforePack 钩子从 electron-builder 读取目标系统和架构，使用 GOOS / GOARCH / CGO_ENABLED=0 编译 Agent。输出隔离到 `dist-agent/<platform>-<arch>/`，只复制匹配目标的二进制。开发构建始终使用本机架构。`npm run build:agent:all` 可独立交叉编译全部六种 Agent。
 

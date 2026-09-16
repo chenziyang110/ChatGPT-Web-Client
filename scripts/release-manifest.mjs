@@ -9,7 +9,7 @@ export async function releaseManifest(directory, version) {
     `ChatGPT-Web-Client-${version}-win-${arch}.exe`,
     `ChatGPT-Web-Client-${version}-mac-${arch}.dmg`,
     `ChatGPT-Web-Client-${version}-mac-${arch}.zip`,
-    `ChatGPT-Web-Client-${version}-linux-${arch}.AppImage`,
+    `ChatGPT-Web-Client-${version}-linux-${arch === 'x64' ? 'x86_64' : arch}.AppImage`,
     `ChatGPT-Web-Client-${version}-linux-${arch}.tar.gz`
   ]).sort();
   const actual = (await readdir(directory)).filter(name => name !== 'SHA256SUMS.txt').sort();

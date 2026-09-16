@@ -8,7 +8,7 @@ test('publishing refuses incomplete, empty or unexpected artifacts', async () =>
   const dir = await mkdtemp(path.join(os.tmpdir(), 'workspace-manifest-'));
   await assert.rejects(releaseManifest(dir, '1.1.0'), /exactly/);
   for (const arch of ['x64', 'arm64']) for (const [platform, ext] of [['win','exe'],['mac','dmg'],['mac','zip'],['linux','AppImage'],['linux','tar.gz']]) {
-    await writeFile(path.join(dir, `ChatGPT-Web-Client-1.1.0-${platform}-${arch}.${ext}`), 'synthetic test artifact');
+    await writeFile(path.join(dir, `ChatGPT-Web-Client-1.1.0-${platform}-${ext === 'AppImage' && arch === 'x64' ? 'x86_64' : arch}.${ext}`), 'synthetic test artifact');
   }
   assert.equal((await releaseManifest(dir, '1.1.0')).length, 10);
   assert.equal((await readFile(path.join(dir, 'SHA256SUMS.txt'), 'utf8')).trim().split('\n').length, 10);

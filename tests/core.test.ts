@@ -138,3 +138,21 @@ test('workspace refuses unconfirmed deletion and clears the right profile before
   await assert.rejects(workspace.call('tasks.create', { accountId: second.id, input: { type: 'snapshot' } }));
   await gateway.stop(); db.close();
 });
+
+test('history retention never evicts a running task when cancelled tasks accumulate', async () => {
+  const db = new Database(':memory:');
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const gateway = new AgentGateway(db, async () => { await gate; return 'finished'; }, () => {});
+  const active = gateway.createTask('account', { type: 'snapshot' });
+  await eventually(() => gateway.get(active.id).status === 'running');
+  for (let i = 0; i < 220; i++) {
+    const queued = gateway.createTask('account', { type: 'snapshot' });
+    gateway.cancel(queued.id);
+  }
+  assert.equal(gateway.listTasks().length, 200);
+  assert.equal(gateway.get(active.id).status, 'running');
+  release();
+  await eventually(() => gateway.get(active.id).status === 'done');
+  await gateway.stop(); db.close();
+});

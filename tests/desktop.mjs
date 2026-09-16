@@ -152,6 +152,9 @@ try {
   await page.waitForFunction(() => innerWidth === 1440);
   assert.equal(await page.locator('.titlebar').evaluate(element => getComputedStyle(element).getPropertyValue('-webkit-app-region')), 'drag');
   assert.equal(await page.locator('.window-controls').evaluate(element => getComputedStyle(element).getPropertyValue('-webkit-app-region')), 'no-drag');
+  // On small macOS CI displays an oversized normal window is reported maximized.
+  await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(900, 640));
+  await page.waitForFunction(() => innerWidth === 900);
   await page.getByRole('button', { name: '最大化窗口', exact: true }).click();
   await page.getByRole('button', { name: '还原窗口', exact: true }).waitFor();
   assert.equal((await rpc('window.state')).maximized, true);

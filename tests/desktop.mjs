@@ -156,7 +156,6 @@ try {
   // On small macOS CI displays an oversized normal window is reported maximized.
   await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(900, 640));
   await page.waitForFunction(() => innerWidth === 900);
-  console.log('Window controls baseline:', await rpc('window.state'), await page.locator('.window-controls').innerHTML());
   await page.getByRole('button', { name: '最大化窗口', exact: true }).click();
   await page.getByRole('button', { name: '还原窗口', exact: true }).waitFor();
   assert.equal((await rpc('window.state')).maximized, true);
@@ -366,13 +365,18 @@ try {
   await accountSelect.click();
   await page.getByRole('option', { name: 'Personal', exact: true }).click();
   await activeAccount(personal.id);
-  await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1920, 1080));
-  await page.waitForFunction(() => innerWidth === 1920 && innerHeight === 1080);
+  const largeSize = await desktop.evaluate(({ BrowserWindow, screen }) => {
+    const area = screen.getPrimaryDisplay().workArea;
+    const size = { width: Math.max(900, Math.min(1920, area.width)), height: Math.max(640, Math.min(1080, area.height)) };
+    BrowserWindow.getAllWindows()[0].setSize(size.width, size.height);
+    return size;
+  });
+  await page.waitForFunction(size => innerWidth === size.width && innerHeight === size.height, largeSize);
   await checkBrowserBounds();
   const focusSlot = await page.locator('.browser-slot').boundingBox();
   assert.equal(focusSlot.x, 0);
   const tabsHeight = await page.locator('.conversation-tabs').evaluateAll(elements => elements[0]?.getBoundingClientRect().height ?? 0);
-  assert.ok(focusSlot.y <= 80 + tabsHeight && focusSlot.width === 1920 && focusSlot.height >= 1000 - tabsHeight);
+  assert.ok(focusSlot.y <= 80 + tabsHeight && focusSlot.width === largeSize.width && focusSlot.height >= largeSize.height - 80 - tabsHeight);
   await captureWorkspace('test-results/focus-1080p.png');
   await shortcut('F', [mod, 'shift'], true);
   await page.waitForFunction(() => !document.querySelector('.focus-mode'));
@@ -441,6 +445,7 @@ try {
   const helpResponse = await fetch(helpState.api.endpoint + '/help.html');
   assert.equal(helpResponse.status, 200);
   assert.match(await helpResponse.text(), /waiting_user/);
+  await page.waitForFunction(() => /http:\/\/127.0.0.1:\d+\/help.html/.test(document.querySelector('.agent-prompt-preview')?.value ?? ''));
   assert.match(await preview.inputValue(), /http:\/\/127.0.0.1:\d+\/help.html/);
   await page.getByRole('button', { name: '关闭弹窗', exact: true }).click();
   await page.getByRole('button', { name: '管理 Work', exact: true }).click();

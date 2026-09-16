@@ -1,0 +1,23 @@
+{
+  "name": "chatgpt-web-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/main/main.ts",
+  "scripts": {
+    "dev": "vite",
+    "electron": "electron .",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "electron": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "better-sqlite3": "latest"
+  },
+  "devDependencies": {
+    "typescript": "latest",
+    "vite": "latest",
+    "@vitejs/plugin-react": "latest"
+  }
+}

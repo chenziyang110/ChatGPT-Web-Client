@@ -41,7 +41,7 @@ else void app.whenReady().then(async () => {
   const updateStart = setTimeout(checkUpdates, 10000);
   const updateTimer = setInterval(checkUpdates, 6 * 60 * 60 * 1000);
   win.webContents.on('did-start-loading', () => { shortcuts.capturing = false; });
-  win.on('maximize', changed).on('unmaximize', changed)
+  win.on('resize', changed).on('maximize', changed).on('unmaximize', changed)
     .on('enter-full-screen', changed).on('leave-full-screen', changed)
     .on('focus', changed).on('blur', changed);
   const notifications = new ConversationNotifications(db, changed);

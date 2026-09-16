@@ -66,6 +66,12 @@ jobs:
         timeout-minutes: 10
         if: runner.os != 'Linux'
         run: npm run test:desktop
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-${{ matrix.platform }}-${{ matrix.arch }}
+          path: test-results/
+          retention-days: 3
       - name: Package target architecture
         run: npx electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never
       - uses: actions/upload-artifact@v4

@@ -156,6 +156,7 @@ try {
   // On small macOS CI displays an oversized normal window is reported maximized.
   await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(900, 640));
   await page.waitForFunction(() => innerWidth === 900);
+  console.log('Window controls baseline:', await rpc('window.state'), await page.locator('.window-controls').innerHTML());
   await page.getByRole('button', { name: '最大化窗口', exact: true }).click();
   await page.getByRole('button', { name: '还原窗口', exact: true }).waitFor();
   assert.equal((await rpc('window.state')).maximized, true);

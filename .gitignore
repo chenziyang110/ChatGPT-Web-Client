@@ -10,3 +10,10 @@ dist-electron/
 # Environment
 .env
 .env.*
+
+release/
+.cache/
+coverage/
+test-results/
+*.sqlite*
+agent-runtime.json

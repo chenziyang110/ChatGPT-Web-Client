@@ -1,17 +1,17 @@
-export interface SessionState {
-  accountId: string;
-  url: string;
-  updatedAt: number;
-}
-
+import { Database } from '../storage/Database';
+import { chatUrl, identifier } from '../validation';
+import type { SessionState } from '../../shared/types';
+export type { SessionState } from '../../shared/types';
+export interface WindowState { x?: number; y?: number; width: number; height: number; maximized: boolean }
 export class SessionManager {
-  private sessions: Map<string, SessionState> = new Map();
-
-  save(state: SessionState) {
-    this.sessions.set(state.accountId, state);
+  constructor(private readonly db: Database) {}
+  save(accountId: string, url: string): void {
+    const state: SessionState = { accountId: identifier(accountId), url: chatUrl(url), updatedAt: Date.now() };
+    this.db.set(`session:${accountId}`, state);
   }
-
-  restore(accountId: string) {
-    return this.sessions.get(accountId);
+  restore(accountId: string): SessionState | undefined {
+    return this.db.get<SessionState>(`session:${identifier(accountId)}`);
   }
+  saveWindow(state: WindowState): void { this.db.set('window', state); }
+  restoreWindow(): WindowState | undefined { return this.db.get<WindowState>('window'); }
 }

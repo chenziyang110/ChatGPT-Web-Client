@@ -2,7 +2,7 @@
 
 ## Recommended Agent tool (Go)
 
-Windows distributions include `chatgpt-agent.exe` beside the desktop executable. Development builds place it in `dist-agent/`. It is a standalone Go binary with no Node.js dependency. The copied Agent prompt includes its absolute path and fixed account/conversation arguments.
+From v1.1.0 all platforms include a native Agent under `resources/agent/` (`Contents/Resources/agent/` inside the macOS app). The executable is `chatgpt-agent.exe` on Windows and `chatgpt-agent` on macOS/Linux. Development builds place it in `dist-agent/`. It is a standalone Go binary with no Node.js dependency. The copied Agent prompt includes its absolute path and fixed account/conversation arguments.
 
 ```powershell
 .\chatgpt-agent.exe ask --account ACCOUNT_ID --new --text-file question.txt --stream
@@ -19,7 +19,7 @@ With `--stream`, stdout is UTF-8 newline-delimited JSON. `task` identifies the o
 
 Internally, `tasks.wait` accepts `id`, `timeoutMs` (0–25000), `afterUpdatedAt`, and `updates:true` for incremental snapshots. Its timeout returns the current task without cancellation. This releases the Electron event loop, so other conversations and the UI continue operating while the calling CLI blocks.
 
-Build with `npm run build:agent` (Go 1.24+ required on the build machine); test with `npm run test:agent`. The normal `npm run build` also builds the Go tool; Windows packaging copies it beside the desktop executable. The older Node CLI below remains available for administrative commands.
+Build with `npm run build:agent` (Go 1.24+ required on the build machine); test with `npm run test:agent`. The normal `npm run build` also builds the Go tool; Packaging builds a matching target binary using GOOS/GOARCH and copies it into the app resource directory. `npm run build:agent:all` cross-compiles all six OS/CPU combinations. The older Node CLI below remains available for administrative commands.
 
 Enable **Local Agent API** in the desktop Settings. The CLI reads `agent-runtime.json` from the app's data directory. The service binds a random port on `127.0.0.1`, rotates its token on startup, and rejects browser Origin/Fetch Metadata on operational endpoints and unexpected Host headers on all endpoints. Public GET /help.html and /help.json provide static documentation without credentials or account data. Never publish the discovery file.
 

@@ -13,7 +13,8 @@
 - [x] Core/API/CLI tests and offline Electron integration test
 - [x] Three-platform CI/build/package configuration
 
-- [x] Windows x64 stable installer and GitHub Release notifications
+- [x] GitHub Release notifications
+- [x] Windows / macOS / Linux x64 and ARM64 packaging matrix and native Agent cross-compilation
 - [x] Agent collaboration, streaming Go CLI and human takeover
 - [x] Privacy-safe README illustrations
 

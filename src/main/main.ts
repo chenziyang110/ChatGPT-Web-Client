@@ -54,9 +54,9 @@ else void app.whenReady().then(async () => {
   let stopped = false;
   const workspace: Workspace = new Workspace(accounts, tasks, browser, changed, () => ({
     enabled: api.endpoint !== null, endpoint: api.endpoint, discoveryFile, error: apiError
-  }), conversations, notifications, shortcuts, process.platform === 'win32'
-    ? path.join(app.isPackaged ? path.dirname(process.execPath) : path.resolve(__dirname, '../dist-agent'), 'chatgpt-agent.exe')
-    : app.isPackaged ? undefined : path.join(__dirname, 'cli.cjs'));
+  }), conversations, notifications, shortcuts,
+    path.join(app.isPackaged ? path.join(process.resourcesPath, 'agent') : path.resolve(__dirname, '../dist-agent'),
+      process.platform === 'win32' ? 'chatgpt-agent.exe' : 'chatgpt-agent'));
   const api: LocalApi = new LocalApi(discoveryFile, (method, params) => {
     if (stopping) throw new AppError('Runtime is stopping', 503);
     return workspace.call(method, params);

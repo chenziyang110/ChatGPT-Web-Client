@@ -21,13 +21,13 @@ import (
 
 const help = `ChatGPT Web Client — Go Agent CLI
 
-chatgpt-agent.exe ask --account ID --new --text-file QUESTION.txt [--stream]
-chatgpt-agent.exe ask --account ID --conversation ID --text-file QUESTION.txt
-chatgpt-agent.exe ask --account ID --url URL --text-file QUESTION.txt
-chatgpt-agent.exe resume TASK_ID [--stream] [--url VERIFIED_CONVERSATION_URL]
-chatgpt-agent.exe resume --request-file SAVED_REQUEST.json [--stream]
-chatgpt-agent.exe accounts
-chatgpt-agent.exe status
+chatgpt-agent ask --account ID --new --text-file QUESTION.txt [--stream]
+chatgpt-agent ask --account ID --conversation ID --text-file QUESTION.txt
+chatgpt-agent ask --account ID --url URL --text-file QUESTION.txt
+chatgpt-agent resume TASK_ID [--stream] [--url VERIFIED_CONVERSATION_URL]
+chatgpt-agent resume --request-file SAVED_REQUEST.json [--stream]
+chatgpt-agent accounts
+chatgpt-agent status
 
 Options (before or after the command):
   --data-dir PATH          Desktop profile directory; defaults to the current user's profile

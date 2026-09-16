@@ -51,12 +51,11 @@ try {
   assert.equal((await rpc('conversations.get', { accountId: account.id, conversation: task.conversationId })).url, current.result.url);
   assert.equal((await rpc('tasks.create', params)).id, task.id);
   assert.equal(await desktop.evaluate(({ webContents }, url) => webContents.getAllWebContents().find(wc => wc.getURL() === url).executeJavaScript('window.fixtureSendCount'), current.result.url), 1);
-  if (process.platform === 'win32') {
   await rpc('settings.api', { enabled: true });
   const handoff = await rpc('agent.prompt', { accountId: account.id });
   const questionFile = path.join(directory, 'stream question.txt'); await writeFile(questionFile, '中文流式测试');
   const args = handoff.commands.create.map(arg => arg === 'QUESTION_FILE' ? questionFile : arg === 'REQUEST_UUID' ? 'go-stream-test' : arg);
-  assert.match(args[0], /chatgpt-agent\.exe$/);
+  assert.match(args[0], /chatgpt-agent(?:\.exe)?$/);
   const events = []; let errors = ''; let pending = ''; let firstDeltaAt; let doneAt;
   const child = spawn(args[0], [...args.slice(1), '--stream'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
@@ -80,8 +79,7 @@ try {
   assert.equal(await new Promise(resolve => resume.on('close', resolve)), 0);
   assert.equal(JSON.parse(resumed).result.response, done.result.response);
   assert.equal((await rpc('tasks.list')).length, 2, 'Resume must not create another task');
-  }
-  console.log(process.platform === 'win32' ? 'Reply routing and Go EXE desktop passed: optimistic routes, streaming, resume and pinned CLI.' : 'Reply routing desktop passed; Windows Go EXE checks are Windows-only.');
+  console.log('Reply routing and native Agent desktop passed: optimistic routes, streaming, resume and pinned CLI.');
 } finally {
   if (desktop) await desktop.close();
   assert.ok(directory.startsWith(path.resolve('.') + path.sep + '.test-reply-route-'));

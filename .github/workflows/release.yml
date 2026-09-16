@@ -1,19 +1,31 @@
-name: Release Windows
+name: Release Desktop
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag (v1.0.0)
+        description: Existing stable version tag (v1.1.0)
         required: true
         type: string
 permissions:
-  contents: write
+  contents: read
 concurrency:
-  group: release-windows
+  group: release-desktop
   cancel-in-progress: false
 jobs:
-  release:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, platform: win, arch: x64 }
+          - { os: windows-latest, platform: win, arch: arm64 }
+          - { os: macos-15, platform: mac, arch: x64 }
+          - { os: macos-15, platform: mac, arch: arm64 }
+          - { os: ubuntu-24.04, platform: linux, arch: x64 }
+          - { os: ubuntu-24.04, platform: linux, arch: arm64 }
+    runs-on: ${{ matrix.os }}
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,21 +47,50 @@ jobs:
       - run: npm test
       - run: npm run test:agent
       - run: npm run build
-      - run: npm run test:desktop
-      - run: npx electron-builder --win nsis --x64 --publish never
-      - name: Publish complete release
+      - name: Install Linux window manager
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y openbox
+      - name: Desktop tests (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" bash scripts/test-linux-desktop.sh
+      - name: Desktop tests (Windows and macOS)
+        if: runner.os != 'Linux'
+        run: npm run test:desktop
+      - name: Package target architecture
+        run: npx electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.platform }}-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+            release/*.tar.gz
+          retention-days: 14
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
+          path: release
+          merge-multiple: true
+      - name: Publish only the complete six-target release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
-        shell: pwsh
+        shell: bash
         run: |
-          $installer = Get-ChildItem -LiteralPath release -Filter '*.exe'
-          if ($installer.Count -ne 1) { throw 'Expected one installer' }
-          $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLower()
-          "$hash  $($installer.Name)" | Set-Content -Encoding utf8 release/SHA256SUMS.txt
-          gh release create $env:RELEASE_TAG --verify-tag --draft --title "ChatGPT Web Client $env:RELEASE_TAG" --generate-notes
-          if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release; existing releases are never overwritten' }
-          gh release upload $env:RELEASE_TAG $installer.FullName release/SHA256SUMS.txt
-          if ($LASTEXITCODE -ne 0) { throw 'Upload failed; release remains draft' }
-          gh release edit $env:RELEASE_TAG --draft=false --latest
-          if ($LASTEXITCODE -ne 0) { throw 'Could not publish release' }
+          set -euo pipefail
+          node scripts/release-manifest.mjs
+          gh release create "$RELEASE_TAG" --verify-tag --draft --title "ChatGPT Web Client $RELEASE_TAG" --notes-file "docs/RELEASE-$RELEASE_TAG.md"
+          gh release upload "$RELEASE_TAG" release/*
+          gh release edit "$RELEASE_TAG" --draft=false --latest

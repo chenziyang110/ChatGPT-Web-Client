@@ -21,3 +21,10 @@ README 图片通过 `scripts/readme-images.mjs` 在独立临时数据目录生�
 ## 实际边界
 
 离线 fixture 无法证明实时 ChatGPT 的所有登录方式、模型、工具和 DOM 变体均可用。没有向真实账号发送发布测试消息。macOS / Linux 安装和签名未纳入本次 Windows 正式版验证。代码签名尚未配置。
+
+## v1.1.0 跨平台构建
+
+- 六种 Go Agent（Windows / macOS / Linux × x64 / ARM64）已在 Windows 交叉编译，逐一核对 GOOS / GOARCH；Linux x64 可执行文件在 WSL 启动成功。
+- 54 项 TypeScript 测试、发布清单测试、Go 测试和 5 组 Windows Electron 桌面验证通过。
+- Windows x64 / ARM64 NSIS 打包成功；x64 打包应用启动与更新设置持久化验证通过。ARM64 尚未在本地原生硬件运行。
+- macOS / Linux 的完整安装包及桌面验证由 Release Desktop 工作流执行，以该次工作流结果为准，不把交叉编译等同于目标硬件运行验证。

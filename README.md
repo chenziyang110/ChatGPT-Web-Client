@@ -12,13 +12,21 @@
 
 ## 下载与开始
 
-**Windows x64 正式版 v1.0.0**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，下载 `ChatGPT-Web-Client-1.0.0-win-x64.exe`，运行安装程序。
+**当前正式版 v1.0.0（Windows x64）**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，下载 `ChatGPT-Web-Client-1.0.0-win-x64.exe`，运行安装程序。
 
 1. 添加账号，在独立的 ChatGPT 网页中自行登录。
 2. 添加其他账号，在侧栏随时切换；各账号的登录状态互相隔离。
 3. 在任务中心准备提示词，或通过 **Agent 协作** 让本机 Agent 获取网页回复。
 
-安装包尚未配置代码签名，Windows 可能显示未知发布者提示。请核对来源与 Release 附带的 SHA-256。macOS / Linux 当前提供源码构建配置，尚未发布对应正式安装包。
+安装包尚未配置代码签名，Windows 可能显示未知发布者提示。请核对来源与 Release 附带的 SHA-256。v1.1.0 增加以下构建目标；正式下载以 Releases 中实际上传的文件为准。
+
+| 系统 | x64（Intel / AMD） | ARM64 | 安装包 |
+| --- | --- | --- | --- |
+| Windows | 支持 | 支持 | NSIS `.exe` |
+| macOS | Intel Mac | Apple Silicon（M 系列） | `.dmg`、`.zip` |
+| Linux | 支持 | 支持 | `.AppImage`、`.tar.gz` |
+
+macOS 包尚未签名、公证；Linux AppImage 可能需要 FUSE，也可使用 tar.gz 解压版。跨架构构建通过不等于目标硬件运行验证。
 
 ## 能做什么
 
@@ -62,7 +70,7 @@
 
 ### 启动应用
 
-开发构建需要 **Node.js 24+**、npm、**Go 1.24+** 和可运行 Electron 的桌面系统。安装后的 Go Agent 工具无需 Node.js。
+开发构建需要 **Node.js 24+**、npm、**Go 1.24+** 和可运行 Electron 的桌面系统。安装后的 Go Agent 工具在三种系统均无需 Node.js。
 
 ```sh
 npm ci
@@ -87,7 +95,7 @@ node dist-electron/cli.cjs prompt --account <account-id> --conversation daily --
 node dist-electron/cli.cjs --help
 ```
 
-Windows Agent 首选 Go 工具（安装版位于软件目录，开发版位于 `dist-agent/`）：
+Agent 首选原生 Go 工具（开发版位于 `dist-agent/`；v1.1.0 安装版位于应用的 `resources/agent/`，macOS 为 `.app/Contents/Resources/agent/`）。macOS / Linux 文件名为 `chatgpt-agent`，Windows 为 `chatgpt-agent.exe`：
 
 ```powershell
 .\dist-agent\chatgpt-agent.exe ask --account <account-id> --new --text-file question.txt --stream
@@ -103,7 +111,7 @@ Windows Agent 首选 Go 工具（安装版位于软件目录，开发版位于 `
 1. 在目标账号的网页中登录，选好希望咨询的模型，并启用本地服务。
 2. 点击网页工具栏的 **Agent 协作**，或账号管理里的 **生成 Agent 提示词**。任务中心也可按所选账号和会话生成。
 3. 选择范围并复制提示词，连同你的具体任务交给能在本机运行命令或访问本地接口的 Agent。
-4. Agent 调用提示词中的 Go `chatgpt-agent.exe`，工具负责发送、阻塞等待、流式输出和断线续读，Agent 拿到完整回答后验证建议并继续原任务。执行时可看只读实时预览；遇到草稿、登录或验证时，界面让你选择接管处理、继续原任务或取消。
+4. Agent 调用提示词中的 原生 `chatgpt-agent` 工具，工具负责发送、阻塞等待、流式输出和断线续读，Agent 拿到完整回答后验证建议并继续原任务。执行时可看只读实时预览；遇到草稿、登录或验证时，界面让你选择接管处理、继续原任务或取消。
 
 选择账号会在首次咨询时新建会话，后续追问沿用它；选择会话会固定目标，之后切换网页不影响提示词中的目标。生成和复制不会发送消息，也不会自动开启服务。模型由网页设置决定，提示词不能将账号升级或自动切换到高级模型。
 
@@ -132,10 +140,14 @@ npm test                 # 核心、持久化、HTTP 和 CLI
 npm run build            # 类型检查与全部编译产物
 npm run test:desktop     # 真实 Electron，离线页面 fixture，需要桌面显示
 npm run pack             # 当前平台的应用目录
-npm run dist             # DMG / NSIS / AppImage 安装包
+npm run dist             # 当前系统、当前架构
+npm run dist:win         # Windows x64 + ARM64
+npm run dist:mac         # macOS x64 + ARM64（在 Mac 上运行）
+npm run dist:linux       # Linux x64 + ARM64（建议在 Linux 上运行）
+npm run build:agent:all  # 交叉编译六种原生 Agent
 ```
 
-Linux 无头测试：`xvfb-run --auto-servernum npm run test:desktop`。一次性 CI 测试程序使用 `--no-sandbox`；正式应用保持沙箱。GitHub Actions 配置了三平台检查/打包和 Linux 桌面测试。正式版目前发布 Windows x64；代码签名、公证和发布凭据不在仓库中。更新采用公开 Release 检查与手动下载安装。发布流程见 [发布指南](docs/RELEASING.md)。
+Linux 无头测试：`xvfb-run --auto-servernum npm run test:desktop`。一次性 CI 测试程序使用 `--no-sandbox`；正式应用保持沙箱。GitHub Actions 配置了三平台检查/打包和 Linux 桌面测试。发布矩阵覆盖三个系统的 x64 / ARM64；代码签名、公证和发布凭据不在仓库中。更新采用公开 Release 检查与手动下载安装。发布流程见 [发布指南](docs/RELEASING.md)。
 
 ## 已知边界
 

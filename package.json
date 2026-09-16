@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-web-client",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Local-first desktop AI workspace with isolated accounts and an agent gateway",
   "private": true,
   "type": "module",
@@ -14,14 +14,18 @@
     "electron": "electron .",
     "build": "npm run typecheck && node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test tests/*.test.ts",
+    "test": "node --import tsx --test tests/*.test.ts && node --test tests/release-manifest.test.mjs",
     "test:desktop": "node tests/desktop.mjs && node tests/parallel-desktop.mjs && node tests/agent-target-desktop.mjs && node tests/reply-routing-desktop.mjs && node tests/updates-desktop.mjs",
     "test:parallel": "node tests/parallel-desktop.mjs",
     "cli": "node --import tsx src/cli/index.ts",
     "build:agent": "node scripts/build-agent.mjs",
     "test:agent": "cd agent-cli && go test ./...",
     "pack": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder"
+    "dist": "npm run build && electron-builder",
+    "build:agent:all": "node scripts/build-agent.mjs --all",
+    "dist:win": "npm run build && electron-builder --win --x64 --publish never && electron-builder --win --arm64 --publish never",
+    "dist:mac": "npm run build && electron-builder --mac --x64 --arm64 --publish never",
+    "dist:linux": "npm run build && electron-builder --linux --x64 --arm64 --publish never"
   },
   "build": {
     "appId": "com.chenziyang.chatgptwebclient",
@@ -37,25 +41,53 @@
     "npmRebuild": false,
     "mac": {
       "icon": "src/renderer/public/brand/workspace.png",
-      "target": "dmg",
-      "category": "public.app-category.productivity"
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity",
+      "extraResources": [
+        {
+          "from": "dist-agent/darwin-${arch}/",
+          "to": "agent",
+          "filter": [
+            "chatgpt-agent"
+          ]
+        }
+      ]
     },
     "win": {
-      "extraFiles": [
-        {
-          "from": "dist-agent/chatgpt-agent.exe",
-          "to": "chatgpt-agent.exe"
-        }
-      ],
       "icon": "src/renderer/public/brand/workspace.ico",
-      "target": "nsis"
+      "target": "nsis",
+      "extraResources": [
+        {
+          "from": "dist-agent/win32-${arch}/",
+          "to": "agent",
+          "filter": [
+            "chatgpt-agent.exe"
+          ]
+        }
+      ]
     },
     "linux": {
       "icon": "src/renderer/public/brand/workspace.png",
-      "target": "AppImage",
-      "category": "Utility"
+      "target": [
+        "AppImage",
+        "tar.gz"
+      ],
+      "category": "Utility",
+      "extraResources": [
+        {
+          "from": "dist-agent/linux-${arch}/",
+          "to": "agent",
+          "filter": [
+            "chatgpt-agent"
+          ]
+        }
+      ]
     },
-    "artifactName": "ChatGPT-Web-Client-${version}-${os}-${arch}.${ext}"
+    "artifactName": "ChatGPT-Web-Client-${version}-${os}-${arch}.${ext}",
+    "beforePack": "scripts/before-pack.cjs"
   },
   "dependencies": {
     "@radix-ui/react-select": "2.3.7",

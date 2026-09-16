@@ -39,7 +39,7 @@ sequenceDiagram
 
 ## Agent 获得什么
 
-提示词包含固定目标、Go EXE 的绝对路径及参数数组和本机 help.html 链接。Agent 直接调用 `chatgpt-agent.exe ask`，无需自己发送 HTTP 请求或安装 Node.js。工具会保存请求、提交一次并一直等待完整回答；`--stream` 输出增量 JSON 事件，只有 `done` 表示完成。若 Agent 的工具返回“进程仍在运行”，应继续等待同一进程。
+提示词包含固定目标、原生 Go 工具的绝对路径及参数数组和本机 help.html 链接。Agent 直接调用 `chatgpt-agent ask`（Windows 文件名为 `chatgpt-agent.exe`），无需自己发送 HTTP 请求或安装 Node.js。工具会保存请求、提交一次并一直等待完整回答；`--stream` 输出增量 JSON 事件，只有 `done` 表示完成。若 Agent 的工具返回“进程仍在运行”，应继续等待同一进程。
 
 - CLI 用 `--text-file` 读取 UTF-8 问题文件，避免复杂代码、引号和换行参与 shell 解释。
 - HTTP 从本机 `agent-runtime.json` 读取当前地址和令牌，提交 `tasks.create`，轮询 `tasks.get`，从完成任务的 `result.response` 取回答。

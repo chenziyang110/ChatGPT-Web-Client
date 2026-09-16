@@ -12,13 +12,13 @@
 
 ## 下载与开始
 
-**当前正式版 v1.1.0**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，按下表选择系统和 CPU 对应的安装包。
+**当前正式版 v1.1.1**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，按下表选择系统和 CPU 对应的安装包。
 
 1. 添加账号，在独立的 ChatGPT 网页中自行登录。
 2. 添加其他账号，在侧栏随时切换；各账号的登录状态互相隔离。
 3. 在任务中心准备提示词，或通过 **Agent 协作** 让本机 Agent 获取网页回复。
 
-安装包尚未配置代码签名，Windows 可能显示未知发布者提示。请核对来源与 Release 附带的 SHA-256。v1.1.0 提供以下六种系统 / CPU 组合的安装包。
+Windows 安装包尚未配置发布者签名，可能显示未知发布者提示。请核对来源与 Release 附带的 SHA-256。v1.1.1 提供以下六种系统 / CPU 组合的安装包。
 
 | 系统 | x64（Intel / AMD） | ARM64 | 安装包 |
 | --- | --- | --- | --- |
@@ -26,7 +26,7 @@
 | macOS | Intel Mac | Apple Silicon（M 系列） | `.dmg`、`.zip` |
 | Linux | 支持 | 支持 | `.AppImage`、`.tar.gz` |
 
-macOS 包尚未签名、公证；Linux AppImage 可能需要 FUSE，也可使用 tar.gz 解压版。跨架构构建通过不等于目标硬件运行验证。
+macOS 包使用 ad-hoc 签名，尚无 Developer ID 签名及公证；首次打开请参考 [macOS 安装说明](docs/MACOS.md)。Linux AppImage 可能需要 FUSE，也可使用 tar.gz 解压版。跨架构构建通过不等于目标硬件运行验证。
 
 ## 能做什么
 

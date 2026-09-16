@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-web-client",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Local-first desktop AI workspace with isolated accounts and an agent gateway",
   "private": true,
   "type": "module",
@@ -40,6 +40,11 @@
     ],
     "npmRebuild": false,
     "mac": {
+      "identity": "-",
+      "hardenedRuntime": false,
+      "binaries": [
+        "Contents/Resources/agent/chatgpt-agent"
+      ],
       "icon": "src/renderer/public/brand/workspace.png",
       "target": [
         "dmg",

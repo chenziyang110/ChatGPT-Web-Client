@@ -1,17 +1,23 @@
-# Validation
+# 验证记录
 
-## Local checks (2026-09-16)
+## v1.0.0 · 2026-09-16
 
-- `npm run build`: TypeScript and main/preload/CLI/renderer bundles passed.
-- `npm test`: 10 core/API/CLI tests pass; coverage includes persistence, rollback, validation, task ordering/cancellation/failure/recovery, confirmed deletion sequencing, HTTP auth/origin/host/size checks, token rotation and real CLI-to-HTTP calls.
-- Linux unpacked application packaging passed using the installed Electron distribution: `npm exec electron-builder -- --dir --config.electronDist=node_modules/electron/dist`.
-- This build container cannot launch a full Electron desktop. The separate desktop gate is configured for Linux/Xvfb CI.
-- [Initial GitHub CI run](https://github.com/chenziyang110/ChatGPT-Web-Client/actions/runs/35055308476) failed before any steps ran: all four jobs have an empty step list and no assigned runner. Job logs are unavailable (404). The exposed result does not identify the root cause; desktop integration and macOS/Windows packaging are **not verified**. Check repository Actions availability/settings and rerun once runners can start.
+- Windows 本地：TypeScript 类型检查、主进程 / preload / CLI / React 生产构建通过。
+- 53 项 TypeScript 核心、API、CLI、任务队列、回复读取、通知、更新测试通过。
+- Go Agent 集成测试通过。
+- 5 组 Electron 桌面验证通过：主流程、并行、Agent 目标、回复路由与 Go 流式输出、更新设置。
+- Windows 打包应用启动检查通过：版本显示正确，更新开关跨重启保留，测试使用独立临时目录。
+- 完整 `npm audit`：未发现漏洞。
+- Windows x64 NSIS 安装包构建成功，包含独立 Go Agent 工具。
 
-## Desktop integration gate
+## 验证范围
 
-`tests/desktop.mjs` uses real Electron with deterministic HTTPS fixtures. It checks actual UI account creation, two-account Cookie/LocalStorage isolation, no privileged remote bridge, sandbox/context isolation, draft and submitted prompts, profile/last-page restart persistence, account cleanup, API setting persistence and clean shutdown. Screenshots go to `test-results/` and CI artifacts. No live credentials or prompts are used.
+桌面测试使用真实 Electron 和离线 HTTPS fixture，覆盖账号 Cookie / LocalStorage 隔离、受限 IPC、窗口与快捷键、草稿与明确发送、任务并行、接管、恢复、回复路由和 Go 工具。测试截图保留在被忽略的 `test-results/` 中，不作为公开展示素材。
 
-## Manual acceptance
+README 图片通过 `scripts/readme-images.mjs` 在独立临时数据目录生成。仅使用虚构账号和离线示例内容，网页演示与实际服务界面可能不同；不读取用户已有浏览器资料。
 
-On a normal desktop, sign in to two real accounts, switch and restart, try downloads/new conversations, and submit a test prompt. Check each intended OAuth provider. Offline tests cannot establish login-provider restrictions, anti-bot challenges, or compatibility with a changed ChatGPT DOM. Production signing/notarization requires publisher credentials.
+更新测试覆盖版本比较、预发布过滤、请求去重、失败重试与无凭据请求。更新通知需要公开 GitHub Release，可由设置中手动触发检查。
+
+## 实际边界
+
+离线 fixture 无法证明实时 ChatGPT 的所有登录方式、模型、工具和 DOM 变体均可用。没有向真实账号发送发布测试消息。macOS / Linux 安装和签名未纳入本次 Windows 正式版验证。代码签名尚未配置。

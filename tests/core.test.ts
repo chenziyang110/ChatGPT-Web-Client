@@ -5,6 +5,7 @@ import path from 'node:path';
 import { Database } from '../src/core/storage/Database';
 import { AccountManager } from '../src/core/account/AccountManager';
 import { SessionManager } from '../src/core/session/SessionManager';
+import { ConversationManager } from '../src/core/conversation/ConversationManager';
 import { AgentGateway, parseTask } from '../src/core/agent/AgentGateway';
 import { Workspace, type BrowserAdapter } from '../src/core/Workspace';
 import { chatUrl, isAccountNavigation } from '../src/core/validation';
@@ -78,7 +79,7 @@ test('prompt submission is opt-in and the task protocol does not accept arbitrar
   assert.deepEqual(parseTask({ type: 'fill', selector: '#prompt', text: '' }), { type: 'fill', selector: '#prompt', text: '' });
 });
 
-test('queue runs in FIFO order, records failures, and does not corrupt cancelled tasks', async () => {
+test('queue isolates failures and does not corrupt cancelled tasks', async () => {
   const db = new Database(':memory:');
   const order: string[] = [];
   const gateway = new AgentGateway(db, async (id, _input, signal) => {
@@ -95,11 +96,13 @@ test('queue runs in FIFO order, records failures, and does not corrupt cancelled
   const third = gateway.createTask('fail', { type: 'snapshot' });
   await eventually(() => gateway.get(first.id).status === 'running');
   gateway.cancel(first.id);
-  await eventually(() => gateway.get(third.id).status === 'failed');
+  await eventually(() => gateway.get(third.id).status === 'waiting_user');
   assert.deepEqual(order, ['cancel', 'ok', 'fail']);
   assert.equal(gateway.get(first.id).status, 'cancelled');
   assert.equal(gateway.get(second.id).status, 'done');
   assert.equal(gateway.get(third.id).error, 'Fixture failure');
+  gateway.cancel(third.id);
+  await eventually(() => gateway.runningAccounts().length === 0);
   gateway.removeHistory();
   assert.deepEqual(gateway.listTasks(), []);
   await gateway.stop(); db.close();
@@ -126,7 +129,7 @@ test('workspace refuses unconfirmed deletion and clears the right profile before
     navigate: async () => {}, control: () => {}, page: () => null
   };
   const gateway = new AgentGateway(db, async () => ({}), () => {});
-  const workspace = new Workspace(accounts, gateway, browser, () => {}, () => ({ enabled: false, endpoint: null, discoveryFile: '' }));
+  const workspace = new Workspace(accounts, gateway, browser, () => {}, () => ({ enabled: false, endpoint: null, discoveryFile: '' }), new ConversationManager(db));
   const first = await workspace.call('accounts.create', { name: 'Personal' }) as { id: string };
   const second = await workspace.call('accounts.create', { name: 'Work' }) as { id: string };
   await assert.rejects(workspace.call('accounts.remove', { id: second.id, confirmName: 'Wrong' }));
@@ -155,4 +158,42 @@ test('history retention never evicts a running task when cancelled tasks accumul
   release();
   await eventually(() => gateway.get(active.id).status === 'done');
   await gateway.stop(); db.close();
+});
+
+test('confirmed account deletion cancels unsent waiting and queued tasks without affecting another account', async () => {
+  const db = new Database(':memory:'); const accounts = new AccountManager(db);
+  const account = accounts.create('Example Personal'); const other = accounts.create('Example Work');
+  const removed: string[] = [];
+  const gateway = new AgentGateway(db, async () => { throw new Error('COMPOSER_NOT_READY'); }, () => {});
+  const workspace = new Workspace(accounts, gateway, { activate: () => {}, remove: async id => { removed.push(id); }, navigate: async () => {}, control: () => {}, page: () => null }, () => {},
+    () => ({ enabled: false, endpoint: null, discoveryFile: '' }), new ConversationManager(db));
+  try {
+    const blocked = gateway.createTask(account.id, { type: 'prompt', prompt: 'Unsent', submit: true }, { targetUrl: 'https://chatgpt.com/c/a' });
+    await eventually(() => gateway.get(blocked.id).status === 'waiting_user' && !gateway.isRunning(account.id));
+    const queued = gateway.createTask(account.id, { type: 'snapshot' }, { targetUrl: 'https://chatgpt.com/c/a' });
+    gateway.pause(other.id);
+    const unrelated = gateway.createTask(other.id, { type: 'snapshot' }, { targetUrl: 'https://chatgpt.com/c/b' });
+    await assert.rejects(workspace.call('accounts.remove', { id: account.id, confirmName: 'wrong' }));
+    assert.equal(gateway.get(blocked.id).status, 'waiting_user'); assert.equal(gateway.get(queued.id).status, 'pending');
+    await workspace.call('accounts.remove', { id: account.id, confirmName: account.name });
+    assert.deepEqual(removed, [account.id]); assert.deepEqual(accounts.list().map(item => item.id), [other.id]);
+    assert.equal(gateway.listTasks().some(task => task.accountId === account.id), false);
+    assert.equal(gateway.get(unrelated.id).status, 'pending');
+  } finally { await gateway.stop(); db.close(); }
+});
+
+test('deletion refuses unresolved sends before cancelling any queued work', async () => {
+  const db = new Database(':memory:'); const accounts = new AccountManager(db); const account = accounts.create('Review');
+  let wiped = false;
+  const gateway = new AgentGateway(db, async (_id, _input, _signal, context) => { context.intent(); throw new Error('Lost acknowledgement'); }, () => {});
+  const workspace = new Workspace(accounts, gateway, { activate: () => {}, remove: async () => { wiped = true; }, navigate: async () => {}, control: () => {}, page: () => null }, () => {},
+    () => ({ enabled: false, endpoint: null, discoveryFile: '' }), new ConversationManager(db));
+  try {
+    const sent = gateway.createTask(account.id, { type: 'prompt', prompt: 'Sent once', submit: true }, { targetUrl: 'https://chatgpt.com/c/a' });
+    await eventually(() => gateway.get(sent.id).status === 'uncertain' && !gateway.isRunning(account.id));
+    const queued = gateway.createTask(account.id, { type: 'snapshot' }, { targetUrl: 'https://chatgpt.com/c/a' });
+    await assert.rejects(workspace.call('accounts.remove', { id: account.id, confirmName: account.name }), /先在任务中心核对/);
+    assert.equal(wiped, false); assert.equal(accounts.get(account.id).id, account.id);
+    assert.equal(gateway.get(queued.id).status, 'pending'); assert.equal(gateway.get(sent.id).resolvedAt, undefined);
+  } finally { await gateway.stop(); db.close(); }
 });

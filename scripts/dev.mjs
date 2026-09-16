@@ -2,6 +2,7 @@ import { build } from 'esbuild';
 import { createServer } from 'vite';
 import { spawn } from 'node:child_process';
 import electron from 'electron';
+import './build-agent.mjs';
 await Promise.all(['main', 'preload'].map(name => build({
   entryPoints: [`src/main/${name}.ts`], outfile: `dist-electron/${name}.cjs`,
   bundle: true, platform: 'node', target: 'node24', format: 'cjs', external: ['electron'], sourcemap: true

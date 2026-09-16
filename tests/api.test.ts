@@ -65,3 +65,37 @@ test('CLI uses private discovery and returns machine-readable JSON through the r
     assert.equal(output.includes('token'), false);
   } finally { await api.stop(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('CLI targets account/conversation, returns the same task on retry, and client timeout does not cancel', async () => {
+  const dir = mkdtempSync(path.resolve('.test-cli-routing-'));
+  const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+  let state = 'pending';
+  const api = new LocalApi(path.join(dir, 'agent-runtime.json'), async (method, params) => {
+    requests.push({ method, params });
+    return { id: 'fixed-task', accountId: 'work', status: state, input: params.input };
+  });
+  const run = async (args: string[]) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', '--data-dir', dir, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '', errors = '';
+    child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { errors += chunk; });
+    const code = await new Promise(resolve => child.on('close', resolve));
+    return { code, output, errors };
+  };
+  try {
+    await api.start();
+    const flags = ['prompt', '--account', 'work', '--conversation', 'daily', '--text', '你好', '--submit', '--idempotency-key', 'request-001'];
+    const first = await run(flags); const retry = await run(flags);
+    assert.equal(first.code, 0, first.errors); assert.equal(JSON.parse(first.output).id, JSON.parse(retry.output).id);
+    assert.deepEqual(requests[0], { method: 'tasks.create', params: { accountId: 'work', input: { type: 'prompt', prompt: '你好', submit: true }, conversation: 'daily', idempotencyKey: 'request-001' } });
+    const timed = await run([...flags, '--wait', '--wait-timeout', '1']);
+    assert.equal(timed.code, 3); assert.match(timed.errors, /task continues/); assert.equal(JSON.parse(timed.output).id, 'fixed-task');
+    assert.equal(requests.some(item => item.method === 'tasks.cancel'), false);
+    state = 'waiting_user';
+    const beforeWaiting = requests.length;
+    const humanWait = await run(['task', 'wait', 'fixed-task', '--wait-timeout', '1']);
+    assert.equal(humanWait.code, 3); assert.equal(JSON.parse(humanWait.output).status, 'waiting_user');
+    assert.ok(requests.slice(beforeWaiting).every(item => ['tasks.get', 'tasks.wait'].includes(item.method)), 'Waiting for a human only reads the original task');
+    const resume = await run(['queue', 'resume', '--account', 'work', '--acknowledged']);
+    assert.equal(resume.code, 0); assert.deepEqual(requests.at(-1), { method: 'queues.resume', params: { accountId: 'work', acknowledged: true } });
+  } finally { await api.stop(); rmSync(dir, { recursive: true, force: true }); }
+});

@@ -3,6 +3,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmodSync, mkdirSync, renameSync, writeFileSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { AppError, record, text } from '../validation';
+import { agentHelp, agentHelpHtml } from './AgentHelp';
 export type RpcHandler = (method: string, params: Record<string, unknown>) => Promise<unknown>;
 export interface Discovery { endpoint: string; token: string; pid: number; version: 1 }
 
@@ -41,8 +42,15 @@ export class LocalApi {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     const reply = (status: number, body: unknown) => { if (!res.destroyed) { res.statusCode = status; res.end(JSON.stringify(body)); } };
     try {
-      // No browser clients, cross-origin requests or DNS rebinding hosts.
-      if (req.headers.origin || req.headers['sec-fetch-site'] || req.headers.host !== new URL(this.endpoint!).host) {
+      if (req.headers.host !== new URL(this.endpoint!).host) throw new AppError('Unexpected host', 403);
+      if (req.method === 'GET' && ['/help.html', '/help.json'].includes(req.url ?? '')) {
+        res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+        if (req.url === '/help.json') reply(200, agentHelp);
+        else { res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(agentHelpHtml); }
+        return;
+      }
+      // Documentation is public; operations reject browser origins and require a token.
+      if (req.headers.origin || req.headers['sec-fetch-site']) {
         throw new AppError('Browser origins and unexpected hosts are not allowed', 403);
       }
       const received = Buffer.from(req.headers.authorization ?? '');

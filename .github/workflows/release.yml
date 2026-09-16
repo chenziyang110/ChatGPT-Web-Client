@@ -1,0 +1,55 @@
+name: Release Windows
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag (v1.0.0)
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: release-windows
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agent-cli/go.mod
+          cache: false
+      - name: Validate version
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: node -e "const p=require('./package.json'); if(process.env.RELEASE_TAG !== 'v'+p.version || !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(process.env.RELEASE_TAG)) process.exit(1)"
+      - run: npm ci
+      - run: npm audit
+      - run: npm test
+      - run: npm run test:agent
+      - run: npm run build
+      - run: npm run test:desktop
+      - run: npx electron-builder --win nsis --x64 --publish never
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -LiteralPath release -Filter '*.exe'
+          if ($installer.Count -ne 1) { throw 'Expected one installer' }
+          $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($installer.Name)" | Set-Content -Encoding utf8 release/SHA256SUMS.txt
+          gh release create $env:RELEASE_TAG --verify-tag --draft --title "ChatGPT Web Client $env:RELEASE_TAG" --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release; existing releases are never overwritten' }
+          gh release upload $env:RELEASE_TAG $installer.FullName release/SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Upload failed; release remains draft' }
+          gh release edit $env:RELEASE_TAG --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish release' }

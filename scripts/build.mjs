@@ -1,6 +1,7 @@
 import { build } from 'esbuild';
 import { build as viteBuild } from 'vite';
 import { rm } from 'node:fs/promises';
+import './build-agent.mjs';
 await rm('dist-electron', { recursive: true, force: true });
 await Promise.all([
   build({ entryPoints: ['src/main/main.ts'], outfile: 'dist-electron/main.cjs', bundle: true, platform: 'node', target: 'node24', format: 'cjs', external: ['electron'] }),

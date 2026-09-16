@@ -1,6 +1,7 @@
 node_modules/
 dist/
 dist-electron/
+dist-agent/
 *.log
 .DS_Store
 
@@ -17,3 +18,13 @@ coverage/
 test-results/
 *.sqlite*
 agent-runtime.json
+
+.test-*/
+.demo-*/
+**/Partitions/
+**/Cookies
+**/Local Storage/
+**/Session Storage/
+*.pem
+*.p12
+*.pfx

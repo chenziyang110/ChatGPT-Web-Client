@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-web-client",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Local-first desktop AI workspace with isolated accounts and an agent gateway",
   "private": true,
   "type": "module",
@@ -15,8 +15,11 @@
     "build": "npm run typecheck && node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
-    "test:desktop": "node tests/desktop.mjs",
+    "test:desktop": "node tests/desktop.mjs && node tests/parallel-desktop.mjs && node tests/agent-target-desktop.mjs && node tests/reply-routing-desktop.mjs && node tests/updates-desktop.mjs",
+    "test:parallel": "node tests/parallel-desktop.mjs",
     "cli": "node --import tsx src/cli/index.ts",
+    "build:agent": "node scripts/build-agent.mjs",
+    "test:agent": "cd agent-cli && go test ./...",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder"
   },
@@ -33,18 +36,29 @@
     ],
     "npmRebuild": false,
     "mac": {
+      "icon": "src/renderer/public/brand/workspace.png",
       "target": "dmg",
       "category": "public.app-category.productivity"
     },
     "win": {
+      "extraFiles": [
+        {
+          "from": "dist-agent/chatgpt-agent.exe",
+          "to": "chatgpt-agent.exe"
+        }
+      ],
+      "icon": "src/renderer/public/brand/workspace.ico",
       "target": "nsis"
     },
     "linux": {
+      "icon": "src/renderer/public/brand/workspace.png",
       "target": "AppImage",
       "category": "Utility"
-    }
+    },
+    "artifactName": "ChatGPT-Web-Client-${version}-${os}-${arch}.${ext}"
   },
   "dependencies": {
+    "@radix-ui/react-select": "2.3.7",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
@@ -60,5 +74,10 @@
     "tsx": "4.23.13",
     "typescript": "5.9.3",
     "vite": "8.3.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chenziyang110/ChatGPT-Web-Client.git"
+  },
+  "author": "ChatGPT Web Client contributors"
 }

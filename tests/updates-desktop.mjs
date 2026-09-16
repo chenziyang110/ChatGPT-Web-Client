@@ -1,0 +1,31 @@
+import { _electron as electron } from 'playwright';
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import path from 'node:path';
+const version = JSON.parse(await readFile('package.json', 'utf8')).version;
+const directory = await mkdtemp(path.resolve('.test-updates-'));
+const env = { ...process.env, WORKSPACE_USER_DATA: directory };
+delete env.ELECTRON_RUN_AS_NODE; delete env.WORKSPACE_DEV_URL;
+const options = process.argv[2] ? { executablePath: path.resolve(process.argv[2]), args: [] } : { args: ['--no-sandbox', '.'] };
+let desktop = await electron.launch({ ...options, env });
+try {
+  const page = await desktop.firstWindow();
+  await page.waitForFunction(() => !!window.workspace);
+  const rpc = (method, params = {}) => page.evaluate(({method,params}) => window.workspace.call(method,params),{method,params});
+  assert.equal((await rpc('updates.status')).current, version);
+  await rpc('updates.configure', { enabled: false });
+  await assert.rejects(() => rpc('updates.configure', { enabled: 'yes' }), /boolean/);
+  await page.getByRole('button', { name: /设置与集成/ }).click();
+  await page.getByText(`当前版本 ${version}`, { exact: true }).waitFor();
+  assert.equal(await page.getByLabel('自动检查新版本').isChecked(), false);
+  await page.getByRole('button', { name: '检查更新', exact: true }).waitFor();
+  await page.getByRole('button', { name: '前往官方下载 ↗', exact: true }).waitFor();
+  const data = await desktop.evaluate(({ app }) => app.getPath('userData'));
+  assert.equal(data, directory);
+  await desktop.close();
+  desktop = await electron.launch({ ...options, env });
+  const restarted = await desktop.firstWindow();
+  await restarted.waitForFunction(() => !!window.workspace);
+  assert.equal((await restarted.evaluate(() => window.workspace.call('updates.status'))).enabled, false);
+  console.log('Update desktop smoke passed: version, settings IPC, controls, isolated packaged/development data.');
+} finally { await desktop.close(); }

@@ -1,0 +1,31 @@
+name: Verify published Mac package
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Inspect released ARM64 bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=https://github.com/chenziyang110/ChatGPT-Web-Client/releases/download/v1.1.0
+          curl -fL "$base/ChatGPT-Web-Client-1.1.0-mac-arm64.zip" -o app.zip
+          curl -fL "$base/SHA256SUMS.txt" -o SHA256SUMS.txt
+          expected=$(grep 'ChatGPT-Web-Client-1.1.0-mac-arm64.zip' SHA256SUMS.txt | cut -d' ' -f1)
+          echo "$expected  app.zip" | shasum -a 256 -c -
+          ditto -x -k app.zip extracted
+          app="extracted/ChatGPT Web Client.app"
+          codesign --display --verbose=4 "$app" || true
+          codesign --verify --deep --strict --verbose=4 "$app" || true
+          spctl --assess --type execute --verbose=4 "$app" || true
+          node tests/updates-desktop.mjs "$app/Contents/MacOS/ChatGPT Web Client"

@@ -11,7 +11,7 @@ export interface TaskAttention {
   title: string; detail: string; choices: Array<{ id: TaskChoice; label: string }>;
 }
 export interface BrowserPreview { accountId: string; pageId?: string; image: string; capturedAt: number }
-export interface BrowserPage { id: string; accountId: string; conversationId?: string; url: string; title: string; selected: boolean; locked: boolean; taskId?: string }
+export interface BrowserPage { id: string; accountId: string; conversationId?: string; url: string; title: string; selected: boolean; locked: boolean; sleeping?: boolean; taskId?: string }
 export interface SessionState { accountId: string; url: string; updatedAt: number }
 export type TaskInput =
   | { type: 'navigate'; url: string }

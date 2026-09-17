@@ -12,13 +12,34 @@ import type { ShortcutSettings } from '../core/settings/ShortcutSettings';
 import type { ExecutionContext } from '../core/agent/AgentGateway';
 import type { ConversationManager } from '../core/conversation/ConversationManager';
 
+interface PageOwner {
+  accountId: string;
+  conversationId?: string;
+  url: string;
+  title: string;
+  lastUrl?: string;
+  idleSince: number;
+  hasDraft: boolean;
+  busy: boolean;
+  hibernationReady: boolean;
+  activityKey?: string;
+}
+
+const DEFAULT_PAGE_IDLE_MS = 60_000;
+const MONITOR_INTERVAL_MS = 1_500;
+
+function pageIdleMs(): number {
+  const value = Number(process.env.WORKSPACE_PAGE_IDLE_MS);
+  return Number.isSafeInteger(value) && value >= 100 && value <= 60 * 60 * 1000 ? value : DEFAULT_PAGE_IDLE_MS;
+}
+
 export class BrowserRuntime {
   private readonly views = new Map<string, WebContentsView>();
   private readonly errors = new Map<string, string>();
   private readonly popups = new Map<string, Set<BrowserWindow>>();
   private activeId: string | null = null;
   private locks: AgentTask[] = [];
-  private readonly owners = new Map<string, { accountId: string; conversationId?: string; lastUrl?: string }>();
+  private readonly owners = new Map<string, PageOwner>();
   private readonly selected = new Map<string, string>();
   private readonly taskPages = new Map<string, string>();
   private readonly replyReader = new ReplyReader();
@@ -30,12 +51,15 @@ export class BrowserRuntime {
   private readonly observing = new Set<string>();
   private readonly previews = new Map<string, Promise<BrowserPreview | null>>();
   private readonly monitor: ReturnType<typeof setInterval>;
+  private readonly idlePageMs = pageIdleMs();
   constructor(private readonly window: BrowserWindow, private readonly accounts: AccountManager,
     private readonly sessions: SessionManager, private readonly changed: () => void, private readonly conversations: ConversationManager,
     private readonly shortcuts: ShortcutSettings, private readonly notifications: ConversationNotifications) {
     window.on('resize', () => this.layout());
     this.observer = new ConversationActivityObserver(notifications, true);
-    this.monitor = setInterval(() => { for (const [id, view] of this.views) void this.observe(id, view); }, 750);
+    this.monitor = setInterval(() => {
+      for (const [id, view] of this.views) void this.observe(id, view).finally(() => this.hibernateIfIdle(id, view));
+    }, MONITOR_INTERVAL_MS);
   }
   private title(id: string, url: string, fallback: string): string {
     return this.conversations.list(id).find(item => item.url === url)?.alias ?? fallback;
@@ -46,15 +70,23 @@ export class BrowserRuntime {
     const owner = this.owners.get(id); if (!owner) return;
     const url = contents.getURL();
     if (owner.lastUrl && owner.lastUrl !== url) this.observer.disconnected(owner.accountId, owner.lastUrl);
-    owner.lastUrl = url;
-    if (!isChatUrl(url)) return;
+    owner.lastUrl = url; owner.url = url;
+    if (!isChatUrl(url)) { owner.hibernationReady = false; return; }
     this.observing.add(id);
     try {
       const snapshot = await contents.executeJavaScript(`(${pageOperation.toString()})({kind:'activity'})`) as ActivitySnapshot;
       if (this.closing || this.views.get(id) !== view || contents.isDestroyed() || contents.getURL() !== url) return;
       snapshot.title = this.title(owner.accountId, snapshot.url, snapshot.title);
+      const activityKey = JSON.stringify([snapshot.url, snapshot.busy, snapshot.hasDraft, snapshot.user?.id,
+        snapshot.assistant?.id, snapshot.assistant?.text.length, snapshot.lastRole]);
+      if (owner.activityKey !== activityKey) owner.idleSince = Date.now();
+      Object.assign(owner, { url: snapshot.url, title: snapshot.title || owner.title, hasDraft: !!snapshot.hasDraft,
+        busy: snapshot.busy, hibernationReady: snapshot.editor && !snapshot.error, activityKey });
       this.observer.observe(owner.accountId, snapshot);
-    } catch { if (!this.closing && this.views.get(id) === view) this.observer.disconnected(owner.accountId, url); }
+    } catch {
+      owner.hibernationReady = false;
+      if (!this.closing && this.views.get(id) === view) this.observer.disconnected(owner.accountId, url);
+    }
     finally { this.observing.delete(id); }
   }
   private configureSession(partition: string): void {
@@ -102,6 +134,7 @@ export class BrowserRuntime {
   }
   private savePage(id: string, url: string): void {
     const owner = this.owners.get(id); if (!owner) return;
+    owner.url = url;
     if (this.selected.get(owner.accountId) === id) this.sessions.save(owner.accountId, url);
     // A manually opened ordinary conversation is indexed for the same queue key.
     if (!owner.conversationId) {
@@ -115,45 +148,62 @@ export class BrowserRuntime {
   }
   private createView(accountId: string, url: string, conversationId?: string): string {
     if ([...this.owners.values()].filter(owner => owner.accountId === accountId).length >= 20) throw new AppError('此账号已打开 20 个会话，请关闭不再使用的会话后继续', 409);
-    const id = randomUUID(); const account = this.accounts.get(accountId);
+    const id = randomUUID();
+    this.accounts.get(accountId);
+    this.owners.set(id, { accountId, conversationId, url, title: '新会话', idleSince: Date.now(),
+      hasDraft: false, busy: false, hibernationReady: false });
+    this.openView(id);
+    return id;
+  }
+  private openView(id: string): WebContentsView {
+    const existing = this.views.get(id);
+    if (existing && !existing.webContents.isDestroyed()) return existing;
+    const owner = this.owners.get(id);
+    if (!owner) throw new AppError('会话页面不存在', 404);
+    const account = this.accounts.get(owner.accountId);
     this.configureSession(account.partition);
     const view = new WebContentsView({ webPreferences: { partition: account.partition,
-      nodeIntegration: false, contextIsolation: true, sandbox: true, webviewTag: false, backgroundThrottling: false } });
+      nodeIntegration: false, contextIsolation: true, sandbox: true, webviewTag: false, backgroundThrottling: true } });
     view.setBounds({ x: 0, y: 0, width: Math.max(1, Math.round(this.bounds?.width ?? 1000)), height: Math.max(1, Math.round(this.bounds?.height ?? 700)) });
-    this.views.set(id, view); this.owners.set(id, { accountId, conversationId });
+    this.views.set(id, view);
     bindShortcuts(view.webContents, this.window, this.shortcuts);
     this.secure(view.webContents, id, account.partition);
     const update = () => { if (!view.webContents.isDestroyed()) { this.layout(); this.changed(); } };
-    view.webContents.on('did-start-loading', () => { this.errors.delete(id); update(); });
-    view.webContents.on('did-stop-loading', update);
-    view.webContents.on('page-title-updated', update);
+    view.webContents.on('did-start-loading', () => { owner.hibernationReady = false; this.errors.delete(id); update(); });
+    view.webContents.on('did-stop-loading', () => { owner.title = view.webContents.getTitle() || owner.title; update(); });
+    view.webContents.on('page-title-updated', (_event, title) => { owner.title = title || owner.title; update(); });
     const save = (url: string) => { if (!this.closing && this.views.has(id) && isChatUrl(url)) this.savePage(id, url); update(); };
     view.webContents.on('did-navigate', (_event, url) => save(url));
     view.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => { if (isMainFrame) save(url); });
     view.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
       if (isMainFrame && code !== -3) { this.errors.set(id, `${description} (${code})`); update(); }
     });
-    view.webContents.on('render-process-gone', (_event, details) => { this.errors.set(id, `Page stopped: ${details.reason}. Reload to continue.`); update(); });
-    void view.webContents.loadURL(url).catch(() => { /* did-fail-load reports the error to the UI. */ });
-    return id;
+    view.webContents.on('render-process-gone', (_event, details) => {
+      if (this.views.get(id) === view) this.errors.set(id, `Page stopped: ${details.reason}. Reload to continue.`);
+      update();
+    });
+    void view.webContents.loadURL(owner.url).catch(() => { /* did-fail-load reports the error to the UI. */ });
+    return view;
   }
   private pageId(accountId: string): string | undefined { return this.selected.get(accountId); }
   private taskPage(task: AgentTask): string | undefined {
     const assigned = this.taskPages.get(task.id);
-    if (assigned && this.views.has(assigned)) return assigned;
+    if (assigned && this.owners.has(assigned)) return assigned;
     const target = task.conversationId ? this.conversations.get(task.accountId, task.conversationId).url : task.targetUrl;
     return [...this.owners].find(([id, owner]) => owner.accountId === task.accountId &&
-      (task.conversationId ? owner.conversationId === task.conversationId || !!target && this.views.get(id)?.webContents.getURL() === target : this.views.get(id)?.webContents.getURL() === target))?.[0];
+      (task.conversationId ? owner.conversationId === task.conversationId || !!target && owner.url === target : owner.url === target))?.[0];
   }
   private isLocked(id: string): boolean {
     const owner = this.owners.get(id); if (!owner) return false;
     return this.locks.some(task => task.accountId === owner.accountId && (this.taskPage(task) === id || !!task.conversationId && task.conversationId === owner.conversationId));
   }
   pages(): BrowserPage[] {
-    return [...this.views].filter(([, view]) => !view.webContents.isDestroyed()).map(([id, view]) => {
-      const owner = this.owners.get(id)!;
-      return { id, accountId: owner.accountId, conversationId: owner.conversationId, url: view.webContents.getURL(),
-        title: view.webContents.getTitle() || '新会话', selected: this.selected.get(owner.accountId) === id, locked: this.isLocked(id),
+    return [...this.owners].map(([id, owner]) => {
+      const contents = this.views.get(id)?.webContents;
+      const live = contents && !contents.isDestroyed();
+      return { id, accountId: owner.accountId, conversationId: owner.conversationId,
+        url: live ? contents.getURL() || owner.url : owner.url, title: live ? contents.getTitle() || owner.title : owner.title,
+        selected: this.selected.get(owner.accountId) === id, locked: this.isLocked(id), sleeping: !live,
         taskId: this.locks.find(task => this.taskPage(task) === id)?.id };
     });
   }
@@ -163,10 +213,14 @@ export class BrowserRuntime {
     const id = pageId ?? this.pageId(accountId) ?? this.createView(accountId, this.sessions.restore(accountId)?.url ?? HOME_URL);
     const restoreFocus = !!(this.activeId && this.views.get(this.activeId)?.webContents.isFocused());
     for (const windows of this.popups.values()) for (const popup of windows) popup.hide();
-    if (this.activeId && this.views.has(this.activeId)) this.window.contentView.removeChildView(this.views.get(this.activeId)!);
-    const view = this.views.get(id)!;
+    if (this.activeId && this.activeId !== id && this.views.has(this.activeId)) {
+      const previous = this.owners.get(this.activeId); if (previous) previous.idleSince = Date.now();
+      this.window.contentView.removeChildView(this.views.get(this.activeId)!);
+    }
+    const view = this.openView(id);
+    this.owners.get(id)!.idleSince = Date.now();
     this.selected.set(accountId, id); this.activeId = id;
-    this.window.contentView.addChildView(view);
+    if (!this.window.contentView.children.includes(view)) this.window.contentView.addChildView(view);
     for (const popup of this.popups.get(id) ?? []) { if (!this.isLocked(id) && this.visible) popup.show(); }
     if (isChatUrl(view.webContents.getURL())) this.sessions.save(accountId, view.webContents.getURL());
     this.layout();
@@ -206,8 +260,8 @@ export class BrowserRuntime {
   async response(task: AgentTask, url?: string): Promise<TaskResponse> {
     const bound = task.conversationId ? this.conversations.get(task.accountId, task.conversationId).url : task.targetUrl;
     if (bound && url && bound !== url) return { taskId: task.id, state: 'unavailable', reason: '指定地址与原任务不一致' };
-    const id = url ? [...this.owners].find(([id, owner]) => owner.accountId === task.accountId && replyPageUrl(this.views.get(id)?.webContents.getURL() ?? '') === url)?.[0] : this.taskPage(task);
-    const contents = id && this.owners.get(id)?.accountId === task.accountId ? this.views.get(id)?.webContents : undefined;
+    const id = url ? [...this.owners].find(([, owner]) => owner.accountId === task.accountId && replyPageUrl(owner.url) === url)?.[0] : this.taskPage(task);
+    const contents = id && this.owners.get(id)?.accountId === task.accountId ? this.openView(id).webContents : undefined;
     if (!contents || contents.isDestroyed()) return { taskId: task.id, state: 'unavailable', reason: '请在原账号打开已发送的咨询页面，再用 resume TASK_ID --url 会话地址读取' };
     if (contents.isLoading()) return { taskId: task.id, state: 'reading' };
     const page = await contents.executeJavaScript(`(${pageOperation.toString()})({kind:'inspect'})`) as Page;
@@ -218,7 +272,7 @@ export class BrowserRuntime {
     this.accounts.get(accountId);
     const id = pageId ?? this.pageId(accountId);
     if (id && this.owners.get(id)?.accountId !== accountId) throw new AppError('会话页面不属于此账号', 404);
-    const contents = id ? this.views.get(id)?.webContents : undefined;
+    const contents = id ? this.openView(id).webContents : undefined;
     const base = { accountId, url: this.url(accountId) ?? HOME_URL, title: '', editor: false, draftLength: 0, busy: false };
     if (!contents || contents.isDestroyed()) return { ...base, readiness: 'not_open', suggestion: '请先在客户端打开此账号，再检查页面；队列未改变' };
     if (contents.isLoading()) return { ...base, readiness: 'loading', suggestion: '页面正在加载，请稍后再次诊断' };
@@ -253,7 +307,7 @@ export class BrowserRuntime {
   }
   async navigate(accountId: string, value: unknown): Promise<void> {
     const url = chatUrl(value);
-    const existing = [...this.owners].find(([id, owner]) => owner.accountId === accountId && this.views.get(id)?.webContents.getURL() === url)?.[0];
+    const existing = [...this.owners].find(([, owner]) => owner.accountId === accountId && owner.url === url)?.[0];
     const id = existing ?? this.createView(accountId, url);
     this.activate(accountId, id);
     const contents = this.views.get(id)!.webContents;
@@ -266,7 +320,7 @@ export class BrowserRuntime {
   control(accountId: string, action: string): void {
     const id = this.pageId(accountId); if (!id) return;
     if (this.isLocked(id)) throw new AppError('请先接管当前会话');
-    const contents = this.views.get(id)!.webContents;
+    const contents = this.openView(id).webContents;
     if (action === 'reload') contents.reload();
     else if (action === 'back' && contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
     else if (action === 'forward' && contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward();
@@ -287,25 +341,40 @@ export class BrowserRuntime {
   }
   private closeView(id: string): void {
     const owner = this.owners.get(id);
+    this.destroyView(id);
+    this.owners.delete(id); this.errors.delete(id);
+    for (const [taskId, pageId] of this.taskPages) if (pageId === id) this.taskPages.delete(taskId);
+    if (owner && this.selected.get(owner.accountId) === id) {
+      const next = [...this.owners].find(([, item]) => item.accountId === owner.accountId)?.[0];
+      if (next) this.selected.set(owner.accountId, next); else this.selected.delete(owner.accountId);
+    }
+  }
+  private destroyView(id: string): void {
+    const owner = this.owners.get(id);
     if (owner?.lastUrl) this.observer.disconnected(owner.accountId, owner.lastUrl);
+    if (owner) { owner.lastUrl = undefined; owner.hibernationReady = false; owner.activityKey = undefined; }
     for (const popup of this.popups.get(id) ?? []) popup.destroy();
     this.popups.delete(id);
     const view = this.views.get(id);
     if (view) {
       if (this.activeId === id) { this.window.contentView.removeChildView(view); this.activeId = null; }
+      this.views.delete(id);
       if (!view.webContents.isDestroyed()) view.webContents.close({ waitForBeforeUnload: false });
-      this.views.delete(id); this.owners.delete(id); this.errors.delete(id);
-      for (const [taskId, pageId] of this.taskPages) if (pageId === id) this.taskPages.delete(taskId);
-      if (owner && this.selected.get(owner.accountId) === id) {
-        const next = [...this.owners].find(([, item]) => item.accountId === owner.accountId)?.[0];
-        if (next) this.selected.set(owner.accountId, next); else this.selected.delete(owner.accountId);
-      }
     }
   }
+  private hibernateIfIdle(id: string, view: WebContentsView): void {
+    const owner = this.owners.get(id);
+    if (!owner || this.views.get(id) !== view || this.activeId === id || this.isLocked(id) || this.observing.has(id) ||
+      owner.hasDraft || owner.busy || !owner.hibernationReady || Date.now() - owner.idleSince < this.idlePageMs ||
+      view.webContents.isDestroyed() || view.webContents.isLoading() || !isChatUrl(view.webContents.getURL())) return;
+    this.destroyView(id);
+    this.changed();
+  }
   url(accountId: string): string | undefined {
-    const id = this.pageId(accountId); const contents = id ? this.views.get(id)?.webContents : undefined;
+    const id = this.pageId(accountId); const owner = id ? this.owners.get(id) : undefined;
+    const contents = id ? this.views.get(id)?.webContents : undefined;
     // An opening tab must never inherit the previous tab's persisted destination.
-    return contents && !contents.isDestroyed() ? contents.getURL() : undefined;
+    return contents && !contents.isDestroyed() ? contents.getURL() || owner?.url : owner?.url;
   }
   setLocked(tasks: AgentTask[]): void {
     this.locks = tasks;
@@ -325,7 +394,7 @@ export class BrowserRuntime {
     this.taskPages.set(task.id, pageId);
     this.selected.set(id, pageId);
     if (this.accounts.activeId() === id) this.activate(id, pageId);
-    const contents = this.views.get(pageId)!.webContents;
+    const contents = this.openView(pageId).webContents;
     try {
       const result = await new ChatGPTAdapter(contents, signal, context, this.conversations).execute(input);
       signal.throwIfAborted();

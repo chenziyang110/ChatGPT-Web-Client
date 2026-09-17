@@ -45,23 +45,30 @@ export function pageOperation(operation: Operation): unknown {
   const busy = [...document.querySelectorAll('[data-testid="stop-button"], [data-is-streaming="true"], [aria-busy="true"]')].some(visible);
   if (operation.kind === 'diagnose') return { url: location.href, title: document.title.slice(0, 120), readiness,
     editor: visible(editor), draftLength: draft.length, busy, documentReady: document.readyState };
-  const messages = [...document.querySelectorAll<HTMLElement>('[data-message-author-role]')].map((element, index) => {
+  const elements = [...document.querySelectorAll<HTMLElement>('[data-message-author-role]')];
+  const readMessage = (element: HTMLElement, index: number) => {
     const turn = element.closest('article, [data-testid^="conversation-turn-"]') ?? element;
     const body = element.dataset.messageAuthorRole === 'user'
       ? element.querySelector<HTMLElement>('[data-testid="collapsible-user-message-content"]') ?? element : element;
     return { id: element.dataset.messageId ?? `position:${index}`, role: element.dataset.messageAuthorRole ?? '',
       text: body.innerText.trim(), terminal: [...turn.querySelectorAll('[data-testid="copy-turn-action-button"]')].some(visible) };
-  });
+  };
   const error = [...document.querySelectorAll<HTMLElement>('[data-testid="conversation-error"], [data-testid="error-message"]')].find(visible)?.innerText;
+  if (operation.kind === 'activity') {
+    let user: Message | undefined; let assistant: Message | undefined;
+    for (let index = elements.length - 1; index >= 0 && (!user || !assistant); index--) {
+      const role = elements[index].dataset.messageAuthorRole;
+      if (role === 'user' && !user) user = readMessage(elements[index], index);
+      else if (role === 'assistant' && !assistant) assistant = readMessage(elements[index], index);
+    }
+    return { url: location.href, title: document.title.slice(0, 120), editor: visible(editor), busy,
+      hasDraft: !!draft.trim(), error, user: user && { id: user.id, text: user.text.slice(0, 32000) },
+      assistant: assistant && { ...assistant, text: assistant.text.slice(0, 64000) },
+      lastRole: elements.at(-1)?.dataset.messageAuthorRole };
+  }
+  const messages = elements.map(readMessage);
   const page: Page = { url: location.href, title: document.title.slice(0, 120), readiness, editor: visible(editor), draft, busy, messages, error };
   if (operation.kind === 'inspect') return page;
-  if (operation.kind === 'activity') {
-    const user = messages.filter(message => message.role === 'user').at(-1);
-    const assistant = messages.filter(message => message.role === 'assistant').at(-1);
-    return { url: page.url, title: document.title.slice(0, 120), editor: page.editor, busy, hasDraft: !!draft.trim(), error,
-      user: user && { id: user.id, text: user.text.slice(0, 32000) },
-      assistant: assistant && { ...assistant, text: assistant.text.slice(0, 64000) }, lastRole: messages.at(-1)?.role };
-  }
   if (operation.url !== location.href) throw new Error('TARGET_CHANGED: page changed before action');
   if (operation.kind === 'snapshot') return { url: location.href, title: document.title, text: (document.querySelector('main') ?? document.body).innerText.slice(0, 64000) };
   const anchor = JSON.stringify(messages.filter(message => message.role === 'user').map(message => [message.id, message.text]));

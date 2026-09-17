@@ -14,7 +14,8 @@ test('uncertain reply recovery matches the original question and waits for stabl
   assert.equal(reader.read(task, page, undefined, 10000).state, 'reading');
   page.messages[1].text = 'Complete answer';
   assert.equal(reader.read(task, page, undefined, 13000).state, 'reading');
-  assert.equal(reader.read(task, page, undefined, 16000).state, 'done');
+  assert.equal(reader.read(task, page, undefined, 18999).state, 'reading');
+  assert.equal(reader.read(task, page, undefined, 19000).state, 'done');
   assert.equal(task.status, undefined, 'Reading does not mutate the task');
   assert.equal(reader.read(task, { ...page, url: 'https://chatgpt.com/c/other' }, page.url).state, 'unavailable');
   assert.equal(reader.read({ ...task, submittedMessageId: 'different' }, page).state, 'unavailable');

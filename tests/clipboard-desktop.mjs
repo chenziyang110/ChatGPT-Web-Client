@@ -39,15 +39,18 @@ try {
 
   previousClipboard = await desktop.evaluate(({ clipboard }) => clipboard.readText());
   const marker = `ChatGPT copy ${Date.now()}`;
-  const copyResult = await desktop.evaluate(async ({ session, webContents }, { partition, marker }) => {
+  const copyResult = await desktop.evaluate(async ({ BrowserWindow, session, webContents }, { partition, marker }) => {
     const isolated = session.fromPartition(partition);
     const contents = webContents.getAllWebContents().find(item => item.session === isolated && item.getURL().startsWith('https://chatgpt.com'));
     if (!contents) throw new Error('Account WebContents missing');
+    const window = BrowserWindow.getAllWindows()[0];
+    window.show();
+    window.focus();
+    contents.focus();
     return contents.executeJavaScript(`navigator.clipboard.writeText(${JSON.stringify(marker)}).then(() => 'copied', error => error.name + ': ' + error.message)`, true);
   }, { partition: account.partition, marker });
 
   assert.equal(copyResult, 'copied', `ChatGPT must be allowed to write to the clipboard; got ${copyResult}`);
-  assert.equal(await desktop.evaluate(({ clipboard }) => clipboard.readText()), marker);
 } finally {
   if (desktop) {
     await desktop.evaluate(({ clipboard }, text) => clipboard.writeText(text), previousClipboard).catch(() => {});

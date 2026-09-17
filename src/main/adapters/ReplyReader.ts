@@ -1,4 +1,5 @@
 import type { AgentTask, TaskResponse } from '../../shared/types';
+import { COMPLETION_STABLE_MS } from '../../core/notifications/ConversationNotifications';
 import { replyPageUrl, type Page } from './ChatGPTAdapter';
 
 // Read-only recovery: match the submitted turn, then wait for a stable final answer.
@@ -23,6 +24,6 @@ export class ReplyReader {
     const sample = this.samples.get(task.id);
     if (!finished || sample?.fingerprint !== fingerprint) this.samples.set(task.id, { fingerprint, since: now });
     if (this.samples.size > 128) this.samples.delete(this.samples.keys().next().value!);
-    return { taskId: task.id, state: finished && sample?.fingerprint === fingerprint && now - sample.since >= 3000 ? 'done' : 'reading', result };
+    return { taskId: task.id, state: finished && sample?.fingerprint === fingerprint && now - sample.since >= COMPLETION_STABLE_MS ? 'done' : 'reading', result };
   }
 }

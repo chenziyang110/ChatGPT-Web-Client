@@ -1,4 +1,4 @@
-import { app, clipboard, dialog, globalShortcut, ipcMain, shell } from 'electron';
+import { app, clipboard, dialog, globalShortcut, ipcMain, Menu, Notification, shell, Tray } from 'electron';
 import { chmodSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -15,6 +15,7 @@ import { AppError, identifier, record, text } from '../core/validation';
 import { BrowserRuntime } from './BrowserRuntime';
 import { createWindow } from './window';
 import { registerBossKey } from './bossKey';
+import { notifyConversationCompleted, registerTray, revealWindow } from './DesktopIntegration';
 import type { AgentHandoff } from '../shared/types';
 
 import { UpdateChecker } from './UpdateChecker';
@@ -37,6 +38,13 @@ else void app.whenReady().then(async () => {
   const shortcuts = new ShortcutSettings(db);
   const win = createWindow(sessions, shortcuts);
   const bossKey = registerBossKey(globalShortcut, win);
+  const tray = new Tray(path.join(__dirname, `../dist/brand/workspace.${process.platform === 'win32' ? 'ico' : 'png'}`));
+  const trayRegistration = registerTray({
+    setToolTip: value => tray.setToolTip(value),
+    setContextMenu: menu => tray.setContextMenu(menu as Electron.Menu),
+    on: (_event, listener) => tray.on('click', listener),
+    destroy: () => tray.destroy()
+  }, items => Menu.buildFromTemplate(items), win, () => app.quit());
   const changed = () => { if (!stopping && !win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send('workspace:changed'); };
   const updates = new UpdateChecker(app.getVersion(), db.get<boolean>('autoCheckUpdates') !== false, changed);
   const checkUpdates = () => { if (app.isPackaged && updates.state.enabled && !stopping) void updates.check(); };
@@ -46,8 +54,24 @@ else void app.whenReady().then(async () => {
   win.on('resize', changed).on('maximize', changed).on('unmaximize', changed)
     .on('enter-full-screen', changed).on('leave-full-screen', changed)
     .on('focus', changed).on('blur', changed);
-  const notifications = new ConversationNotifications(db, changed);
-  const browser = new BrowserRuntime(win, accounts, sessions, changed, conversations, shortcuts, notifications);
+  let browser: BrowserRuntime;
+  let notifications: ConversationNotifications;
+  const openCompletedConversation = (notice: import('../shared/types').ConversationNotice) => {
+    revealWindow(win);
+    try {
+      accounts.activate(notice.accountId);
+      void browser.navigate(notice.accountId, notice.url)
+        .then(() => notifications.read(notice.accountId, notice.id, notice.token))
+        .catch(() => { /* The in-app unread receipt remains available if navigation fails. */ });
+    } catch { /* A removed account leaves no conversation to open. */ }
+  };
+  notifications = new ConversationNotifications(db, changed, notice => {
+    let accountName: string;
+    try { accountName = accounts.get(notice.accountId).name; } catch { return; }
+    notifyConversationCompleted({ supported: () => Notification.isSupported(),
+      create: options => new Notification(options) }, notice, accountName, openCompletedConversation);
+  });
+  browser = new BrowserRuntime(win, accounts, sessions, changed, conversations, shortcuts, notifications);
   const tasks = new AgentGateway(db, (id, input, signal, context) => browser.execute(id, input, signal, context), () => {
     browser.setLocked(tasks.lockedTasks()); changed();
   });
@@ -147,6 +171,7 @@ else void app.whenReady().then(async () => {
   const shutdown = async () => {
     stopping = true;
     bossKey.dispose();
+    trayRegistration.dispose();
     clearTimeout(updateStart); clearInterval(updateTimer);
     await apiChange;
     await api.stop();

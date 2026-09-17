@@ -14,10 +14,10 @@ test('simultaneous pages in one account retain independent running and completio
   observer.observe('a', generating, 0);
   observer.observe('a', { ...generating, url: 'https://chatgpt.com/c/b' }, 0);
   assert.equal(notices.list('a').filter(item => item.running).length, 2);
-  observer.observe('a', finished, 100); observer.observe('a', finished, 3200);
+  observer.observe('a', finished, 100); observer.observe('a', finished, 6100);
   assert.equal(notices.list('a').filter(item => item.running).length, 1);
-  observer.observe('a', { ...finished, url: 'https://chatgpt.com/c/b' }, 3300);
-  observer.observe('a', { ...finished, url: 'https://chatgpt.com/c/b' }, 6400);
+  observer.observe('a', { ...finished, url: 'https://chatgpt.com/c/b' }, 6200);
+  observer.observe('a', { ...finished, url: 'https://chatgpt.com/c/b' }, 12200);
   assert.equal(notices.list('a').filter(item => item.unread).length, 2);
   observer.disconnected('a', idle.url);
   assert.equal(notices.list('a').filter(item => item.unread).length, 2);
@@ -69,13 +69,38 @@ test('manual generation transitions to one unread conversation after a stable co
   const db = new Database(':memory:'); const notices = new ConversationNotifications(db, () => {}); const observer = new ConversationActivityObserver(notices);
   observer.observe('a', idle, 0); observer.observe('a', generating, 100);
   assert.equal(notices.list('a')[0].running, true); assert.equal(notices.list('a')[0].unread, false);
-  observer.observe('a', finished, 200); observer.observe('a', finished, 3199);
+  observer.observe('a', finished, 200); observer.observe('a', finished, 6199);
   assert.equal(notices.list('a')[0].unread, false);
-  observer.observe('a', finished, 3200);
+  observer.observe('a', finished, 6200);
   assert.equal(notices.list('a')[0].running, false); assert.equal(notices.list('a')[0].unread, true);
   const item = notices.list('a')[0]; notices.read('a', item.id, item.token);
   observer.observe('a', finished, 9000); notices.complete('a', idle.url, idle.title, item.token!);
   assert.equal(notices.list('a')[0].unread, false, 'task completion and page observer share one deduplication token'); db.close();
+});
+
+test('a temporary idle-looking gap does not complete a reply that resumes generating', () => {
+  const db = new Database(':memory:'); const notices = new ConversationNotifications(db, () => {}); const observer = new ConversationActivityObserver(notices);
+  observer.observe('a', idle, 0); observer.observe('a', generating, 100);
+  observer.observe('a', finished, 200); observer.observe('a', finished, 3200);
+  assert.equal(notices.list('a')[0].unread, false, 'A short tool or rendering gap is not completion');
+  observer.observe('a', generating, 3500);
+  observer.observe('a', finished, 4000); observer.observe('a', finished, 9999);
+  assert.equal(notices.list('a')[0].unread, false);
+  observer.observe('a', finished, 10000);
+  assert.equal(notices.list('a')[0].unread, true);
+  db.close();
+});
+
+test('temporary composer loss preserves an in-flight generation and historical user-only pages stay idle', () => {
+  const db = new Database(':memory:'); const notices = new ConversationNotifications(db, () => {}); const observer = new ConversationActivityObserver(notices);
+  observer.observe('a', idle, 0); observer.observe('a', generating, 100);
+  observer.observe('a', { ...generating, editor: false, busy: false }, 200);
+  observer.observe('a', finished, 300); observer.observe('a', finished, 6300);
+  assert.equal(notices.list('a')[0].unread, true, 'A transient editor re-render must not erase generation state');
+
+  observer.observe('b', { ...idle, user: { id: 'old-user', text: 'Old unanswered prompt' }, lastRole: 'user' }, 0);
+  assert.equal(notices.list('b')[0].running, false, 'Opening an old unanswered conversation is not a new generation');
+  db.close();
 });
 
 test('count is per conversation, separates accounts, and reading an old reply cannot consume a newer one', () => {
@@ -90,6 +115,16 @@ test('count is per conversation, separates accounts, and reading an old reply ca
   const current = notices.list('a')[0]; notices.read('a', current.id, current.token);
   assert.equal(notices.list('a').filter(item => item.unread).length, 1);
   notices.removeAccount('a'); assert.equal(notices.list().length, 1); db.close();
+});
+
+test('new completion tokens emit one native-notification event while duplicates stay silent', () => {
+  const db = new Database(':memory:'); const completed: string[] = [];
+  const notices = new ConversationNotifications(db, () => {}, notice => completed.push(`${notice.id}:${notice.token}`));
+  notices.complete('a', idle.url, 'Daily', 'first', 1);
+  notices.complete('a', idle.url, 'Daily', 'first', 2);
+  notices.complete('a', idle.url, 'Daily', 'second', 3);
+  assert.deepEqual(completed, ['a:a:first', 'a:a:second']);
+  db.close();
 });
 
 test('opening history, navigating away, errors and unsupported pages never produce completion notices', () => {
@@ -110,7 +145,7 @@ test('opening history, navigating away, errors and unsupported pages never produ
 
 test('fast reply between polls counts after a known empty page; stable text alone does not complete', () => {
   const db = new Database(':memory:'); const notices = new ConversationNotifications(db, () => {}); const observer = new ConversationActivityObserver(notices);
-  observer.observe('a', idle, 0); observer.observe('a', finished, 100); observer.observe('a', finished, 3100);
+  observer.observe('a', idle, 0); observer.observe('a', finished, 100); observer.observe('a', finished, 6100);
   assert.equal(notices.list('a')[0].unread, true);
   observer.observe('b', generating, 0);
   observer.observe('b', { ...finished, assistant: { ...finished.assistant!, terminal: false } }, 100);

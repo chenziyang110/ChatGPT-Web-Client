@@ -1,0 +1,15 @@
+{
+  "capturedAt": "2026-09-17T17:20:00+08:00",
+  "platform": "windows-x64",
+  "release": "v1.2.0",
+  "scenario": "Installed client with three accounts and no agent tasks running",
+  "metrics": {
+    "processes": 7,
+    "workingSetMiB": 2033.3,
+    "privateMemoryMiB": 1833.1,
+    "pages": 3,
+    "livePages": 2,
+    "sleepingPages": 1
+  },
+  "observation": "The selected ChatGPT page remains live when the native window is hidden because active pages are unconditionally excluded from hibernation."
+}

@@ -1,0 +1,16 @@
+{
+  "capturedAt": "2026-09-17T17:35:00+08:00",
+  "baseline": "memory-v1.2.0.json",
+  "scenario": "Selected ChatGPT page with no draft, generation, verification, or agent lock; native window hidden",
+  "metric": "liveAccountPages",
+  "before": 1,
+  "after": 0,
+  "deltaPercent": -100,
+  "restore": 1,
+  "safety": {
+    "draftPageRemainsLive": true,
+    "selectedUrlRestored": true
+  },
+  "evidence": "node tests/memory-desktop.mjs",
+  "note": "Installed-process MiB must be remeasured after packaging and installing the optimized build."
+}

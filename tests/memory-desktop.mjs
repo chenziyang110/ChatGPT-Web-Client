@@ -14,7 +14,7 @@ require(${JSON.stringify(path.resolve('dist-electron/main.cjs'))});
 
 let desktop;
 try {
-  const env = { ...process.env, WORKSPACE_USER_DATA: directory, WORKSPACE_PAGE_IDLE_MS: '100' };
+  const env = { ...process.env, WORKSPACE_USER_DATA: directory, WORKSPACE_PAGE_IDLE_MS: '100', WORKSPACE_HIDDEN_PAGE_IDLE_MS: '100' };
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.WORKSPACE_DEV_URL;
   desktop = await electron.launch({ args: ['--no-sandbox', bootstrap], env });
@@ -58,6 +58,16 @@ try {
   state = await rpc('workspace.status');
   assert.equal(state.pages.filter(page => page.accountId === account.id).length, 3, 'Sleeping tabs remain available');
 
+  const visiblePage = state.pages.find(page => page.accountId === account.id && page.selected);
+  assert.ok(visiblePage);
+  await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].hide());
+  await waitForLiveCount(account, 0);
+  assert.equal((await rpc('workspace.status')).pages.find(page => page.id === visiblePage.id)?.sleeping, true,
+    'A safe selected page hibernates while the native window is hidden');
+  await desktop.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.show(); window.focus(); });
+  await waitForLiveCount(account, 1);
+  assert.equal((await rpc('workspace.status')).page.url, visiblePage.url, 'Showing the window restores the selected page');
+
   await rpc('browser.select', { accountId: account.id, pageId: first.id });
   await shell.waitForFunction(async ({ accountId, pageId }) => {
     const current = await window.workspace.call('workspace.status');
@@ -70,6 +80,12 @@ try {
     const contents = BrowserWindow.getAllWindows()[0].contentView.children[0].webContents;
     await contents.executeJavaScript("document.querySelector('textarea').value = 'Keep this draft'; document.querySelector('textarea').dispatchEvent(new Event('input', { bubbles: true }))");
   });
+  await shell.waitForTimeout(2000);
+  await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].hide());
+  await shell.waitForTimeout(500);
+  assert.equal((await livePages(account)).some(page => page.url === 'https://chatgpt.com/c/one'), true,
+    'A hidden selected page with a draft stays resident');
+  await desktop.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.show(); window.focus(); });
   const second = (await rpc('workspace.status')).pages.find(page => page.url === 'https://chatgpt.com/c/two');
   await rpc('browser.select', { accountId: account.id, pageId: second.id });
   await waitForLiveCount(account, 2);

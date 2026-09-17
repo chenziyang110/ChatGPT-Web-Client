@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ShortcutAction, ShortcutConfig, WorkspaceBridge } from '../../shared/types';
-import { defaultShortcuts, shortcutActions, shortcutLabels, shortcutText } from '../../shared/shortcuts';
+import { bossKeyBinding, defaultShortcuts, shortcutActions, shortcutLabels, shortcutText } from '../../shared/shortcuts';
 export function ShortcutEditor({ bridge, config, busy, action }: { bridge: WorkspaceBridge; config?: ShortcutConfig; busy: boolean;
   action: (method: string, params?: Record<string, unknown>, after?: () => void) => Promise<void> }) {
   const [draft, setDraft] = useState(config ?? defaultShortcuts(bridge.platform));
@@ -28,12 +28,15 @@ export function ShortcutEditor({ bridge, config, busy, action }: { bridge: Works
     </div>;
   }
   return <div className="card setting-card shortcut-editor"><h3>键盘快捷键</h3><p>点击组合键后按下新按键。清除后停用该项，保存后立即生效。</p>
+    <div className="shortcut-row shortcut-fixed"><label htmlFor="shortcut-boss">老板键（全局）</label>
+      <input id="shortcut-boss" className="shortcut-recorder" readOnly disabled value={shortcutText(bossKeyBinding(bridge.platform))} />
+      <span>固定</span></div>
     {shortcutActions.slice(0, 3).map(row)}
     <details className="account-shortcut-details"><summary>直接切换账号</summary>{shortcutActions.slice(3).map(row)}</details>
     {captureError && <p role="alert" className="error-text">{captureError}</p>}
     <div className="shortcut-actions"><button className="secondary" disabled={busy} onClick={() => void action('settings.shortcuts.reset', {}, () => { setSaved(true); setDraft(defaultShortcuts(bridge.platform)); })}>恢复默认</button>
       <button className="primary" disabled={busy || JSON.stringify(draft) === signature} onClick={() => void action('settings.shortcuts.save', { shortcuts: draft }, () => setSaved(true))}>保存快捷键</button>
       {saved && <span role="status">已保存</span>}</div>
-    <p className="hint">在客户端和账号网页内生效。账号按侧栏顺序切换；打开弹窗时暂停。快捷键提示仅显示在本页。</p>
+    <p className="hint">老板键在系统全局生效；其余快捷键在客户端和账号网页内生效。账号按侧栏顺序切换；打开弹窗时暂停。</p>
   </div>;
 }

@@ -2,6 +2,9 @@ import type { ShortcutAction, ShortcutBinding, ShortcutConfig, WorkspaceShortcut
 export const shortcutActions: ShortcutAction[] = ['focus', 'takeover', 'previous', 'next', 'account1', 'account2', 'account3', 'account4', 'account5', 'account6', 'account7', 'account8', 'account9'];
 export const shortcutLabels: Record<ShortcutAction, string> = { focus: '专注模式', takeover: '接管当前会话', previous: '上一个账号', next: '下一个账号',
   account1: '第 1 个账号', account2: '第 2 个账号', account3: '第 3 个账号', account4: '第 4 个账号', account5: '第 5 个账号', account6: '第 6 个账号', account7: '第 7 个账号', account8: '第 8 个账号', account9: '第 9 个账号' };
+export function bossKeyBinding(platform: string): ShortcutBinding {
+  return { code: 'KeyS', control: platform !== 'darwin', meta: platform === 'darwin', alt: false, shift: true };
+}
 export function defaultShortcuts(platform: string): ShortcutConfig {
   return Object.fromEntries(shortcutActions.map(action => [action, { control: platform !== 'darwin', meta: platform === 'darwin',
     alt: action !== 'focus', shift: action === 'focus', code: action === 'focus' ? 'KeyF' : action === 'takeover' ? 'KeyT' : action === 'previous' ? 'ArrowLeft' : action === 'next' ? 'ArrowRight' : `Digit${action.slice(-1)}` }])) as ShortcutConfig;

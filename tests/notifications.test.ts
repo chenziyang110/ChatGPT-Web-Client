@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Database } from '../src/core/storage/Database';
 import { ShortcutSettings } from '../src/core/settings/ShortcutSettings';
-import { defaultShortcuts, shortcutText } from '../src/shared/shortcuts';
+import { bossKeyBinding, defaultShortcuts, shortcutText } from '../src/shared/shortcuts';
 import { ConversationNotifications, ConversationActivityObserver, replyToken, type ActivitySnapshot } from '../src/core/notifications/ConversationNotifications';
 const idle: ActivitySnapshot = { url: 'https://chatgpt.com/c/a', title: 'Daily', editor: true, busy: false };
 const generating: ActivitySnapshot = { ...idle, busy: true, user: { id: 'u1', text: 'Hi' }, lastRole: 'user' };
@@ -53,6 +53,16 @@ test('shortcut changes, clearing, defaults and conflict checks persist and match
   assert.equal(settings.reset().focus?.code, 'KeyF');
   assert.equal(defaultShortcuts('darwin').focus?.meta, true);
   assert.equal(shortcutText(null), '未设置'); db.close();
+});
+
+test('the global boss key is reserved and legacy conflicts are disabled', () => {
+  const db = new Database(':memory:'); const settings = new ShortcutSettings(db, 'win32');
+  const conflict = settings.get(); conflict.focus = bossKeyBinding('win32');
+  assert.throws(() => settings.save(conflict), /老板键/);
+  db.set('shortcuts', conflict);
+  assert.equal(settings.get().focus, null);
+  assert.deepEqual(bossKeyBinding('darwin'), { code: 'KeyS', control: false, meta: true, alt: false, shift: true });
+  db.close();
 });
 
 test('manual generation transitions to one unread conversation after a stable completed reply', () => {

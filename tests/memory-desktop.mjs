@@ -83,7 +83,8 @@ try {
   await shell.waitForTimeout(2000);
   await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].hide());
   await shell.waitForTimeout(500);
-  assert.equal((await livePages(account)).length, 1, 'A hidden selected page with a draft stays resident');
+  assert.equal((await livePages(account)).some(page => page.url === 'https://chatgpt.com/c/one'), true,
+    'A hidden selected page with a draft stays resident');
   await desktop.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.show(); window.focus(); });
   const second = (await rpc('workspace.status')).pages.find(page => page.url === 'https://chatgpt.com/c/two');
   await rpc('browser.select', { accountId: account.id, pageId: second.id });

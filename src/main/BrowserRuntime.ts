@@ -27,11 +27,17 @@ interface PageOwner {
 }
 
 const DEFAULT_PAGE_IDLE_MS = 60_000;
+const DEFAULT_HIDDEN_PAGE_IDLE_MS = 15_000;
 const MONITOR_INTERVAL_MS = 1_500;
 
 function pageIdleMs(): number {
   const value = Number(process.env.WORKSPACE_PAGE_IDLE_MS);
   return Number.isSafeInteger(value) && value >= 100 && value <= 60 * 60 * 1000 ? value : DEFAULT_PAGE_IDLE_MS;
+}
+
+function hiddenPageIdleMs(): number {
+  const value = Number(process.env.WORKSPACE_HIDDEN_PAGE_IDLE_MS);
+  return Number.isSafeInteger(value) && value >= 100 && value <= 60 * 60 * 1000 ? value : DEFAULT_HIDDEN_PAGE_IDLE_MS;
 }
 
 export class BrowserRuntime {
@@ -53,6 +59,8 @@ export class BrowserRuntime {
   private readonly previews = new Map<string, Promise<BrowserPreview | null>>();
   private readonly monitor: ReturnType<typeof setInterval>;
   private readonly idlePageMs = pageIdleMs();
+  private readonly hiddenIdlePageMs = hiddenPageIdleMs();
+  private backgroundedAt?: number;
   constructor(private readonly window: BrowserWindow, private readonly accounts: AccountManager,
     private readonly sessions: SessionManager, private readonly changed: () => void, private readonly conversations: ConversationManager,
     private readonly shortcuts: ShortcutSettings, private readonly notifications: ConversationNotifications) {
@@ -61,6 +69,9 @@ export class BrowserRuntime {
     this.monitor = setInterval(() => {
       for (const [id, view] of this.views) void this.observe(id, view).finally(() => this.hibernateIfIdle(id, view));
     }, MONITOR_INTERVAL_MS);
+    const visibilityChanged = () => this.updateVisibility();
+    window.on('hide', visibilityChanged).on('show', visibilityChanged)
+      .on('minimize', visibilityChanged).on('restore', visibilityChanged);
   }
   private title(id: string, url: string, fallback: string): string {
     return this.conversations.list(id).find(item => item.url === url)?.alias ?? fallback;
@@ -241,7 +252,19 @@ export class BrowserRuntime {
     if (this.accounts.activeId() === accountId) this.activate(accountId);
     this.changed();
   }
-  setVisible(visible: boolean): void { this.visible = visible; this.layout(); }
+  private backgrounded(): boolean { return !this.visible || !this.window.isVisible() || this.window.isMinimized(); }
+  private restoreSelectedView(): void {
+    if (this.closing || this.activeId || this.backgrounded()) return;
+    const accountId = this.accounts.activeId();
+    const id = accountId ? this.selected.get(accountId) : undefined;
+    if (accountId && id && this.owners.has(id) && !this.views.has(id)) this.activate(accountId, id);
+  }
+  private updateVisibility(): void {
+    if (this.backgrounded()) this.backgroundedAt ??= Date.now();
+    else { this.backgroundedAt = undefined; this.restoreSelectedView(); }
+    this.layout();
+  }
+  setVisible(visible: boolean): void { this.visible = visible; this.updateVisibility(); }
   setBounds(bounds: BrowserBounds): void { this.bounds = bounds; this.layout(); }
   private layout(): void {
     if (!this.activeId || this.window.isDestroyed()) return;
@@ -254,7 +277,7 @@ export class BrowserRuntime {
     const y = Math.min(height, Math.round(bounds.y));
     view.setBounds({ x, y, width: Math.max(0, Math.min(Math.round(bounds.width), width - x)),
       height: Math.max(0, Math.min(Math.round(bounds.height), height - y)) });
-    view.setVisible(!this.isLocked(this.activeId) && this.visible && bounds.width > 0 && bounds.height > 0 && !this.errors.has(this.activeId));
+    view.setVisible(!this.isLocked(this.activeId) && !this.backgrounded() && bounds.width > 0 && bounds.height > 0 && !this.errors.has(this.activeId));
   }
   page(): PageState | null {
     const contents = this.activeId ? this.views.get(this.activeId)?.webContents : undefined;
@@ -370,8 +393,11 @@ export class BrowserRuntime {
   }
   private hibernateIfIdle(id: string, view: WebContentsView): void {
     const owner = this.owners.get(id);
-    if (!owner || this.views.get(id) !== view || this.activeId === id || this.isLocked(id) || this.observing.has(id) ||
-      owner.hasDraft || owner.busy || !owner.hibernationReady || Date.now() - owner.idleSince < this.idlePageMs ||
+    const active = this.activeId === id;
+    const idleSince = active ? this.backgroundedAt : owner?.idleSince;
+    const idleMs = active ? this.hiddenIdlePageMs : this.idlePageMs;
+    if (!owner || this.views.get(id) !== view || active && !this.backgrounded() || this.isLocked(id) || this.observing.has(id) ||
+      owner.hasDraft || owner.busy || !owner.hibernationReady || !idleSince || Date.now() - idleSince < idleMs ||
       view.webContents.isDestroyed() || view.webContents.isLoading() || !isChatUrl(view.webContents.getURL())) return;
     this.destroyView(id);
     this.changed();

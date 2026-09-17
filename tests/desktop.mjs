@@ -482,6 +482,11 @@ try {
   assert.equal(await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].getVisible()), false);
   await page.screenshot({ path: 'test-results/tasks.png', animations: 'disabled' });
   await page.getByRole('button', { name: /设置与集成/ }).click();
+  assert.equal(await desktop.evaluate(({ globalShortcut }) => globalShortcut.isRegistered('CommandOrControl+Shift+S')), true,
+    'The global boss key is registered with Electron');
+  const bossKey = page.getByLabel('老板键（全局）', { exact: true });
+  assert.equal(await bossKey.inputValue(), process.platform === 'darwin' ? '⌘+Shift+S' : 'Ctrl+Shift+S');
+  assert.equal(await bossKey.isDisabled(), true, 'The global boss key is fixed and cannot conflict with local shortcuts');
   await page.getByRole('button', { name: '清除上一个账号快捷键', exact: true }).click();
   await page.getByRole('button', { name: '保存快捷键', exact: true }).click();
   await page.getByText('已保存', { exact: true }).waitFor();

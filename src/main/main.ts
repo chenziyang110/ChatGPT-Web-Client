@@ -1,4 +1,4 @@
-import { app, clipboard, dialog, ipcMain, shell } from 'electron';
+import { app, clipboard, dialog, globalShortcut, ipcMain, shell } from 'electron';
 import { chmodSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -14,6 +14,7 @@ import { Workspace } from '../core/Workspace';
 import { AppError, identifier, record, text } from '../core/validation';
 import { BrowserRuntime } from './BrowserRuntime';
 import { createWindow } from './window';
+import { registerBossKey } from './bossKey';
 import type { AgentHandoff } from '../shared/types';
 
 import { UpdateChecker } from './UpdateChecker';
@@ -35,6 +36,7 @@ else void app.whenReady().then(async () => {
   const conversations = new ConversationManager(db);
   const shortcuts = new ShortcutSettings(db);
   const win = createWindow(sessions, shortcuts);
+  const bossKey = registerBossKey(globalShortcut, win);
   const changed = () => { if (!stopping && !win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send('workspace:changed'); };
   const updates = new UpdateChecker(app.getVersion(), db.get<boolean>('autoCheckUpdates') !== false, changed);
   const checkUpdates = () => { if (app.isPackaged && updates.state.enabled && !stopping) void updates.check(); };
@@ -144,6 +146,7 @@ else void app.whenReady().then(async () => {
   app.on('activate', () => { if (!win.isDestroyed()) win.show(); });
   const shutdown = async () => {
     stopping = true;
+    bossKey.dispose();
     clearTimeout(updateStart); clearInterval(updateTimer);
     await apiChange;
     await api.stop();

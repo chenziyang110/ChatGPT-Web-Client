@@ -1,10 +1,11 @@
 {
   "name": "chatgpt-web-client",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Local-first desktop AI workspace with isolated accounts and an agent gateway",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.cjs",
+  "desktopName": "com.chenziyang.chatgptwebclient.desktop",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -15,7 +16,7 @@
     "build": "npm run typecheck && node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts && node --test tests/release-manifest.test.mjs",
-    "test:desktop": "node tests/desktop.mjs && node tests/parallel-desktop.mjs && node tests/agent-target-desktop.mjs && node tests/reply-routing-desktop.mjs && node tests/updates-desktop.mjs",
+    "test:desktop": "node tests/desktop.mjs && node tests/memory-desktop.mjs && node tests/parallel-desktop.mjs && node tests/agent-target-desktop.mjs && node tests/reply-routing-desktop.mjs && node tests/updates-desktop.mjs",
     "test:parallel": "node tests/parallel-desktop.mjs",
     "cli": "node --import tsx src/cli/index.ts",
     "build:agent": "node scripts/build-agent.mjs",
@@ -76,6 +77,7 @@
     },
     "linux": {
       "icon": "src/renderer/public/brand/workspace.png",
+      "syncDesktopName": true,
       "target": [
         "AppImage",
         "tar.gz"

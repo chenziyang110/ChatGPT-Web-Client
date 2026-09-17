@@ -1,6 +1,6 @@
 import type { Database } from '../storage/Database';
 import { AppError, record } from '../validation';
-import { bindingKey, defaultShortcuts, shortcutActions, shortcutCommand, shortcutLabels } from '../../shared/shortcuts';
+import { bindingKey, bossKeyBinding, defaultShortcuts, shortcutActions, shortcutCommand, shortcutLabels } from '../../shared/shortcuts';
 import type { ShortcutBinding, ShortcutConfig, WorkspaceShortcut } from '../../shared/types';
 export class ShortcutSettings {
   capturing = false;
@@ -12,11 +12,13 @@ export class ShortcutSettings {
     const next = { ...defaults, ...stored };
     for (const action of shortcutActions) {
       if (!(action in stored) && next[action] && Object.values(stored).some(binding => binding && bindingKey(binding) === bindingKey(next[action]!))) next[action] = null;
+      if (next[action] && bindingKey(next[action]!) === bindingKey(bossKeyBinding(this.platform))) next[action] = null;
     }
     return next;
   }
   save(value: unknown): ShortcutConfig {
-    const config = record(value); const next = {} as ShortcutConfig; const seen = new Map<string, string>();
+    const config = record(value); const next = {} as ShortcutConfig;
+    const seen = new Map<string, string>([[bindingKey(bossKeyBinding(this.platform)), '老板键']]);
     if (Object.keys(config).some(key => !shortcutActions.includes(key as keyof ShortcutConfig))) throw new AppError('未知快捷键操作');
     for (const action of shortcutActions) {
       if (config[action] === null) { next[action] = null; continue; }

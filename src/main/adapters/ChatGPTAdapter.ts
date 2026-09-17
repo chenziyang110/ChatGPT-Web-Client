@@ -3,7 +3,7 @@ import type { ExecutionContext } from '../../core/agent/AgentGateway';
 import { ConversationManager, conversationUrl } from '../../core/conversation/ConversationManager';
 import { HOME_URL, isChatUrl } from '../../core/validation';
 import type { BrowserReadiness, TaskInput } from '../../shared/types';
-import { replyToken } from '../../core/notifications/ConversationNotifications';
+import { COMPLETION_STABLE_MS, replyToken } from '../../core/notifications/ConversationNotifications';
 
 interface Message { id: string; role: string; text: string; terminal: boolean }
 export interface Page { url: string; title: string; readiness: BrowserReadiness; editor: boolean; draft: string; busy: boolean; messages: Message[]; error?: string }
@@ -237,7 +237,7 @@ export class ChatGPTAdapter {
         page.messages.length > userIndex + 1 && last?.role === 'assistant' && last.terminal && !!last.text;
       const fingerprint = JSON.stringify([replyUrl, page.messages]);
       if (!finished || fingerprint !== previous) since = Date.now();
-      if (finished && Date.now() - since >= 3000) return { submitted: true, response: last!.text.slice(0, 64000), url: boundUrl, conversationId: conversation?.id, replyToken: replyToken(ownUser!, last!) };
+      if (finished && Date.now() - since >= COMPLETION_STABLE_MS) return { submitted: true, response: last!.text.slice(0, 64000), url: boundUrl, conversationId: conversation?.id, replyToken: replyToken(ownUser!, last!) };
       previous = fingerprint;
     }
   }

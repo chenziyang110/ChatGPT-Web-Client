@@ -4,6 +4,8 @@ import { conversationUrl } from '../conversation/ConversationManager';
 import { AppError } from '../validation';
 import type { ConversationNotice } from '../../shared/types';
 
+export const COMPLETION_STABLE_MS = 6000;
+
 export interface ActivitySnapshot {
   url: string; title: string; editor: boolean; busy: boolean; hasDraft?: boolean; error?: string;
   user?: { id: string; text: string }; assistant?: { id: string; text: string; terminal: boolean }; lastRole?: string;
@@ -96,7 +98,7 @@ export class ConversationActivityObserver {
     }
     if (previous.generating || userChanged || (previous.token && token !== previous.token)) {
       if (previous.candidate !== token) { previous.candidate = token; previous.since = now; }
-      if (now - previous.since < 6000) return;
+      if (now - previous.since < COMPLETION_STABLE_MS) return;
       this.notifications.complete(accountId, url, page.title, token!, now);
     }
     previous.token = token; previous.userId = page.user?.id; previous.generating = false; previous.candidate = undefined;

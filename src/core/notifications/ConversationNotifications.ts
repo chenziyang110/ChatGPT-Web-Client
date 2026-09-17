@@ -13,7 +13,8 @@ export function replyToken(user: { id: string; text: string }, assistant: { id: 
 }
 export class ConversationNotifications {
   private items: ConversationNotice[];
-  constructor(private readonly db: Database, private readonly changed: () => void) {
+  constructor(private readonly db: Database, private readonly changed: () => void,
+    private readonly completed: (notice: ConversationNotice) => void = () => {}) {
     this.items = (db.get<ConversationNotice[]>('conversationNotifications') ?? []).map(item => ({ ...item, running: false }));
   }
   list(accountId?: string): ConversationNotice[] { return this.items.filter(item => !accountId || item.accountId === accountId).map(item => ({ ...item })); }
@@ -38,6 +39,7 @@ export class ConversationNotifications {
     const item = this.ensure(accountId, url, title);
     if (item.token === token) { this.running(accountId, url, title, false); return; }
     Object.assign(item, { running: false, unread: true, token, completedAt: now, title: title.slice(0, 120) || item.title }); this.save();
+    try { this.completed({ ...item }); } catch { /* Desktop notification failures never fail a completed task. */ }
   }
   get(accountId: string, id: unknown): ConversationNotice {
     const item = this.items.find(item => item.accountId === accountId && item.id === id);
@@ -56,7 +58,7 @@ export class ConversationNotifications {
 
 /** Observe transitions, not historical messages; unsupported states never complete. */
 export class ConversationActivityObserver {
-  private readonly observed = new Map<string, { accountId: string; token?: string; generating: boolean; candidate?: string; since: number }>();
+  private readonly observed = new Map<string, { accountId: string; token?: string; userId?: string; generating: boolean; candidate?: string; since: number }>();
   constructor(private readonly notifications: ConversationNotifications, private readonly multiplePages = false) {}
   disconnected(accountId: string, url?: string): void {
     for (const [key, value] of this.observed) if (value.accountId === accountId && (!url || key === `${accountId}:${url}`)) this.observed.delete(key);
@@ -71,23 +73,33 @@ export class ConversationActivityObserver {
     const key = `${accountId}:${url}`;
     // Discard old page baselines so opening a historical conversation is not a new reply.
     if (!this.multiplePages) for (const [other, value] of this.observed) if (value.accountId === accountId && other !== key) this.observed.delete(other);
-    if (page.error || !page.editor) { this.observed.delete(key); this.notifications.running(accountId, url, page.title, false); return; }
     const ready = !!page.user && page.lastRole === 'assistant' && !!page.assistant?.terminal && !!page.assistant.text && !page.busy;
-    const generating = page.busy || (!!page.user && !ready);
     const token = ready ? replyToken(page.user!, page.assistant!) : undefined;
     let previous = this.observed.get(key);
     if (!previous) {
-      previous = { accountId, token: token ?? (generating ? undefined : 'empty'), generating, since: now }; this.observed.set(key, previous);
-      this.notifications.running(accountId, url, page.title, generating); return;
+      previous = { accountId, token: token ?? 'empty', userId: page.user?.id, generating: page.busy, since: now }; this.observed.set(key, previous);
+      this.notifications.running(accountId, url, page.title, page.busy); return;
     }
-    if (generating) { previous.generating = true; previous.candidate = undefined; this.notifications.running(accountId, url, page.title, true); return; }
-    if (!ready) { previous.candidate = undefined; return; }
-    if (previous.generating || (previous.token && token !== previous.token)) {
+    if (page.error || !page.editor) {
+      if (page.busy) previous.generating = true;
+      previous.userId = page.user?.id ?? previous.userId; previous.candidate = undefined;
+      this.notifications.running(accountId, url, page.title, !page.error && previous.generating); return;
+    }
+    const userChanged = !!page.user?.id && page.user.id !== previous.userId;
+    if (page.busy || !ready && (previous.generating || userChanged)) {
+      previous.generating = true; previous.userId = page.user?.id ?? previous.userId; previous.candidate = undefined;
+      this.notifications.running(accountId, url, page.title, true); return;
+    }
+    if (!ready) {
+      previous.generating = false; previous.userId = page.user?.id ?? previous.userId; previous.candidate = undefined;
+      this.notifications.running(accountId, url, page.title, false); return;
+    }
+    if (previous.generating || userChanged || (previous.token && token !== previous.token)) {
       if (previous.candidate !== token) { previous.candidate = token; previous.since = now; }
-      if (now - previous.since < 3000) return;
+      if (now - previous.since < 6000) return;
       this.notifications.complete(accountId, url, page.title, token!, now);
     }
-    previous.token = token; previous.generating = false; previous.candidate = undefined;
+    previous.token = token; previous.userId = page.user?.id; previous.generating = false; previous.candidate = undefined;
     this.notifications.running(accountId, url, page.title, false);
   }
 }

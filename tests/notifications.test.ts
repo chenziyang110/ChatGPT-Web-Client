@@ -14,10 +14,10 @@ test('simultaneous pages in one account retain independent running and completio
   observer.observe('a', generating, 0);
   observer.observe('a', { ...generating, url: 'https://chatgpt.com/c/b' }, 0);
   assert.equal(notices.list('a').filter(item => item.running).length, 2);
-  observer.observe('a', finished, 100); observer.observe('a', finished, 3200);
+  observer.observe('a', finished, 100); observer.observe('a', finished, 6100);
   assert.equal(notices.list('a').filter(item => item.running).length, 1);
-  observer.observe('a', { ...finished, url: 'https://chatgpt.com/c/b' }, 3300);
-  observer.observe('a', { ...finished, url: 'https://chatgpt.com/c/b' }, 6400);
+  observer.observe('a', { ...finished, url: 'https://chatgpt.com/c/b' }, 6200);
+  observer.observe('a', { ...finished, url: 'https://chatgpt.com/c/b' }, 12200);
   assert.equal(notices.list('a').filter(item => item.unread).length, 2);
   observer.disconnected('a', idle.url);
   assert.equal(notices.list('a').filter(item => item.unread).length, 2);
@@ -69,9 +69,9 @@ test('manual generation transitions to one unread conversation after a stable co
   const db = new Database(':memory:'); const notices = new ConversationNotifications(db, () => {}); const observer = new ConversationActivityObserver(notices);
   observer.observe('a', idle, 0); observer.observe('a', generating, 100);
   assert.equal(notices.list('a')[0].running, true); assert.equal(notices.list('a')[0].unread, false);
-  observer.observe('a', finished, 200); observer.observe('a', finished, 3199);
+  observer.observe('a', finished, 200); observer.observe('a', finished, 6199);
   assert.equal(notices.list('a')[0].unread, false);
-  observer.observe('a', finished, 3200);
+  observer.observe('a', finished, 6200);
   assert.equal(notices.list('a')[0].running, false); assert.equal(notices.list('a')[0].unread, true);
   const item = notices.list('a')[0]; notices.read('a', item.id, item.token);
   observer.observe('a', finished, 9000); notices.complete('a', idle.url, idle.title, item.token!);
@@ -145,7 +145,7 @@ test('opening history, navigating away, errors and unsupported pages never produ
 
 test('fast reply between polls counts after a known empty page; stable text alone does not complete', () => {
   const db = new Database(':memory:'); const notices = new ConversationNotifications(db, () => {}); const observer = new ConversationActivityObserver(notices);
-  observer.observe('a', idle, 0); observer.observe('a', finished, 100); observer.observe('a', finished, 3100);
+  observer.observe('a', idle, 0); observer.observe('a', finished, 100); observer.observe('a', finished, 6100);
   assert.equal(notices.list('a')[0].unread, true);
   observer.observe('b', generating, 0);
   observer.observe('b', { ...finished, assistant: { ...finished.assistant!, terminal: false } }, 100);

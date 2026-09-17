@@ -11,6 +11,7 @@ import { ConversationActivityObserver, type ActivitySnapshot, type ConversationN
 import type { ShortcutSettings } from '../core/settings/ShortcutSettings';
 import type { ExecutionContext } from '../core/agent/AgentGateway';
 import type { ConversationManager } from '../core/conversation/ConversationManager';
+import { allowChatGptClipboardWrite } from './permissions';
 
 interface PageOwner {
   accountId: string;
@@ -92,8 +93,13 @@ export class BrowserRuntime {
   private configureSession(partition: string): void {
     if (this.configured.has(partition)) return;
     const isolated = session.fromPartition(partition);
-    isolated.setPermissionCheckHandler(() => false);
-    isolated.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+    isolated.setPermissionCheckHandler((_contents, permission, requestingOrigin, details) =>
+      allowChatGptClipboardWrite(permission, requestingOrigin, details.isMainFrame));
+    isolated.setPermissionRequestHandler((_contents, permission, callback, details) => {
+      const requestingUrl = 'requestingUrl' in details ? details.requestingUrl : '';
+      const isMainFrame = 'isMainFrame' in details && details.isMainFrame;
+      callback(allowChatGptClipboardWrite(permission, requestingUrl, isMainFrame));
+    });
     isolated.on('will-download', (_event, item) => {
       item.setSaveDialogOptions({ title: 'Save ChatGPT download', defaultPath: item.getFilename() });
     });

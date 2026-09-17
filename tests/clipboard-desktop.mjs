@@ -29,6 +29,13 @@ try {
     const state = await window.workspace.call('workspace.status');
     return state.pages.some(page => page.accountId === id && page.url.startsWith('https://chatgpt.com') && !page.loading);
   }, account.id);
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const ready = await desktop.evaluate(({ session, webContents }, partition) => webContents.getAllWebContents()
+      .some(item => item.session === session.fromPartition(partition) && item.getURL().startsWith('https://chatgpt.com')), account.partition);
+    if (ready) break;
+    assert.ok(attempt < 99, 'Account WebContents did not become ready');
+    await shell.waitForTimeout(50);
+  }
 
   previousClipboard = await desktop.evaluate(({ clipboard }) => clipboard.readText());
   const marker = `ChatGPT copy ${Date.now()}`;

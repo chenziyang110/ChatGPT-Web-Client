@@ -196,6 +196,8 @@ The monitor reads each live supported page every 1.5 seconds, with at most one o
 
 `workspace.status.pages` lists opened page IDs, account/conversation IDs, selected/locked state and the current task ID. `browser.select({accountId,pageId})` changes the visible page without navigating or stopping the other pages; `browser.closePage({accountId,pageId})` refuses locked pages. `browser.inspect` and trusted `browser.preview` accept optional `pageId`. Every page reference is checked against the account.
 
+The desktop **New conversation** button is a trusted manual action, not `browser.navigate`: it opens a separate ChatGPT home tab immediately and never creates or waits behind an Agent task. The queued `browser.navigate` RPC remains available for automated navigation that must follow task safety rules.
+
 `queues.pause/resume/takeover` accept optional `conversation` (resolved within the account). CLI: `queue takeover --account ID --conversation ID`. Omitting it retains an explicit account-wide action. Queue status includes account summaries and per-conversation rows; account summaries include all `runningTaskIds`. A page error or scoped takeover pauses only that conversation. Deleting an account still waits for every active conversation and wipes all its pages before clearing its profile.
 
 The desktop now has conversation tabs. The takeover button and shortcut operate on the selected conversation. Independent pages keep their generation and drafts while hidden, and notifications observe them separately. There are at most 20 open pages per account; close unused pages to free resources. On application restart only the last selected page is restored automatically; other task pages reopen when their paused tasks are explicitly continued.

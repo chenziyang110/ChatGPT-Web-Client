@@ -217,7 +217,7 @@ function App() {
           <button aria-label="重新加载" title="重新加载" disabled={busy || pageLocked} onClick={() => void action('browser.control', { accountId: active.id, action: 'reload' })}><Icon name="refresh" size={16} className={state?.page?.loading ? 'spinning' : ''} /></button>
           <span className="page-url"><Icon name="lock" size={13} /><span>{state?.page?.loading ? '正在加载…' : state?.page?.url || 'https://chatgpt.com/'}</span></span>
           <button className="agent-toolbar" disabled={busy} onClick={() => void openPageAgent(active.id)}><Icon name="terminal" size={15} /> Agent 协作</button>
-          <button className="new-chat" disabled={busy} onClick={() => void action('browser.navigate', { accountId: active.id, url: 'https://chatgpt.com/' })}><Icon name="plus" size={15} /> 新对话</button>
+          <button className="new-chat" disabled={busy} onClick={() => void action('browser.newConversation', { accountId: active.id })}><Icon name="plus" size={15} /> 新对话</button>
         </> : <span className="toolbar-note"><Icon name={tab === 'tasks' ? 'terminal' : tab === 'settings' ? 'lock' : 'shield'} size={14} />{tab === 'tasks' ? '按账号和会话管理队列' : tab === 'settings' ? '快捷键、接口和数据设置' : '添加账号后登录 ChatGPT'}</span>}
       </div>
       {tab === 'workspace' && active && accountPages.length > 1 && <div className="conversation-tabs" role="tablist" aria-label="打开的会话">{accountPages.map(page => <div className={`conversation-tab ${page.selected ? 'selected' : ''}`} key={page.id}>

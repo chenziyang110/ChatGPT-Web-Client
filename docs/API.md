@@ -170,7 +170,7 @@ Batch import, background daemon operation without Electron, per-conversation par
 
 ## Conversation notifications and shortcut settings
 
-`workspace.status` also returns `notifications` and `shortcuts`. Notification records contain account ID, canonical conversation URL, title, running/unread flags, completion time and a reply fingerprint token; notification storage does not duplicate prompt/response text. Counts are distinct unread conversations per account, not the number of generated turns. Historical page loads establish a baseline rather than emit new notifications. Running flags reset on restart while unread receipts persist.
+`workspace.status` also returns `notifications` and `shortcuts`. Notification records contain account ID, canonical conversation URL, title, running/unread flags, completion time and a reply fingerprint token; notification storage does not duplicate prompt/response text. Counts are distinct unread conversations per account, not the number of generated turns. Historical page loads establish a baseline rather than emit new notifications. An unread receipt is cleared when its exact conversation is visibly selected in the focused workspace; background selection, hidden/minimized windows, modals and Agent-locked previews do not count as viewed. Running flags reset on restart while genuinely unread receipts persist.
 
 | Method | Parameters | Result |
 | --- | --- | --- |

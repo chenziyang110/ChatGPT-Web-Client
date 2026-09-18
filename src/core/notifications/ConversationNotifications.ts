@@ -55,6 +55,14 @@ export class ConversationNotifications {
     if (item.unread) { item.unread = false; this.save(); }
     return { ...item };
   }
+  viewed(accountId: string, value: string): ConversationNotice | undefined {
+    let remoteId: string;
+    try { remoteId = conversationUrl(value).remoteId; } catch { return; }
+    const item = this.items.find(item => item.id === `${accountId}:${remoteId}`);
+    if (!item) return;
+    if (item.unread) { item.unread = false; this.save(); }
+    return { ...item };
+  }
   removeAccount(accountId: string): void { this.items = this.items.filter(item => item.accountId !== accountId); this.save(); }
 }
 

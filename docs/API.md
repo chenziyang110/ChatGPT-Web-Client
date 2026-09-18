@@ -15,7 +15,7 @@ From v1.1.0 all platforms include a native Agent under `resources/agent/` (`Cont
 
 With `--stream`, stdout is UTF-8 newline-delimited JSON. `task` identifies the operation; `status` and `heartbeat` describe ongoing work; append `delta.text`, and replace the accumulated answer on `replace.text`. Only `done` signals success, containing the full `result.response` and conversation URL. Partial text may be revised by the webpage and is not a completed answer. Without `--stream`, stdout is one final task JSON. stderr carries progress, request path, and task ID, never the connection token. Exit codes: 0 answer received; 1 error/review required; 2 invalid arguments; 3 local timeout; 130 interrupted.
 
-`waiting_user` keeps the same tool process waiting while the user handles the client dialog. Notify the user once; after takeover, the user clicks **交还 Agent 并继续**, which resumes the original task and wakes the existing waiter. Do not classify this expected pause as `blocked` or start another monitor. For `uncertain`, `tasks.response` reads only the associated page and verifies the exact submitted question/message ID, final controls, absence of generation/draft, and three seconds of stable content. It never sends, navigates, resumes a queue or acknowledges a task. If page association was lost on restart, the human can identify the already-open original page using `resume TASK_ID --url URL`. An unavailable/mismatched page still requires review; arbitrary page text never counts as the answer. Recovered responses are marked `recovered:true`, while the original uncertain task audit record remains unchanged.
+`waiting_user` keeps the same tool process waiting while the user handles the client dialog. Notify the user once; after takeover, the user clicks **交还 Agent 并继续**, which resumes the original task and wakes the existing waiter. Do not classify this expected pause as `blocked` or start another monitor. For `uncertain`, `tasks.response` reads only the associated page and verifies the exact submitted question/message ID, final controls, absence of generation/draft, and six seconds of stable content. It never sends, navigates, resumes a queue or acknowledges a task. If page association was lost on restart, the human can identify the already-open original page using `resume TASK_ID --url URL`. An unavailable/mismatched page still requires review; arbitrary page text never counts as the answer. Recovered responses are marked `recovered:true`, while the original uncertain task audit record remains unchanged.
 
 Internally, `tasks.wait` accepts `id`, `timeoutMs` (0–25000), `afterUpdatedAt`, and `updates:true` for incremental snapshots. Its timeout returns the current task without cancellation. This releases the Electron event loop, so other conversations and the UI continue operating while the calling CLI blocks.
 
@@ -47,7 +47,7 @@ Without `--submit`, prompts prepare a draft. Existing non-empty drafts pause aut
 
 Each conversation has a serial queue and an independent browser page. Different conversations in the same account share only the login partition and can run concurrently. Up to **two automated tasks** execute at once; ready accounts share capacity fairly. An unrelated manual generation does not block a new conversation. The queue has a global limit of 30 pending/running/waiting_user tasks. Pending work does not automatically resume after an application restart.
 
-Before switching pages or submitting, automation waits for the current page to become idle, preserves existing drafts, and rechecks the pinned target and user-message anchor. An ordinary response requires the matching newly submitted user turn, a later assistant turn, a recognized completion control, no visible busy indicator, an empty composer, and three seconds of stable content. Missing/unknown signals never count as successful completion. DOM changes can require an adapter update.
+Before switching pages or submitting, automation waits for the current page to become idle, preserves existing drafts, and rechecks the pinned target and user-message anchor. An ordinary response requires the matching newly submitted user turn, a later assistant turn, a recognized completion control, no visible busy indicator, an empty composer, and six seconds of stable content. Missing/unknown signals never count as successful completion. DOM changes can require an adapter update.
 
 | Status | Meaning and next step |
 | --- | --- |
@@ -92,7 +92,7 @@ Task history normally retains up to 200 records, preserving unresolved work. Cle
 {"method":"tasks.create","params":{"accountId":"work","conversation":"daily","idempotencyKey":"daily-001","input":{"type":"prompt","prompt":"Hello","submit":true}}}
 ```
 
-Success is `{ok:true,result:...}`. Errors use `{ok:false,error:"..."}` and non-2xx status. Successful creation means queued, not completed; poll `tasks.get`. IPC and HTTP share the dispatcher and queue.
+Success is `{ok:true,result:...}`. Errors use `{ok:false,error:"..."}` and non-2xx status. Successful creation means queued, not completed; use `tasks.wait` to long-poll the same task until it reaches a terminal state. IPC and HTTP share the dispatcher and queue.
 
 | Method | Parameters | Result |
 | --- | --- | --- |

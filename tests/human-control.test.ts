@@ -45,6 +45,36 @@ test('human takeover keeps an unsent task recoverable and waits for executor cle
   } finally { release(); await gateway.stop(); db.close(); }
 });
 
+test('a blocking waiter survives human takeover and completes after the same task is handed back', async () => {
+  const db = new Database(':memory:'); let calls = 0;
+  const gateway = new AgentGateway(db, async (_id, _input, signal) => {
+    calls++;
+    if (calls === 1) await new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    return { response: 'continued' };
+  }, () => {});
+  try {
+    const task = gateway.createTask('a', { type: 'prompt', prompt: 'Question', submit: true }, { conversationId: 'conversation' });
+    await until(() => gateway.isRunning('a', 'conversation'));
+    let observed = gateway.get(task.id); let finished = false;
+    const waitForCompletion = (async () => {
+      while (['pending', 'running', 'waiting_user'].includes(observed.status)) {
+        observed = await gateway.wait(task.id, 1000, observed.updatedAt, true);
+      }
+      finished = true;
+      return observed;
+    })();
+    await gateway.takeover('a', 'conversation');
+    await tick();
+    assert.equal(finished, false, 'Human takeover must wake the waiter without ending it');
+    const waiting = gateway.get(task.id);
+    assert.equal(waiting.attention?.kind, 'manual_takeover');
+    assert.equal(waiting.attention?.choices.find(choice => choice.id === 'retry')?.label, '交还 Agent 并继续');
+    await gateway.decide(task.id, waiting.attention!.id, 'retry');
+    const done = await waitForCompletion;
+    assert.equal(done.status, 'done'); assert.equal(calls, 2);
+  } finally { await gateway.stop(); db.close(); }
+});
+
 test('takeover after send intent requires review and never offers replay', async () => {
   const db = new Database(':memory:'); let calls = 0;
   const gateway = new AgentGateway(db, async (_id, _input, signal, context) => {

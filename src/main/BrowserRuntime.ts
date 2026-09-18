@@ -71,7 +71,7 @@ export class BrowserRuntime {
     }, MONITOR_INTERVAL_MS);
     const visibilityChanged = () => this.updateVisibility();
     window.on('hide', visibilityChanged).on('show', visibilityChanged)
-      .on('minimize', visibilityChanged).on('restore', visibilityChanged);
+      .on('minimize', visibilityChanged).on('restore', visibilityChanged).on('focus', visibilityChanged);
   }
   private title(id: string, url: string, fallback: string): string {
     return this.conversations.list(id).find(item => item.url === url)?.alias ?? fallback;
@@ -95,6 +95,7 @@ export class BrowserRuntime {
       Object.assign(owner, { url: snapshot.url, title: snapshot.title || owner.title, hasDraft: !!snapshot.hasDraft,
         busy: snapshot.busy, hibernationReady: snapshot.editor && !snapshot.error, activityKey });
       this.observer.observe(owner.accountId, snapshot);
+      this.markViewed(id, snapshot.url);
     } catch {
       owner.hibernationReady = false;
       if (!this.closing && this.views.get(id) === view) this.observer.disconnected(owner.accountId, url);
@@ -253,6 +254,11 @@ export class BrowserRuntime {
     this.changed();
   }
   private backgrounded(): boolean { return !this.visible || !this.window.isVisible() || this.window.isMinimized(); }
+  private markViewed(id: string, url?: string): void {
+    const view = this.views.get(id); const owner = this.owners.get(id);
+    if (!view || !owner || this.activeId !== id || this.backgrounded() || !this.window.isFocused() || this.isLocked(id) || !view.getVisible()) return;
+    this.notifications.viewed(owner.accountId, url ?? view.webContents.getURL());
+  }
   private restoreSelectedView(): void {
     if (this.closing || this.activeId || this.backgrounded()) return;
     const accountId = this.accounts.activeId();
@@ -278,6 +284,7 @@ export class BrowserRuntime {
     view.setBounds({ x, y, width: Math.max(0, Math.min(Math.round(bounds.width), width - x)),
       height: Math.max(0, Math.min(Math.round(bounds.height), height - y)) });
     view.setVisible(!this.isLocked(this.activeId) && !this.backgrounded() && bounds.width > 0 && bounds.height > 0 && !this.errors.has(this.activeId));
+    this.markViewed(this.activeId);
   }
   page(): PageState | null {
     const contents = this.activeId ? this.views.get(this.activeId)?.webContents : undefined;
@@ -334,17 +341,25 @@ export class BrowserRuntime {
     this.previews.set(id, pending);
     try { return await pending; } finally { this.previews.delete(id); }
   }
-  async navigate(accountId: string, value: unknown): Promise<void> {
-    const url = chatUrl(value);
-    const existing = [...this.owners].find(([, owner]) => owner.accountId === accountId && owner.url === url)?.[0];
-    const id = existing ?? this.createView(accountId, url);
-    this.activate(accountId, id);
+  private async waitUntilLoaded(id: string): Promise<void> {
     const contents = this.views.get(id)!.webContents;
     const deadline = Date.now() + 30000;
     while (contents.isLoading()) {
       if (Date.now() >= deadline) throw new AppError('会话加载超时，请检查页面');
       await new Promise(resolve => setTimeout(resolve, 100));
     }
+  }
+  async navigate(accountId: string, value: unknown): Promise<void> {
+    const url = chatUrl(value);
+    const existing = [...this.owners].find(([, owner]) => owner.accountId === accountId && owner.url === url)?.[0];
+    const id = existing ?? this.createView(accountId, url);
+    this.activate(accountId, id);
+    await this.waitUntilLoaded(id);
+  }
+  async newConversation(accountId: string): Promise<void> {
+    const id = this.createView(accountId, HOME_URL);
+    this.activate(accountId, id);
+    await this.waitUntilLoaded(id);
   }
   control(accountId: string, action: string): void {
     const id = this.pageId(accountId); if (!id) return;

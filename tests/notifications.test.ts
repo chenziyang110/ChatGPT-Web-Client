@@ -117,6 +117,19 @@ test('count is per conversation, separates accounts, and reading an old reply ca
   notices.removeAccount('a'); assert.equal(notices.list().length, 1); db.close();
 });
 
+test('viewing the exact foreground conversation clears only its unread receipt', () => {
+  const db = new Database(':memory:'); const notices = new ConversationNotifications(db, () => {});
+  notices.complete('a', idle.url, 'A', 'first', 1);
+  notices.complete('a', 'https://chatgpt.com/c/b', 'B', 'second', 2);
+  notices.complete('other', idle.url, 'Other', 'third', 3);
+  notices.viewed('a', idle.url);
+  assert.equal(notices.list('a').find(item => item.url === idle.url)?.unread, false);
+  assert.equal(notices.list('a').find(item => item.url.endsWith('/b'))?.unread, true);
+  assert.equal(notices.list('other')[0].unread, true);
+  assert.equal(notices.viewed('a', 'https://chatgpt.com/c/missing'), undefined);
+  db.close();
+});
+
 test('new completion tokens emit one native-notification event while duplicates stay silent', () => {
   const db = new Database(':memory:'); const completed: string[] = [];
   const notices = new ConversationNotifications(db, () => {}, notice => completed.push(`${notice.id}:${notice.token}`));

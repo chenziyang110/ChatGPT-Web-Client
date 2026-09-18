@@ -55,6 +55,13 @@ async function accountScript(account, script) {
     return wc.executeJavaScript(script);
   }, { account, script, selectedUrl });
 }
+async function accountUrlScript(account, url, script) {
+  return desktop.evaluate(async ({ session, webContents }, { account, url, script }) => {
+    const wc = webContents.getAllWebContents().find(item => item.session === session.fromPartition(account.partition) && item.getURL() === url);
+    if (!wc) throw new Error(`Account page missing: ${url}`);
+    return wc.executeJavaScript(script);
+  }, { account, url, script });
+}
 async function terminalTask(task, status) {
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
@@ -90,11 +97,12 @@ async function checkBrowserBounds() {
     await page.waitForTimeout(50);
   }
   await page.waitForFunction(() => document.querySelector('.browser-slot')?.getBoundingClientRect().width > 0);
-  const expected = await page.locator('.browser-slot').evaluate(element => {
+  const expectedBounds = () => page.locator('.browser-slot').evaluate(element => {
     const { x, y, width, height } = element.getBoundingClientRect();
     return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
   });
   for (let attempt = 0; attempt < 30; attempt++) {
+    const expected = await expectedBounds();
     const { actual, size } = await desktop.evaluate(({ BrowserWindow }) => {
       const win = BrowserWindow.getAllWindows()[0];
       return { actual: win.contentView.children[0]?.getBounds(), size: win.getContentSize() };
@@ -106,6 +114,7 @@ async function checkBrowserBounds() {
         (Math.abs(actual[axis] - expected[axis]) <= 1 && actual[axis] + actual[index ? 'y' : 'x'] === size[index]))) return;
     await new Promise(resolve => setTimeout(resolve, 50));
   }
+  const expected = await expectedBounds();
   const actual = await desktop.evaluate(({ BrowserWindow }) => ({ bounds: BrowserWindow.getAllWindows()[0].contentView.children[0]?.getBounds(), size: BrowserWindow.getAllWindows()[0].getContentSize() }));
   assert.fail(`Embedded account page must match the renderer slot after resize: ${JSON.stringify({ expected, actual })}`);
 }
@@ -217,8 +226,7 @@ try {
   await checkBrowserBounds();
   assert.equal(await accountScript(work, 'window.fixtureSendCount || 0'), 0);
   await accountScript(work, "document.querySelector('textarea').value = ''");
-  await page.locator('.attention-banner').getByRole('button', { name: '选择如何处理' }).click();
-  await page.getByRole('button', { name: '处理好了，继续', exact: true }).click();
+  await page.locator('.attention-banner').getByRole('button', { name: '交还 Agent 并继续', exact: true }).click();
   const submitted = await waitTask(blockedDraft);
   assert.equal(submitted.result.response, 'Fixture reply: Hello');
   await rpc('queues.pause', { accountId: work.id });
@@ -290,19 +298,18 @@ try {
   await accountScript(work, 'window.fixtureFinish(); window.fixtureHold = false');
   await waitTask(afterManual);
   assert.equal(await accountScript(work, 'window.fixtureSendCount'), 6);
-  await waitForState(async () => (await window.workspace.call('notifications.list')).filter(item => item.unread).length === 3);
-  assert.equal((await rpc('notifications.list', { accountId: work.id })).filter(item => item.unread).length, 2, 'Repeated replies in one conversation count once');
-  await page.getByRole('button', { name: 'Work，2 个会话待处理', exact: true }).click();
+  const backgroundWorkUrl = 'https://chatgpt.com/c/work';
+  await accountUrlScript(work, backgroundWorkUrl, "window.fixtureHold = true; document.querySelector('textarea').value = 'Background notification'; document.querySelector('[data-testid=send-button]').click()");
+  await waitForState(async ({ accountId, url }) => (await window.workspace.call('notifications.list', { accountId })).some(item => item.url === url && item.running), { accountId: work.id, url: backgroundWorkUrl });
+  await accountUrlScript(work, backgroundWorkUrl, 'window.fixtureFinish(); window.fixtureHold = false');
+  await waitForState(async () => (await window.workspace.call('notifications.list')).filter(item => item.unread).length === 2);
+  assert.equal((await rpc('notifications.list', { accountId: work.id })).filter(item => item.unread).length, 1, 'The foreground conversation is read while a background conversation remains unread');
+  await page.getByRole('button', { name: 'Work，1 个会话待处理', exact: true }).click();
   await page.getByRole('heading', { name: '待处理会话', exact: true }).waitFor();
   await page.screenshot({ path: 'test-results/conversation-notifications.png', animations: 'disabled' });
   await page.locator('.notification-item').filter({ hasText: 'ChatGPT fixture' }).getByRole('button', { name: '查看会话', exact: true }).click();
   await page.waitForFunction(() => !document.querySelector('dialog'));
-  await page.getByRole('button', { name: 'Work，1 个会话待处理', exact: true }).waitFor();
   assert.equal((await rpc('workspace.status')).page.url, 'https://chatgpt.com/c/work');
-  await page.getByRole('button', { name: 'Work，1 个会话待处理', exact: true }).click();
-  await page.getByRole('button', { name: '标记已处理', exact: true }).click();
-  await page.getByText('全部处理完了', { exact: true }).waitFor();
-  await page.getByRole('button', { name: '关闭弹窗', exact: true }).click();
   assert.equal(await page.locator('.account-row').filter({ hasText: 'Work' }).locator('.reply-badge').count(), 0);
   // A manual turn alone (no gateway task) must also generate an unread receipt.
   await accountScript(work, "window.fixtureHold = true; document.querySelector('textarea').value = 'Manual notification'; document.querySelector('[data-testid=send-button]').click()");
@@ -311,6 +318,10 @@ try {
   await accountScript(work, 'window.fixtureFinish(); window.fixtureHold = false');
   await page.getByRole('button', { name: 'Work，1 个会话待处理', exact: true }).waitFor();
   await rpc('accounts.switch', { id: work.id });
+  await waitForState(async id => !(await window.workspace.call('notifications.list', { accountId: id })).some(item => item.unread), work.id);
+  const workBadge = page.locator('.account-row').filter({ hasText: 'Work' }).locator('.reply-badge');
+  await workBadge.waitFor({ state: 'detached' });
+  assert.equal(await workBadge.count(), 0, 'Viewing the foreground conversation clears its unread receipt');
   await accountScript(work, "document.querySelector('textarea').value = 'Hello'");
   await page.getByRole('button', { name: '专注模式', exact: true }).click();
   await page.locator('.app.focus-mode').waitFor();
@@ -515,7 +526,7 @@ try {
   await launch(1.25);
   await page.locator('.app.focus-mode').waitFor();
   assert.equal((await rpc('settings.shortcuts.get')).focus.code, 'KeyK');
-  assert.equal((await rpc('notifications.list', { accountId: work.id })).filter(item => item.unread).length, 1, 'Unread survives restart');
+  assert.equal((await rpc('notifications.list', { accountId: work.id })).filter(item => item.unread).length, 0, 'Viewed receipts stay cleared after restart');
   await checkBrowserBounds();
   assert.equal(await page.evaluate(() => devicePixelRatio), 1.25);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
@@ -549,7 +560,7 @@ try {
   await rpc('accounts.remove', { id: personal.id, confirmName: 'Personal' });
   state = await rpc('workspace.status');
   assert.equal(state.activeAccountId, work.id);
-  assert.equal((await rpc('notifications.list', { accountId: work.id })).filter(item => item.unread).length, 1);
+  assert.equal((await rpc('notifications.list', { accountId: work.id })).filter(item => item.unread).length, 0);
   assert.equal((await rpc('notifications.list')).some(item => item.accountId === personal.id), false, 'Deleting an account clears only its receipts');
   assert.equal(state.accounts.length, 1);
   const deletedCookies = await desktop.evaluate(({ session }, partition) => session.fromPartition(partition).cookies.get({}), personal.partition);

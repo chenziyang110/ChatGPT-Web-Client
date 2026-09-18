@@ -29,12 +29,17 @@ try {
     await wc.executeJavaScript(`history.pushState({}, '', ${JSON.stringify(url)})`);
   }, url);
   await navigateInPage('/c/old');
+  await rpc('queues.pause', { accountId: account.id });
+  const taskCount = (await rpc('workspace.status')).tasks.length;
   await page.getByRole('button', { name: '新对话', exact: true }).click();
   await until(async () => {
     const state = await rpc('workspace.status');
     return state.pages.length === 2 && state.page.url === 'https://chatgpt.com/' && !state.page.loading && !state.tasks.some(t => t.status === 'running');
   });
-  const fresh = (await rpc('workspace.status')).page.id;
+  const afterNewConversation = await rpc('workspace.status');
+  assert.equal(afterNewConversation.tasks.length, taskCount, 'Manual new conversation must not create or wait behind an Agent task');
+  await rpc('queues.resume', { accountId: account.id });
+  const fresh = afterNewConversation.page.id;
   assert.notEqual(fresh, original);
   await page.getByRole('button', { name: 'Agent 协作', exact: true }).click();
   const preview = page.getByLabel('Agent 协作提示词', { exact: true });

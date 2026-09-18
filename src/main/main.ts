@@ -111,6 +111,11 @@ else void app.whenReady().then(async () => {
     }
     if (name === 'tasks.decide') return workspace.decideTask(params);
     if (name === 'browser.preview') return browser.preview(identifier(params.accountId), params.pageId === undefined ? undefined : identifier(params.pageId));
+    if (name === 'browser.newConversation') {
+      const account = accounts.activate(accounts.resolve(params.accountId).id);
+      await browser.newConversation(account.id);
+      return browser.page();
+    }
     if (name === 'agent.prompt.copy') {
       const handoff = await workspace.call('agent.prompt', params) as AgentHandoff;
       clipboard.writeText(handoff.prompt); return { copied: true };

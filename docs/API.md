@@ -5,17 +5,17 @@
 From v1.1.0 all platforms include a native Agent under `resources/agent/` (`Contents/Resources/agent/` inside the macOS app). The executable is `chatgpt-agent.exe` on Windows and `chatgpt-agent` on macOS/Linux. Development builds place it in `dist-agent/`. It is a standalone Go binary with no Node.js dependency. The copied Agent prompt includes its absolute path and fixed account/conversation arguments.
 
 ```powershell
-.\chatgpt-agent.exe ask --account ACCOUNT_ID --new --text-file question.txt --stream
+.\chatgpt-agent.exe ask --account ACCOUNT_ID --new --text-file question.txt
 .\chatgpt-agent.exe ask --account ACCOUNT_ID --conversation CONVERSATION_ID --text-file question.txt
-.\chatgpt-agent.exe resume TASK_ID --stream
+.\chatgpt-agent.exe resume TASK_ID
 .\chatgpt-agent.exe resume --request-file SAVED_REQUEST.json
 ```
 
-`ask` submits once and **blocks until the full reply**. There is no local deadline unless `--wait-timeout` is supplied. The webpage reply budget defaults to one hour; if that expires after sending, the tool attempts read-only recovery while the page continues generating. Requests and UUIDs are written under the profile's `agent-requests/` before sending. The tool rereads private discovery on reconnect and retries creation only with identical parameters and key. Once it has a task ID, it only waits/reads that task. Ctrl+C, an Agent process-wait yield, or a local timeout is not completion and must not trigger a new send. Continue waiting for the running process or use `resume`.
+`ask` submits once and **blocks until the full reply**. Agents that only need the final answer should omit `--stream`, keep this one process alive, and use their longest process-wait operation instead of creating a recurring monitor or polling `tasks.get`. There is no local deadline unless `--wait-timeout` is supplied. The webpage reply budget defaults to one hour; if that expires after sending, the tool attempts read-only recovery while the page continues generating. Requests and UUIDs are written under the profile's `agent-requests/` before sending. The tool rereads private discovery on reconnect and retries creation only with identical parameters and key. Once it has a task ID, it only waits/reads that task. Ctrl+C, an Agent process-wait yield, or a local timeout is not completion and must not trigger a new send. Continue waiting for the running process or use `resume`.
 
 With `--stream`, stdout is UTF-8 newline-delimited JSON. `task` identifies the operation; `status` and `heartbeat` describe ongoing work; append `delta.text`, and replace the accumulated answer on `replace.text`. Only `done` signals success, containing the full `result.response` and conversation URL. Partial text may be revised by the webpage and is not a completed answer. Without `--stream`, stdout is one final task JSON. stderr carries progress, request path, and task ID, never the connection token. Exit codes: 0 answer received; 1 error/review required; 2 invalid arguments; 3 local timeout; 130 interrupted.
 
-`waiting_user` keeps the tool waiting while the user handles the client dialog. For `uncertain`, `tasks.response` reads only the associated page and verifies the exact submitted question/message ID, final controls, absence of generation/draft, and three seconds of stable content. It never sends, navigates, resumes a queue or acknowledges a task. If page association was lost on restart, the human can identify the already-open original page using `resume TASK_ID --url URL`. An unavailable/mismatched page still requires review; arbitrary page text never counts as the answer. Recovered responses are marked `recovered:true`, while the original uncertain task audit record remains unchanged.
+`waiting_user` keeps the same tool process waiting while the user handles the client dialog. Notify the user once; after takeover, the user clicks **交还 Agent 并继续**, which resumes the original task and wakes the existing waiter. Do not classify this expected pause as `blocked` or start another monitor. For `uncertain`, `tasks.response` reads only the associated page and verifies the exact submitted question/message ID, final controls, absence of generation/draft, and six seconds of stable content. It never sends, navigates, resumes a queue or acknowledges a task. If page association was lost on restart, the human can identify the already-open original page using `resume TASK_ID --url URL`. An unavailable/mismatched page still requires review; arbitrary page text never counts as the answer. Recovered responses are marked `recovered:true`, while the original uncertain task audit record remains unchanged.
 
 Internally, `tasks.wait` accepts `id`, `timeoutMs` (0–25000), `afterUpdatedAt`, and `updates:true` for incremental snapshots. Its timeout returns the current task without cancellation. This releases the Electron event loop, so other conversations and the UI continue operating while the calling CLI blocks.
 
@@ -47,7 +47,7 @@ Without `--submit`, prompts prepare a draft. Existing non-empty drafts pause aut
 
 Each conversation has a serial queue and an independent browser page. Different conversations in the same account share only the login partition and can run concurrently. Up to **two automated tasks** execute at once; ready accounts share capacity fairly. An unrelated manual generation does not block a new conversation. The queue has a global limit of 30 pending/running/waiting_user tasks. Pending work does not automatically resume after an application restart.
 
-Before switching pages or submitting, automation waits for the current page to become idle, preserves existing drafts, and rechecks the pinned target and user-message anchor. An ordinary response requires the matching newly submitted user turn, a later assistant turn, a recognized completion control, no visible busy indicator, an empty composer, and three seconds of stable content. Missing/unknown signals never count as successful completion. DOM changes can require an adapter update.
+Before switching pages or submitting, automation waits for the current page to become idle, preserves existing drafts, and rechecks the pinned target and user-message anchor. An ordinary response requires the matching newly submitted user turn, a later assistant turn, a recognized completion control, no visible busy indicator, an empty composer, and six seconds of stable content. Missing/unknown signals never count as successful completion. DOM changes can require an adapter update.
 
 | Status | Meaning and next step |
 | --- | --- |
@@ -92,7 +92,7 @@ Task history normally retains up to 200 records, preserving unresolved work. Cle
 {"method":"tasks.create","params":{"accountId":"work","conversation":"daily","idempotencyKey":"daily-001","input":{"type":"prompt","prompt":"Hello","submit":true}}}
 ```
 
-Success is `{ok:true,result:...}`. Errors use `{ok:false,error:"..."}` and non-2xx status. Successful creation means queued, not completed; poll `tasks.get`. IPC and HTTP share the dispatcher and queue.
+Success is `{ok:true,result:...}`. Errors use `{ok:false,error:"..."}` and non-2xx status. Successful creation means queued, not completed; use `tasks.wait` to long-poll the same task until it reaches a terminal state. IPC and HTTP share the dispatcher and queue.
 
 | Method | Parameters | Result |
 | --- | --- | --- |
@@ -170,7 +170,7 @@ Batch import, background daemon operation without Electron, per-conversation par
 
 ## Conversation notifications and shortcut settings
 
-`workspace.status` also returns `notifications` and `shortcuts`. Notification records contain account ID, canonical conversation URL, title, running/unread flags, completion time and a reply fingerprint token; notification storage does not duplicate prompt/response text. Counts are distinct unread conversations per account, not the number of generated turns. Historical page loads establish a baseline rather than emit new notifications. Running flags reset on restart while unread receipts persist.
+`workspace.status` also returns `notifications` and `shortcuts`. Notification records contain account ID, canonical conversation URL, title, running/unread flags, completion time and a reply fingerprint token; notification storage does not duplicate prompt/response text. Counts are distinct unread conversations per account, not the number of generated turns. Historical page loads establish a baseline rather than emit new notifications. An unread receipt is cleared when its exact conversation is visibly selected in the focused workspace; background selection, hidden/minimized windows, modals and Agent-locked previews do not count as viewed. Running flags reset on restart while genuinely unread receipts persist.
 
 | Method | Parameters | Result |
 | --- | --- | --- |
@@ -195,6 +195,8 @@ The monitor reads each live supported page every 1.5 seconds, with at most one o
 `agent.prompt({accountId,pageId})` pins an exact open page, validating its account ownership. `pageId`, `current`, `url`, and `conversation` are mutually exclusive. A loaded blank homepage produces a new-conversation handoff; an opening or closed page raises an error rather than substituting a saved URL. The toolbar snapshots the live selected page when clicked: ordinary conversations are pinned by URL, while home, project and other unsupported pages default the dialog to a new consultation. Explicitly selecting an unsupported current conversation still fails with actionable guidance. Preview and copy keep the resolved target, including when enabling the service or switching background pages.
 
 `workspace.status.pages` lists opened page IDs, account/conversation IDs, selected/locked state and the current task ID. `browser.select({accountId,pageId})` changes the visible page without navigating or stopping the other pages; `browser.closePage({accountId,pageId})` refuses locked pages. `browser.inspect` and trusted `browser.preview` accept optional `pageId`. Every page reference is checked against the account.
+
+The desktop **New conversation** button is a trusted manual action, not `browser.navigate`: it opens a separate ChatGPT home tab immediately and never creates or waits behind an Agent task. The queued `browser.navigate` RPC remains available for automated navigation that must follow task safety rules.
 
 `queues.pause/resume/takeover` accept optional `conversation` (resolved within the account). CLI: `queue takeover --account ID --conversation ID`. Omitting it retains an explicit account-wide action. Queue status includes account summaries and per-conversation rows; account summaries include all `runningTaskIds`. A page error or scoped takeover pauses only that conversation. Deleting an account still waits for every active conversation and wipes all its pages before clearing its profile.
 

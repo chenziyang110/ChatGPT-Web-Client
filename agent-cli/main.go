@@ -38,6 +38,7 @@ Options (before or after the command):
   --reply-timeout SECONDS  Webpage reply budget, default 3600 (1–3600)
 
 ask sends once and blocks until the full reply. No Node.js is needed.
+Omit --stream for a quiet wait with one final result; do not start a separate poller.
 The tool saves the full request and key BEFORE sending, and prints its path to stderr.
 On connection failure it rereads discovery and reconnects to the SAME request/task.
 resume reads the original task; it never fills or sends another webpage message.

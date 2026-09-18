@@ -217,8 +217,7 @@ try {
   await checkBrowserBounds();
   assert.equal(await accountScript(work, 'window.fixtureSendCount || 0'), 0);
   await accountScript(work, "document.querySelector('textarea').value = ''");
-  await page.locator('.attention-banner').getByRole('button', { name: '选择如何处理' }).click();
-  await page.getByRole('button', { name: '处理好了，继续', exact: true }).click();
+  await page.locator('.attention-banner').getByRole('button', { name: '交还 Agent 并继续', exact: true }).click();
   const submitted = await waitTask(blockedDraft);
   assert.equal(submitted.result.response, 'Fixture reply: Hello');
   await rpc('queues.pause', { accountId: work.id });

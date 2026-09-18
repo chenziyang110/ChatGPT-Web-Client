@@ -13,5 +13,5 @@ export function taskAttention(error: string, sent = false, takeover = false): Ta
     : { kind: 'other', title: '任务需要你的选择', detail: '自动操作已暂停，问题尚未发送。请检查页面后继续，或取消这个任务。' };
   return { id: randomUUID(), ...entry, choices: sent
     ? [{ id: 'takeover', label: '接管' }, { id: 'acknowledge', label: '已核对，结束此任务' }]
-    : [{ id: 'takeover', label: '接管' }, { id: 'retry', label: entry.kind === 'page' ? '再试一次' : '处理好了，继续' }, { id: 'cancel', label: '取消任务' }] };
+    : [{ id: 'takeover', label: '接管' }, { id: 'retry', label: entry.kind === 'page' ? '再试一次' : entry.kind === 'manual_takeover' ? '交还 Agent 并继续' : '处理好了，继续' }, { id: 'cancel', label: '取消任务' }] };
 }

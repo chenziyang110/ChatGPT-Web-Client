@@ -59,6 +59,9 @@ test('Agent prompt generation is read-only, pins IDs, and supplies account or co
   const helpPrompt = await workspace.call('agent.prompt', { accountId: account.id }) as AgentHandoff;
   assert.equal(helpPrompt.helpUrl, 'http://127.0.0.1:12345/help.html');
   assert.match(helpPrompt.prompt, /help.html/); assert.match(helpPrompt.prompt, /waiting_user/);
+  assert.match(helpPrompt.prompt, /默认不要加 --stream/);
+  assert.match(helpPrompt.prompt, /不要创建定时轮询或监控目标/);
+  assert.match(helpPrompt.prompt, /保持同一个子进程/);
   assert.ok(helpPrompt.prompt.length < 1600, 'Instructions stay compact; the help page carries API detail');
   await assert.rejects(workspace.call('tasks.decide', { id: 'not-a-task' }), /Unknown method/);
   await assert.rejects(workspace.call('browser.preview', { accountId: account.id }), /Unknown method/);
@@ -83,7 +86,7 @@ test('Agent prompt generation is read-only, pins IDs, and supplies account or co
   const installed = buildAgentPrompt(account, { accountId: account.id, url: saved.url }, saved.title, { apiEnabled: true, discoveryFile: path.resolve('agent-runtime.json') });
   assert.equal(installed.commands, undefined, 'Packaged apps provide HTTP instructions without an unusable CLI path');
   assert.equal(installed.createRequest.params.url, saved.url);
-  assert.match(installed.prompt, /POST/); assert.match(installed.prompt, /tasks.get/);
+  assert.match(installed.prompt, /POST/); assert.match(installed.prompt, /tasks.wait/);
   assert.equal(gateway.listTasks().length, 0); await gateway.stop(); db.close();
 });
 

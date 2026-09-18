@@ -231,7 +231,9 @@ function App() {
           {showPreview && <span className="preview-mode" title="页面由 Agent 控制。需要操作网页时，请选择接管。">只读预览</span>}
         </div>
         <div className="workspace-status-actions">
-          {attentionTask && <button className="attention-chip" aria-label="选择如何处理" title="处理当前会话的任务" onClick={() => openModal({ kind: 'task', task: attentionTask })}>处理任务<Icon name="arrow" size={13} /></button>}
+          {attentionTask && (attentionTask.status === 'waiting_user' && !pageLocked && attentionTask.attention?.choices.some(choice => choice.id === 'retry')
+            ? <button className="attention-chip" onClick={() => choose(attentionTask, 'retry')}>交还 Agent 并继续<Icon name="arrow" size={13} /></button>
+            : <button className="attention-chip" aria-label="选择如何处理" title="处理当前会话的任务" onClick={() => openModal({ kind: 'task', task: attentionTask })}>处理任务<Icon name="arrow" size={13} /></button>)}
           {showPreview && <>
             <button className="status-detail" onClick={() => { if (previewTask) openModal({ kind: 'task', task: previewTask }); else setTab('tasks'); }}>查看任务</button>
             <button className="status-takeover" title="暂停此会话队列并接管网页操作" onClick={() => takeover(active!.id)}>接管</button>

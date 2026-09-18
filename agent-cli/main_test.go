@@ -140,6 +140,45 @@ func TestBlockingStreamAndSavedReplay(t *testing.T) {
 	}
 }
 
+func TestQuietWaitSurvivesHumanTakeoverAndOnlyPrintsFinalResult(t *testing.T) {
+	var waits atomic.Int32
+	dir := server(t, func(w http.ResponseWriter, r *http.Request) {
+		req := decode(t, r)
+		if req.Method == "tasks.get" {
+			envelope(w, map[string]any{"id": "quiet", "status": "running", "updatedAt": 1})
+			return
+		}
+		if req.Method != "tasks.wait" {
+			t.Errorf("unexpected mutation: %s", req.Method)
+		}
+		n := waits.Add(1)
+		result := map[string]any{"id": "quiet", "status": "running", "updatedAt": n + 1}
+		switch n {
+		case 1:
+			result["status"] = "waiting_user"
+			result["attention"] = map[string]any{"title": "你已接管，任务等待继续"}
+		case 2:
+			result["status"] = "pending"
+		default:
+			result["status"] = "done"
+			result["result"] = map[string]any{"response": "恢复后的最终回答", "url": "https://chatgpt.com/c/quiet"}
+		}
+		envelope(w, result)
+	})
+	var out, stderr bytes.Buffer
+	code, err := run(context.Background(), []string{"resume", "quiet", "--data-dir", dir}, &out, &stderr)
+	if err != nil || code != 0 {
+		t.Fatalf("%d %v %s", code, err, stderr.String())
+	}
+	if waits.Load() != 3 || strings.Count(strings.TrimSpace(out.String()), "\n") != 0 {
+		t.Fatalf("quiet wait emitted intermediate stdout: %q", out.String())
+	}
+	var result task
+	if json.Unmarshal(out.Bytes(), &result) != nil || result.Status != "done" || !strings.Contains(string(result.Result), "恢复后的最终回答") {
+		t.Fatal(out.String())
+	}
+}
+
 func TestResumeNeverSendsAndRecoversReadOnly(t *testing.T) {
 	var reads atomic.Int32
 	dir := server(t, func(w http.ResponseWriter, r *http.Request) {

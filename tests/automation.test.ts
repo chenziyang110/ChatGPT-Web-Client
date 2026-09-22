@@ -98,7 +98,7 @@ test('uncertain cancellation quarantines the account until review and keeps the 
   await until(() => sent === 1); gateway.cancel(first.id);
   assert.equal(gateway.get(first.id).status, 'uncertain');
   assert.equal(gateway.isRunning('a'), true);
-  assert.throws(() => gateway.resume('a', true), /current task/);
+  assert.throws(() => gateway.resume('a', true), /暂停操作完成/);
   cleanup.resolve(); await until(() => !gateway.isRunning('a'));
   assert.equal(gateway.get(next.id).status, 'pending');
   assert.throws(() => gateway.resume('a'), /REVIEW_REQUIRED/);

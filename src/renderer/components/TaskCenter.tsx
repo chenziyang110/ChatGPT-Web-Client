@@ -4,13 +4,16 @@ import { Icon } from './Icon';
 import { Select } from './Select';
 import { taskAttentionCopy } from '../../shared/taskAttentionCopy';
 import { canClearTask } from '../../shared/taskHistory';
+import { QueueOverview } from './QueueOverview';
+import { LONG_REPLY_TIMEOUT_MS } from '../../shared/conversationQueue';
 export const statusLabels = { pending: '等待中', running: '运行中', done: '已完成', failed: '失败', cancelled: '已取消', blocked: '需要处理', waiting_user: '等待你的选择', uncertain: '待核对' };
 export const phaseLabels = { queued: '已排队', preparing: '准备页面', waiting_idle: '等待上一轮结束', preparing_prompt: '填写提示词', send_intent: '正在发送', submitted: '已发送，等待回复', generating: '等待回复', completed: '已完成' };
 const taskLabels = { prompt: '提示词', snapshot: '页面快照', navigate: '页面导航', fill: '填写内容', click: '点击元素' };
 type Action = (method: string, params?: Record<string, unknown>, after?: () => void) => Promise<void>;
-export function TaskCenter({ state, busy, action, inspect, takeover, agentPrompt }: {
+export function TaskCenter({ state, busy, action, inspect, takeover, agentPrompt, openQueue }: {
   state?: WorkspaceState; busy: boolean; action: Action; inspect: (task: AgentTask) => void; takeover: (accountId: string, conversationId?: string) => void;
   agentPrompt: (target: AgentPromptTarget) => void;
+  openQueue: (accountId: string, conversationId: string) => void;
 }) {
   const [selectedAccount, setSelectedAccount] = useState('');
   const [conversation, setConversation] = useState('current');
@@ -24,7 +27,7 @@ export function TaskCenter({ state, busy, action, inspect, takeover, agentPrompt
   const target = conversation === 'new' ? { new: true, alias: alias || undefined } : conversation === 'current' ? { current: true } : { conversation };
   function create(event: FormEvent) {
     event.preventDefault();
-    const params = { accountId, ...target, input: { type: 'prompt', prompt, submit } };
+    const params = { accountId, ...target, input: { type: 'prompt', prompt, submit }, replyTimeoutMs: LONG_REPLY_TIMEOUT_MS, idleTimeoutMs: LONG_REPLY_TIMEOUT_MS, background: true };
     const signature = JSON.stringify(params);
     if (request.current?.signature !== signature) request.current = { signature, key: crypto.randomUUID() };
     void action('tasks.create', { ...params, idempotencyKey: request.current.key }, () => { setPrompt(''); request.current = undefined; });
@@ -32,6 +35,7 @@ export function TaskCenter({ state, busy, action, inspect, takeover, agentPrompt
   return <section className="content tasks-page">
     <div className="page-heading"><div><h2>任务</h2></div>
       <button className="secondary" disabled={!accountId || busy} onClick={() => void action('tasks.create', { accountId, input: { type: 'snapshot' } })}><Icon name="snapshot" size={16} /> 读取页面快照</button></div>
+    {state && <QueueOverview state={state} open={openQueue} />}
     <div className="queue-list">{state?.accounts.map(account => {
       const queue = state.queues.find(item => item.accountId === account.id);
       const active = state.tasks.find(task => task.id === queue?.runningTaskId);
@@ -41,8 +45,8 @@ export function TaskCenter({ state, busy, action, inspect, takeover, agentPrompt
           {queue?.reason ? <p>{queue.reason}</p> : state.tasks.some(task => task.accountId === account.id && task.status === 'pending') && <p>{state.tasks.filter(task => task.accountId === account.id && task.status === 'pending').length} 个任务排队中</p>}
         </div>
         <div className="queue-actions"><button className="secondary" disabled={busy} onClick={() => takeover(account.id)}>接管页面</button>
-          {waiting ? <button className="primary" onClick={() => inspect(waiting)}>选择如何处理</button> : queue?.paused ? <button className="primary" disabled={busy || !!active} onClick={() => void action('queues.resume', { accountId: account.id })}>继续队列</button>
-            : <button className="secondary" disabled={busy} onClick={() => void action('queues.pause', { accountId: account.id })}>暂停队列</button>}</div>
+          {waiting ? <button className="primary" onClick={() => inspect(waiting)}>选择如何处理</button> : queue?.paused ? <button className="primary" disabled={busy} onClick={() => void action('queues.resume', { accountId: account.id })}>恢复此账号全部队列</button>
+            : <button className="secondary" disabled={busy} onClick={() => void action('queues.pause', { accountId: account.id })}>暂停此账号全部队列</button>}</div>
       </div>;
     })}</div>
     <form className="card composer" onSubmit={create}>

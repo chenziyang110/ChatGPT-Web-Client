@@ -49,6 +49,8 @@ Each conversation has a serial queue and an independent browser page. Different 
 
 Before switching pages or submitting, automation waits for the current page to become idle, preserves existing drafts, and rechecks the pinned target and user-message anchor. An ordinary response requires the matching newly submitted user turn, a later assistant turn, a recognized completion control, no visible busy indicator, an empty composer, and six seconds of stable content. Missing/unknown signals never count as successful completion. DOM changes can require an adapter update.
 
+After sending, recent user turns are matched by their message IDs. Older DOM nodes may unmount, or earlier history may appear before the known sequence, without invalidating the current reply. Initial acknowledgement still requires the last pre-send user anchor followed by exactly one matching new turn. After acknowledgement the exact submitted ID and text remain required; edited or reordered known history, missing interior turns, duplicate IDs and additional user messages pause the task. Positional fallback IDs cannot authorize history-window changes. Once submission is confirmed, review notices say that the message was sent and the reply needs verification; they do not offer a resend.
+
 | Status | Meaning and next step |
 | --- | --- |
 | `pending` | Queued; may be waiting for account capacity or resume |
@@ -60,7 +62,7 @@ Before switching pages or submitting, automation waits for the current page to b
 | `cancelled` | Cancelled before send intent |
 | `failed` | Legacy task without a safe target was not replayed during migration |
 
-Preparation has a 60-second budget; waiting for previous generation and waiting for the new reply each default to 10 minutes. `--reply-timeout SECONDS` sets the reply budget (1–3600 seconds). Errors pause the affected account. Local cancellation/takeover does not retract messages or guarantee stopping ChatGPT generation.
+Preparation has a 60-second budget. Direct RPC and Node CLI tasks default to independent 10-minute budgets for the previous generation and the new reply. `--idle-timeout SECONDS` and `--reply-timeout SECONDS` set them independently (1–3600 seconds); the desktop conversation queue uses 60 minutes for each. Errors pause the affected conversation. Local cancellation/takeover does not retract messages or guarantee stopping ChatGPT generation.
 
 ```sh
 node dist-electron/cli.cjs queue status
@@ -72,7 +74,9 @@ node dist-electron/cli.cjs task wait <task-id> --wait-timeout 120
 node dist-electron/cli.cjs task cancel <task-id>
 ```
 
-Pause lets the running task finish and stops dispatching later tasks. Takeover also cancels local execution, waits for browser-operation cleanup, and restores manual control. The native account page and popups stay hidden while Agent-controlled. Trusted desktop IPC captures a bounded JPEG frame for a live read-only preview every second; no screenshot endpoint is exposed to HTTP. Waiting-for-choice pages stay locked until takeover; account shortcuts move focus away from a locked page. An external browser/device can still change a conversation; detected conflicts pause execution. This cannot guarantee exclusion of remote concurrent edits.
+Pause preserves an already sent reply but gates every later send. A task still waiting for the previous reply returns to pending. If the adapter has just filled a draft, it removes only that exact unchanged draft before returning to pending; conflicts require human review. Resume can enable subsequent messages while the current sent reply continues, without duplicating execution. Takeover also cancels local execution, waits for browser-operation cleanup, and restores manual control. The native account page and popups stay hidden while Agent-controlled. Trusted desktop IPC captures a bounded JPEG frame for a live read-only preview every second; no screenshot endpoint is exposed to HTTP. Waiting-for-choice pages stay locked until takeover; account shortcuts move focus away from a locked page. An external browser/device can still change a conversation; detected conflicts pause execution. This cannot guarantee exclusion of remote concurrent edits.
+
+Pass `conversation` to pause/resume/takeover for one conversation; omit it for all queues in the account. Account summary `paused` describes the account-wide switch, while `pausedConversationCount` counts independently paused conversations. Inspect the separate conversation queue rows for their states. `background:true` (Node CLI `--background`) keeps the selected page unchanged while the pinned task executes.
 
 Acknowledgement resolves uncertain tasks for queue management; it **does not resend them**. Pre-send waiting_user tasks require an explicit desktop decision. Generic resume returns USER_DECISION_REQUIRED. The decision carries task ID and a current attention token; stale decisions are rejected. A queued browser task cannot bypass a paused queue.
 
@@ -104,14 +108,19 @@ Success is `{ok:true,result:...}`. Errors use `{ok:false,error:"..."}` and non-2
 | `conversations.register` | `{accountId,url,alias?}` | Register/update an ordinary conversation target |
 | `conversations.create` | `{accountId,alias?}` | Reserve an unbound local conversation |
 | `conversations.get` | `{accountId,conversation}` | Resolve a target within its account |
-| `tasks.create` | `{accountId,input,conversation?,url?,current?,new?,alias?,idempotencyKey?,replyTimeoutMs?}` | Pinned queued task; choose at most one target selector |
+| `conversations.forPage` | `{accountId,pageId}` | Pin a live page to a local conversation, including an empty new-chat page |
+| `conversations.open` | `{accountId,conversation}` | Select the target's existing page or open a separate page |
+| `tasks.create` | `{accountId,input,conversation?,url?,current?,new?,alias?,idempotencyKey?,replyTimeoutMs?,idleTimeoutMs?,background?}` | Pinned queued task; choose at most one target selector; timeout values are integer milliseconds, 1000–3600000 |
 | `tasks.list/get/cancel/clear` | `{}`, `{id}`, `{id}`, `{}` | History, detail, cancellation, or clear resolved history |
-| `queues.status/pause/resume/takeover` | `{}`, `{accountId}`, `{accountId,acknowledged?}`, `{accountId}` | Queue controls |
+| `tasks.edit` | `{accountId,conversation,id,expectedUpdatedAt,prompt}` | Edit a pending prompt; maximum 32000 characters |
+| `tasks.removeQueued` | `{accountId,conversation,id,expectedUpdatedAt}` | Cancel a still-pending item; stale controls cannot cancel a running task |
+| `queues.reorder` | `{accountId,conversation,items:[{id,updatedAt}]}` | Reorder the complete set of pending items in one conversation |
+| `queues.status/pause/resume/takeover` | `{}`, `{accountId,conversation?}`, `{accountId,conversation?,acknowledged?}`, `{accountId,conversation?}` | Account-wide or conversation-specific queue controls |
 | `browser.navigate` | `{accountId,url}` | Queued navigation; rejected with outstanding account work |
-| `browser.inspect` | `{accountId}` | Read-only page readiness, URL/title, editor presence, draft length and busy flag; bypasses the sending queue without resuming it |
+| `browser.inspect` | `{accountId,pageId?}` | Read-only page readiness, URL/title, editor presence, draft length, busy flag and structural DOM diagnostics; bypasses the sending queue without resuming it |
 | `browser.control` | `{accountId,action}` | Manual `reload/back/forward`; locked during execution |
 
-The trusted renderer additionally exposes `ui.bounds`, `ui.visibility`, `window.state/control`, `settings.api`, `agent.prompt.copy`, `browser.preview` and `tasks.decide`. HTTP cannot call those methods. `agent.prompt.copy` accepts the same target parameters and writes the generated prompt to the system clipboard; ordinary `agent.prompt` only returns data.
+The trusted renderer additionally exposes `ui.bounds`, `ui.visibility`, `window.state/control`, `settings.api`, `agent.prompt.copy`, `browser.preview` and `tasks.decide`. HTTP cannot call those methods. Update operations (`updates.status/check/configure/open/download/cancel/install`) are also trusted IPC only. Downloads are explicit, architecture-specific and hash-verified; installation refuses running tasks or webpage replies, persists state, then replaces and restarts the installed app. `agent.prompt.copy` accepts the same target parameters and writes the generated prompt to the system clipboard; ordinary `agent.prompt` only returns data.
 
 Task inputs:
 
@@ -124,7 +133,9 @@ Task inputs:
 {"type":"prompt","prompt":"Please answer","submit":true}
 ```
 
-Low-level click means the click ran; it does not promise a ChatGPT reply. Use submitted prompts for reply-aware sequencing. Fill refuses passwords and nonempty fields. Snapshot returns up to 64,000 characters of visible main content. Browser actions have no arbitrary script/shell or credential export interface. Tasks carry `conversationId`, `targetUrl`, phase/timestamps, `seq`, `sendIntentAt`, `submittedAt`, and (after review) `resolvedAt`; an unbound target resolves its URL through the conversation registry at execution.
+Low-level click means the click ran; it does not promise a ChatGPT reply. Use submitted prompts for reply-aware sequencing. Fill refuses passwords and nonempty fields. Snapshot returns up to 64,000 characters of visible main content. Browser actions have no arbitrary script/shell or credential export interface. Tasks carry `conversationId`, `targetUrl`, phase/timestamps, `seq`, `queueOrder`, `background`, `sendIntentAt`, `submittedAt`, and (after review) `resolvedAt`; an unbound target resolves its URL through the conversation registry at execution.
+
+Editing, removal and reordering require the latest `updatedAt` from task reads. Reordering must provide every pending item exactly once and leaves started tasks untouched. A changed version, started item or stale pending set returns 409 `QUEUE_CHANGED`; reread before offering another change. Editing preserves the original creation key and request hash: retrying the original creation returns the edited existing task instead of sending a duplicate. All these methods also work through `node dist-electron/cli.cjs rpc METHOD JSON`.
 
 ## External tools / AnythingCLI
 
@@ -148,6 +159,10 @@ The handoff contains no token and does not read the discovery file. CLI arrays i
 
 Use `browser inspect --account ID` before retrying a page error. It never creates a task, changes the queue, navigates, reads draft/message text or exports credentials. It inspects only an already opened account view; `not_open` means open that account in the desktop first. `ready` reports an available composer, while `draftLength` and `busy` identify reasons not to submit yet. `loading`, `verification_required`, `login_required` and `unavailable` include a suggested next step. A ready page does not imply that its queue is resumed or that a particular model was selected.
 
+The optional `dom` result describes the editor tag/contenteditable flag, visible editor count, draft line lengths, editor child tags/text lengths/line-break counts (first 20 lines/children), send button availability, individual busy markers, message count, final message role and terminal-action visibility. It contains no draft or message bodies. These are observations, not a guarantee of reply completion. The HTTP `browser.inspect` method accepts an optional `pageId` to pin repeated samples to one already opened account page.
+
+Page automation errors retain their known guard code and report the failing stage (for example `focus_editor`, `write_text`, or `verify_send`). Unexpected page exceptions report `PAGE_SCRIPT_FAILED` with a safe error class instead of storing arbitrary exception text. These diagnostics do not retry, submit, resume queues, or bypass existing human decisions.
+
 Document-load completion is insufficient for a dynamically initialized composer. Before mutating the page, prompt execution waits up to 30 seconds (bounded by its preparation budget) for the composer and account state to become ready. Persistent verification/login pages are reported explicitly; verification challenges are never solved automatically. `COMPOSER_NOT_READY` indicates the input never became available. Preserve and inspect the original waiting_user task; do not submit duplicates. Model selection remains controlled by the webpage, with no automatic Pro selection API.
 
 ### Call from another tool
@@ -166,7 +181,7 @@ const { stdout } = await promisify(execFile)(process.execPath, [
 const task = JSON.parse(stdout);
 ```
 
-Batch import, background daemon operation without Electron, per-conversation parallel browser pages, and server-history synchronization remain later phases. The desktop app must stay running with the target accounts logged in.
+Batch import, background daemon operation without Electron, and server-history synchronization remain later phases. The desktop app must stay running with the target accounts logged in.
 
 ## Conversation notifications and shortcut settings
 
@@ -195,6 +210,8 @@ The monitor reads each live supported page every 1.5 seconds, with at most one o
 `agent.prompt({accountId,pageId})` pins an exact open page, validating its account ownership. `pageId`, `current`, `url`, and `conversation` are mutually exclusive. A loaded blank homepage produces a new-conversation handoff; an opening or closed page raises an error rather than substituting a saved URL. The toolbar snapshots the live selected page when clicked: ordinary conversations are pinned by URL, while home, project and other unsupported pages default the dialog to a new consultation. Explicitly selecting an unsupported current conversation still fails with actionable guidance. Preview and copy keep the resolved target, including when enabling the service or switching background pages.
 
 `workspace.status.pages` lists opened page IDs, account/conversation IDs, selected/locked state and the current task ID. `browser.select({accountId,pageId})` changes the visible page without navigating or stopping the other pages; `browser.closePage({accountId,pageId})` refuses locked pages. `browser.inspect` and trusted `browser.preview` accept optional `pageId`. Every page reference is checked against the account.
+
+While the workspace shows a locked page, `browser.preview` scrolls its conversation viewport to the latest reply before each capture. It finds the scrollable ancestor of the last message turn rather than clicking page controls; sidebars, nested code blocks and drafts are untouched. Inactive pages are captured without following. Following stops when the page is unlocked or taken over, and captures interrupted by navigation are discarded.
 
 The desktop **New conversation** button is a trusted manual action, not `browser.navigate`: it opens a separate ChatGPT home tab immediately and never creates or waits behind an Agent task. The queued `browser.navigate` RPC remains available for automated navigation that must follow task safety rules.
 

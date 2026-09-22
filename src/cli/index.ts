@@ -35,9 +35,11 @@ const help = `ChatGPT Web Client — local agent CLI
     Targets: --conversation, --url, --current, or --new (choose one).
     --idempotency-key KEY              Reuse the same key when retrying
     --reply-timeout SECONDS            Server reply budget (default 600)
+    --idle-timeout SECONDS             Previous-reply waiting budget (default 600)
+    --background                      Keep the selected page while executing
     --wait-timeout SECONDS             Client waiting budget; does not cancel
   queue status
-  queue pause|resume|takeover --account ID
+  queue pause|resume|takeover --account ID [--conversation ID]
     resume --acknowledged              Confirm manual review of uncertain sends
   task wait|get|cancel TASK_ID
   tasks                               List task history
@@ -62,6 +64,7 @@ async function main(): Promise<void> {
   if (!args.length || args.includes('--help') || args[0] === 'help') { console.log(help); return; }
   const { positional, options } = argumentsFor(args);
   const replyTimeoutMs = seconds(options['reply-timeout']);
+  const idleTimeoutMs = seconds(options['idle-timeout']);
   const waitTimeoutMs = seconds(options['wait-timeout']);
   const directory = typeof options['data-dir'] === 'string' ? path.resolve(options['data-dir']) : defaultDirectory();
   let discovery: Discovery;
@@ -98,7 +101,7 @@ async function main(): Promise<void> {
     // Print the recovery key before the request, even if the response is lost.
     console.error(JSON.stringify({ idempotencyKey }));
     const navigation = typeof input === 'object' && input !== null && 'type' in input && input.type === 'navigate';
-    return call<AgentTask>('tasks.create', { accountId: account(), input, ...(navigation ? {} : target()), idempotencyKey, replyTimeoutMs });
+    return call<AgentTask>('tasks.create', { accountId: account(), input, ...(navigation ? {} : target()), idempotencyKey, replyTimeoutMs, idleTimeoutMs, background: options.background });
   }
   switch (command) {
     case 'browser':

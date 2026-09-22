@@ -19,6 +19,7 @@ import { notifyConversationCompleted, registerTray, revealWindow } from './Deskt
 import type { AgentHandoff } from '../shared/types';
 
 import { UpdateChecker } from './UpdateChecker';
+import { createUpdateInstaller } from './UpdateInstaller';
 import { RELEASES_URL } from '../shared/updates';
 
 app.setName('ChatGPT-Web-Client');
@@ -32,6 +33,7 @@ else void app.whenReady().then(async () => {
   chmodSync(userData, 0o700);
   const db = new Database(path.join(userData, 'workspace.sqlite'));
   let stopping = false;
+  let preparingUpdate = false;
   const accounts = new AccountManager(db);
   const sessions = new SessionManager(db);
   const conversations = new ConversationManager(db);
@@ -46,7 +48,9 @@ else void app.whenReady().then(async () => {
     destroy: () => tray.destroy()
   }, items => Menu.buildFromTemplate(items), win, () => app.quit());
   const changed = () => { if (!stopping && !win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send('workspace:changed'); };
-  const updates = new UpdateChecker(app.getVersion(), db.get<boolean>('autoCheckUpdates') !== false, changed);
+  const installer = createUpdateInstaller();
+  const updates = new UpdateChecker(app.getVersion(), db.get<boolean>('autoCheckUpdates') !== false, changed, fetch,
+    installer, !app.isPackaged ? 'development' : installer ? 'in-app' : 'manual');
   const checkUpdates = () => { if (app.isPackaged && updates.state.enabled && !stopping) void updates.check(); };
   const updateStart = setTimeout(checkUpdates, 10000);
   const updateTimer = setInterval(checkUpdates, 6 * 60 * 60 * 1000);
@@ -84,7 +88,7 @@ else void app.whenReady().then(async () => {
     path.join(app.isPackaged ? path.join(process.resourcesPath, 'agent') : path.resolve(__dirname, '../dist-agent'),
       process.platform === 'win32' ? 'chatgpt-agent.exe' : 'chatgpt-agent'));
   const api: LocalApi = new LocalApi(discoveryFile, (method, params) => {
-    if (stopping) throw new AppError('Runtime is stopping', 503);
+    if (stopping || preparingUpdate) throw new AppError('Runtime is preparing to restart', 503);
     return workspace.call(method, params);
   });
   const rendererFile = path.join(__dirname, '../dist/index.html');
@@ -99,9 +103,27 @@ else void app.whenReady().then(async () => {
     const name = text(method, 'Method', 80);
     const params = record(value);
     if (JSON.stringify(params).length > 65536) throw new AppError('Request too large', 413);
+    if (preparingUpdate && !['updates.status', 'workspace.status'].includes(name)) throw new AppError('正在准备更新，请稍候。', 409);
     // Window controls are available only to the trusted local renderer, never the HTTP API.
     if (name === 'updates.status') return { ...updates.state };
     if (name === 'updates.check') return updates.check();
+    if (name === 'updates.download') return updates.download();
+    if (name === 'updates.cancel') { updates.cancelDownload(); return null; }
+    if (name === 'updates.install') {
+      preparingUpdate = true;
+      try {
+        await workspace.settled();
+        if (stopping) throw new AppError('Runtime is stopping', 503);
+        if (tasks.runningAccounts().length || await browser.hasBusyPage()) throw new AppError('还有回复或任务正在进行，请完成后再安装。', 409);
+        // No further await before shutdown blocks new work. Pending queue items
+        // are persisted and paused by the ordinary shutdown path.
+        if (stopping) throw new AppError('Runtime is stopping', 503);
+        if (tasks.runningAccounts().length) throw new AppError('还有任务正在进行，请完成后再安装。', 409);
+        updates.beginInstall();
+        void shutdown(true);
+        return null;
+      } finally { preparingUpdate = false; }
+    }
     if (name === 'updates.open') { await shell.openExternal(RELEASES_URL); return null; }
     if (name === 'updates.configure') {
       if (typeof params.enabled !== 'boolean') throw new AppError('enabled must be a boolean');
@@ -173,8 +195,9 @@ else void app.whenReady().then(async () => {
   }
   app.on('second-instance', () => { if (!win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } });
   app.on('activate', () => { if (!win.isDestroyed()) win.show(); });
-  const shutdown = async () => {
+  const shutdown = async (installUpdate = false) => {
     stopping = true;
+    updates.cancelDownload();
     bossKey.dispose();
     trayRegistration.dispose();
     clearTimeout(updateStart); clearInterval(updateTimer);
@@ -186,7 +209,14 @@ else void app.whenReady().then(async () => {
     browser.close();
     db.close();
     stopped = true;
-    app.quit();
+    if (installUpdate) {
+      try { updates.install(); }
+      catch {
+        // Relaunch the installed version if the updater cannot start. User data
+        // has been saved; a failed installation must not leave a dead window.
+        app.relaunch(); app.quit();
+      }
+    } else app.quit();
   };
   // Keep the native window alive until task execution and SQLite have shut down.
   win.on('close', event => {

@@ -20,14 +20,18 @@ Agent 位于 Windows / Linux 的 `resources/agent/` 或 macOS 的 `Contents/Reso
 2. 执行 npm audit、npm test、npm run test:agent、npm run build、npm run test:desktop。核对隐私、截图和 Git diff。
 3. 提交推送并创建匹配的 vX.Y.Z 标签。
 4. 在 Actions 运行 **Release Desktop**，输入标签并启用 publish。也可输入分支并保持 publish 关闭，仅生成待验证产物。六个矩阵任务分别执行测试和打包；桌面测试运行在构建机架构，不代表另一 CPU 的原生验收。
-5. macOS 打包后还须通过最终 ZIP / DMG 内应用的严格签名、架构、Agent 和应用启动检查。全部任务成功后，发布任务验证 10 个指定安装包/归档，无缺失、无额外文件、无空文件，生成 SHA256SUMS.txt，上传草稿，再发布为 Latest。已有 Release 不覆盖；失败保持未发布。
+5. macOS 打包后还须通过最终 ZIP / DMG 内应用的严格签名、架构、Agent 和应用启动检查。全部任务成功后，发布任务验证 10 个指定安装包/归档，无缺失、无额外文件、无空文件，再生成 4 个按系统/CPU 区分的更新清单及 SHA256SUMS.txt，上传草稿，再发布为 Latest。已有 Release 不覆盖；失败保持未发布。
 6. 验证下载和旧客户端“检查更新”。若云端构建因账户限制无法启动，不能将未生成的安装包宣称为已发布。
 
 不要上传整个 release 目录中的调试文件、测试截图或用户数据。工作流只提取指定安装包扩展名，再由发布清单进行严格检查。
 
 ## 更新与限制
 
-v1.0.0 起，安装版启动 10 秒后及每 6 小时请求本仓库 GitHub Latest Release；设置中可关闭或手动检查。只通知更高稳定版本，跳过预发布/草稿；下载后手动安装。检查不携带账户 Cookie、令牌或对话，GitHub 会收到普通请求的 IP 和固定 User-Agent。
+v1.0.0 起，安装版启动 10 秒后及每 6 小时请求本仓库 GitHub Latest Release；设置中可关闭或手动检查。只通知更高稳定版本，跳过预发布/草稿。v1.4.0 起，Windows NSIS / Linux AppImage 支持显式下载、取消、失败重试和安装并重启。更新请求不携带账户 Cookie、令牌或对话。
+
+`release-manifest.mjs` 从实际安装包计算 SHA-512 和大小，生成 `latest-x64.yml`、`latest-arm64.yml`、`latest-linux.yml`、`latest-linux-arm64.yml`；每份只指向同一 CPU 的一个二进制，避免矩阵上传时架构相互覆盖。主进程把下载源固定在已检查版本的 GitHub Release 目录，校验版本、文件名、架构、大小和哈希后交给 electron-updater 下载验证。安装只允许可信本地 UI 发起，HTTP 不提供更新安装能力。普通退出不自动安装；安装前检查任务和网页是否正在回复，正常保存数据、暂停队列、关闭 SQLite 后再启动安装器。
+
+macOS 的 ad-hoc 签名不足以支持当前 Squirrel.Mac 更新部署，保留官方安装包入口；Linux tar.gz 和开发态同样手动安装。v1.3.1 及更早版本需手动覆盖安装 v1.4.0 一次，不能回溯添加旧版没有的更新功能。
 
 安装前退出应用并保留数据目录。macOS 使用 ad-hoc 签名，Developer ID 签名及公证尚未配置；详见 [macOS 安装与签名](MACOS.md)。x64 / ARM64 是不同安装包，暂不生成 macOS Universal 包；不支持 32 位 x86 / ARMv7。
 

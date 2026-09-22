@@ -1,12 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { WebContents } from 'electron';
-import { ChatGPTAdapter } from '../src/main/adapters/ChatGPTAdapter';
+import { ChatGPTAdapter, pageOperationResult } from '../src/main/adapters/ChatGPTAdapter';
 import type { ConversationManager } from '../src/core/conversation/ConversationManager';
 import type { ExecutionContext } from '../src/core/agent/AgentGateway';
 import type { AgentTask } from '../src/shared/types';
 import { Database } from '../src/core/storage/Database';
 import { ConversationManager as Conversations } from '../src/core/conversation/ConversationManager';
+const pageResult = (value: unknown) => ({ workspacePageResult: true, ok: true, value });
+
+test('page result preserves a guarded failure instead of losing it across the Electron boundary', () => {
+  assert.throws(() => pageOperationResult({ workspacePageResult: true, ok: false, error: 'PAGE_SCRIPT_FAILED [stage=write_text; error=TypeError]' }), /stage=write_text; error=TypeError/);
+  assert.throws(() => pageOperationResult({ prepared: true }), /missing page result/);
+});
 
 function adapterFixture(readPage: (attempt: number) => Record<string, unknown>, prepareTimeoutMs = 4000, submit = false) {
   let attempts = 0; const operations: string[] = []; const controller = new AbortController();
@@ -16,8 +22,8 @@ function adapterFixture(readPage: (attempt: number) => Record<string, unknown>, 
   const contents = { isLoading: () => false, getURL: () => url, isDestroyed: () => false,
     executeJavaScript: async (script: string) => {
       const operation = JSON.parse(script.slice(script.lastIndexOf(')(') + 2, -1)); operations.push(operation.kind);
-      if (operation.kind === 'inspect') return { url, title: 'ChatGPT', editor: true, draft: '', busy: false, messages: [], ...readPage(++attempts) };
-      if (operation.kind === 'fill') return { prepared: true };
+      if (operation.kind === 'inspect') return pageResult({ url, title: 'ChatGPT', editor: true, draft: '', busy: false, messages: [], ...readPage(++attempts) });
+      if (operation.kind === 'fill') return pageResult({ prepared: true });
       if (operation.kind === 'check_send') throw new Error('SEND_UNAVAILABLE: prompt remains a draft');
       throw new Error('Unexpected operation');
     } } as unknown as WebContents;
@@ -77,13 +83,13 @@ function submittedFixture(routes: string[]) {
   const contents = { isLoading: () => false, getURL: () => 'https://chatgpt.com/', isDestroyed: () => false,
     loadURL: async () => {}, executeJavaScript: async (script: string) => {
       const operation = JSON.parse(script.slice(script.lastIndexOf(')(') + 2, -1));
-      if (operation.kind === 'send') { sent++; return { clicked: true }; }
-      if (operation.kind !== 'inspect') return { prepared: true, ready: true };
+      if (operation.kind === 'send') { sent++; return pageResult({ clicked: true }); }
+      if (operation.kind !== 'inspect') return pageResult({ prepared: true, ready: true });
       const url = sent ? routes[Math.min(reads++, routes.length - 1)] : 'https://chatgpt.com/';
-      return { url, title: 'ChatGPT', readiness: 'ready', editor: true, draft: '', busy: false, messages: sent ? [
+      return pageResult({ url, title: 'ChatGPT', readiness: 'ready', editor: true, draft: '', busy: false, messages: sent ? [
         { id: 'user', role: 'user', text: 'Question', terminal: false },
         { id: 'reply', role: 'assistant', text: 'Verified answer', terminal: true },
-      ] : [] };
+      ] : [] });
     } } as unknown as WebContents;
   const context: ExecutionContext = { task: () => task, stage: () => {}, intent: () => { task.sendIntentAt = Date.now(); }, submitted: () => { acknowledged++; } };
   return { db, conversations, conversation, task, controller, adapter: new ChatGPTAdapter(contents, controller.signal, context, conversations), sent: () => sent, acknowledged: () => acknowledged };

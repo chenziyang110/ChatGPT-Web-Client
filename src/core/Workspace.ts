@@ -6,7 +6,7 @@ import type { ShortcutSettings } from './settings/ShortcutSettings';
 import { defaultShortcuts } from '../shared/shortcuts';
 import { buildAgentPrompt } from './agent/AgentPrompt';
 import { AppError, HOME_URL, chatUrl, identifier, text } from './validation';
-import type { AgentTask, BrowserDiagnostics, BrowserPage, PageState, TaskChoice, TaskResponse, WorkspaceState } from '../shared/types';
+import type { AgentTask, BrowserDiagnostics, BrowserPage, Conversation, PageState, TaskChoice, TaskResponse, WorkspaceState } from '../shared/types';
 export interface BrowserAdapter {
   activate(id: string, pageId?: string): void;
   pages?(): BrowserPage[];
@@ -18,6 +18,8 @@ export interface BrowserAdapter {
   url?(accountId: string): string | undefined;
   inspect?(accountId: string, pageId?: string): Promise<BrowserDiagnostics>;
   response?(task: AgentTask, url?: string): Promise<TaskResponse>;
+  queueTarget?(accountId: string, pageId: string): Promise<Conversation>;
+  openConversation?(accountId: string, conversationId: string): void;
 }
 export class Workspace {
   private queue: Promise<unknown> = Promise.resolve();
@@ -165,6 +167,16 @@ export class Workspace {
       case 'conversations.register': result = this.conversations.register(this.accounts.resolve(params.accountId).id, params.url, params.alias); break;
       case 'conversations.create': result = this.conversations.create(this.accounts.resolve(params.accountId).id, params.alias); break;
       case 'conversations.get': result = this.conversations.get(this.accounts.resolve(params.accountId).id, params.conversation); break;
+      case 'conversations.forPage': {
+        if (!this.browser.queueTarget) throw new AppError('会话队列不可用', 503);
+        result = await this.browser.queueTarget(this.accounts.resolve(params.accountId).id, identifier(params.pageId)); break;
+      }
+      case 'conversations.open': {
+        const account = this.accounts.resolve(params.accountId);
+        const conversation = this.conversations.get(account.id, params.conversation);
+        if (!this.browser.openConversation) throw new AppError('会话页面不可用', 503);
+        this.browser.openConversation(account.id, conversation.id); this.accounts.activate(account.id); result = this.browser.page(); break;
+      }
       case 'queues.pause': { const account = this.accounts.resolve(params.accountId); result = this.tasks.pause(account.id, params.conversation === undefined ? undefined : this.conversations.get(account.id, params.conversation).id); break; }
       case 'queues.resume': {
         if (params.acknowledged !== undefined && typeof params.acknowledged !== 'boolean') throw new AppError('acknowledged must be a boolean');
@@ -180,12 +192,16 @@ export class Workspace {
         if ([params.conversation !== undefined, params.url !== undefined, params.new === true, params.current === true].filter(Boolean).length > 1) throw new AppError('Choose only one conversation, URL, current or new target');
         const key = params.idempotencyKey === undefined ? undefined : text(params.idempotencyKey, 'Idempotency key', 120);
         const hash = requestHash({ accountId, input, conversation: params.conversation ?? null, url: params.url ?? null, new: params.new === true,
-          current: params.current === true, alias: params.alias ?? null, replyTimeoutMs: params.replyTimeoutMs ?? null });
+          current: params.current === true, alias: params.alias ?? null, replyTimeoutMs: params.replyTimeoutMs ?? null,
+          ...(params.idleTimeoutMs !== undefined ? { idleTimeoutMs: params.idleTimeoutMs } : {}),
+          ...(params.background !== undefined ? { background: params.background } : {}) });
         const duplicate = this.tasks.findRequest(accountId, key, hash);
         if (duplicate) { result = duplicate; break; }
         let conversationId: string | undefined;
         let createdConversation: string | undefined;
         if (params.replyTimeoutMs !== undefined && (typeof params.replyTimeoutMs !== 'number' || !Number.isInteger(params.replyTimeoutMs) || params.replyTimeoutMs < 1000 || params.replyTimeoutMs > 3600000)) throw new AppError('replyTimeoutMs must be 1000–3600000');
+        if (params.idleTimeoutMs !== undefined && (typeof params.idleTimeoutMs !== 'number' || !Number.isInteger(params.idleTimeoutMs) || params.idleTimeoutMs < 1000 || params.idleTimeoutMs > 3600000)) throw new AppError('idleTimeoutMs must be 1000–3600000');
+        if (params.background !== undefined && typeof params.background !== 'boolean') throw new AppError('background must be a boolean');
         const currentUrl = this.browser.url?.(accountId) ?? (this.accounts.activeId() === accountId ? this.browser.page()?.url : undefined);
         let targetUrl = currentUrl;
         if (params.conversation !== undefined) conversationId = this.conversations.get(accountId, params.conversation).id;
@@ -211,11 +227,27 @@ export class Workspace {
           if (!targetUrl && this.tasks.listTasks().some(task => task.conversationId === conversationId && task.sendIntentAt && task.status === 'uncertain')) throw new AppError('NEW_CHAT_UNRESOLVED: register the actual conversation URL before adding more tasks', 409);
         }
         if (!conversationId && !targetUrl) throw new AppError('No page available for this account');
-        try { result = this.tasks.createTask(accountId, input, { conversationId, targetUrl, idempotencyKey: key, requestHash: hash, replyTimeoutMs: params.replyTimeoutMs as number | undefined }); }
+        try { result = this.tasks.createTask(accountId, input, { conversationId, targetUrl, idempotencyKey: key, requestHash: hash,
+          replyTimeoutMs: params.replyTimeoutMs as number | undefined, idleTimeoutMs: params.idleTimeoutMs as number | undefined, background: params.background as boolean | undefined }); }
         catch (error) { if (createdConversation) this.conversations.remove(createdConversation); throw error; }
         break;
       }
       case 'tasks.cancel': result = this.tasks.cancel(identifier(params.id)); break;
+      case 'tasks.edit': {
+        const account = this.accounts.resolve(params.accountId);
+        const conversation = this.conversations.get(account.id, params.conversation);
+        result = this.tasks.edit(account.id, conversation.id, identifier(params.id), params.expectedUpdatedAt, params.prompt); break;
+      }
+      case 'tasks.removeQueued': {
+        const account = this.accounts.resolve(params.accountId);
+        const conversation = this.conversations.get(account.id, params.conversation);
+        result = this.tasks.removeQueued(account.id, conversation.id, identifier(params.id), params.expectedUpdatedAt); break;
+      }
+      case 'queues.reorder': {
+        const account = this.accounts.resolve(params.accountId);
+        const conversation = this.conversations.get(account.id, params.conversation);
+        result = this.tasks.reorder(account.id, conversation.id, params.items); break;
+      }
       case 'tasks.clear': result = { cleared: true, count: this.tasks.clearFinishedHistory() }; break;
       default: throw new AppError('Unknown method', 404);
     }

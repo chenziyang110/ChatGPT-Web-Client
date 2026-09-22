@@ -1,13 +1,29 @@
 import type { WebContents } from 'electron';
 import type { ExecutionContext } from '../../core/agent/AgentGateway';
+import { QueuePausedError } from '../../core/agent/AgentGateway';
 import { ConversationManager, conversationUrl } from '../../core/conversation/ConversationManager';
 import { HOME_URL, isChatUrl } from '../../core/validation';
 import type { BrowserReadiness, TaskInput } from '../../shared/types';
 import { COMPLETION_STABLE_MS, replyToken } from '../../core/notifications/ConversationNotifications';
+import { ReplyTurnTracker, type ConversationMessage } from './ReplyTurnTracker';
 
-interface Message { id: string; role: string; text: string; terminal: boolean }
+type Message = ConversationMessage;
 export interface Page { url: string; title: string; readiness: BrowserReadiness; editor: boolean; draft: string; busy: boolean; messages: Message[]; error?: string }
-interface Operation { kind: 'inspect' | 'diagnose' | 'activity' | 'fill' | 'check_send' | 'send' | 'click' | 'snapshot'; url?: string; anchor?: string; value?: string; selector?: string }
+interface Operation { kind: 'inspect' | 'diagnose' | 'activity' | 'follow_latest' | 'fill' | 'clear' | 'check_send' | 'send' | 'click' | 'snapshot'; url?: string; anchor?: string; value?: string; selector?: string }
+
+// Electron otherwise replaces page exceptions with an unhelpful "Script failed
+// to execute" rejection. Catch inside the page before crossing that boundary.
+export function pageOperationScript(operation: Operation): string {
+  return `(operation => { try { return { workspacePageResult: true, ok: true, value: (${pageOperation.toString()})(operation) }; }
+    catch (error) { return { workspacePageResult: true, ok: false, error: error.message }; } })(${JSON.stringify(operation)})`;
+}
+export function pageOperationResult<T>(result: unknown): T {
+  if (result && typeof result === 'object' && 'workspacePageResult' in result && result.workspacePageResult === true) {
+    if ('ok' in result && result.ok === true && 'value' in result) return result.value as T;
+    throw new Error('error' in result && typeof result.error === 'string' ? result.error : 'PAGE_SCRIPT_FAILED: invalid page result');
+  }
+  throw new Error('PAGE_SCRIPT_FAILED: missing page result');
+}
 
 // During the first send ChatGPT may retain model/UI query parameters and a
 // trailing slash while assigning its conversation URL. They are not identity.
@@ -33,72 +49,151 @@ function changedReplyTarget(expected: string, actual: string): Error {
 
 // Serialized into the sandboxed website. Keep this function self-contained.
 export function pageOperation(operation: Operation): unknown {
-  if (location.origin !== 'https://chatgpt.com') throw new Error('LOGIN_REQUIRED: sign in to ChatGPT');
-  const visible = (element: Element | null): element is HTMLElement => !!element?.getClientRects().length;
-  const editor = document.querySelector<HTMLElement>('#prompt-textarea');
-  const draft = editor instanceof HTMLTextAreaElement ? editor.value : editor?.innerText ?? '';
-  // The document can finish loading while React or the site's verification page
-  // is still initializing. Inspect those states without attempting a challenge.
-  const verification = !visible(editor) && (!!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, input[id^="cf-chl-widget-"], iframe[src*="challenges.cloudflare.com"]') || /^(请稍候|Just a moment)/i.test(document.title.trim()));
-  const login = [...document.querySelectorAll('[data-testid="login-button"], a[href="/auth/login"], a[href^="https://auth.openai.com/"]')].some(visible);
-  const readiness: BrowserReadiness = verification ? 'verification_required' : login ? 'login_required' : visible(editor) ? 'ready' : 'loading';
-  const busy = [...document.querySelectorAll('[data-testid="stop-button"], [data-is-streaming="true"], [aria-busy="true"]')].some(visible);
-  if (operation.kind === 'diagnose') return { url: location.href, title: document.title.slice(0, 120), readiness,
-    editor: visible(editor), draftLength: draft.length, busy, documentReady: document.readyState };
-  const elements = [...document.querySelectorAll<HTMLElement>('[data-message-author-role]')];
-  const readMessage = (element: HTMLElement, index: number) => {
-    const turn = element.closest('article, [data-testid^="conversation-turn-"]') ?? element;
-    const body = element.dataset.messageAuthorRole === 'user'
-      ? element.querySelector<HTMLElement>('[data-testid="collapsible-user-message-content"]') ?? element : element;
-    return { id: element.dataset.messageId ?? `position:${index}`, role: element.dataset.messageAuthorRole ?? '',
-      text: body.innerText.trim(), terminal: [...turn.querySelectorAll('[data-testid="copy-turn-action-button"]')].some(visible) };
-  };
-  const error = [...document.querySelectorAll<HTMLElement>('[data-testid="conversation-error"], [data-testid="error-message"]')].find(visible)?.innerText;
-  if (operation.kind === 'activity') {
-    let user: Message | undefined; let assistant: Message | undefined;
-    for (let index = elements.length - 1; index >= 0 && (!user || !assistant); index--) {
-      const role = elements[index].dataset.messageAuthorRole;
-      if (role === 'user' && !user) user = readMessage(elements[index], index);
-      else if (role === 'assistant' && !assistant) assistant = readMessage(elements[index], index);
+  let stage = 'inspect';
+  try {
+    if (location.origin !== 'https://chatgpt.com') throw new Error('LOGIN_REQUIRED: sign in to ChatGPT');
+    const visible = (element: Element | null): element is HTMLElement => !!element?.getClientRects().length;
+    if (operation.kind === 'follow_latest') {
+      stage = 'follow_latest';
+      if (operation.url !== location.href) throw new Error('TARGET_CHANGED: page changed before action');
+      const latest = [...document.querySelectorAll('[data-message-author-role]')].filter(visible).at(-1);
+      if (!latest) return { scrolled: false };
+      // Start outside the turn: code blocks and other nested reply widgets may
+      // scroll independently. Never target the sidebar or focus the composer.
+      const turn = latest.closest('article, [data-testid^="conversation-turn-"]') ?? latest;
+      for (let parent = turn.parentElement; parent; parent = parent.parentElement) {
+        if (parent.clientHeight <= 0 || parent.scrollHeight <= parent.clientHeight) continue;
+        if (parent !== document.scrollingElement && !/^(auto|scroll|overlay)$/.test(getComputedStyle(parent).overflowY)) continue;
+        const before = parent.scrollTop;
+        parent.scrollTo({ top: parent.scrollHeight, behavior: 'instant' });
+        return { scrolled: parent.scrollTop !== before };
+      }
+      return { scrolled: false };
     }
-    return { url: location.href, title: document.title.slice(0, 120), editor: visible(editor), busy,
-      hasDraft: !!draft.trim(), error, user: user && { id: user.id, text: user.text.slice(0, 32000) },
-      assistant: assistant && { ...assistant, text: assistant.text.slice(0, 64000) },
-      lastRole: elements.at(-1)?.dataset.messageAuthorRole };
+    const editor = document.querySelector<HTMLElement>('#prompt-textarea');
+    const readEditor = (element: HTMLElement | null): string => {
+      if (!element) return '';
+      if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) return element.value;
+      // ChatGPT's rich editor represents lines as sibling paragraphs. Chromium's
+      // innerText inserts TWO newlines between those paragraphs; the editor sends
+      // one. Preserve empty paragraphs and explicit line breaks, never collapse
+      // arbitrary whitespace (which could hide a real human draft edit).
+      const children = [...element.childNodes];
+      if (element.isContentEditable && children.length && children.every(node =>
+        node instanceof HTMLParagraphElement || (node.nodeType === Node.TEXT_NODE && !node.textContent?.trim()))) {
+        return children.filter((node): node is HTMLParagraphElement => node instanceof HTMLParagraphElement).map(paragraph => {
+          if (paragraph.childNodes.length === 1 && paragraph.firstChild instanceof HTMLBRElement) return '';
+          const value = paragraph.innerText;
+          return paragraph.lastChild instanceof HTMLBRElement && paragraph.lastChild.classList.contains('ProseMirror-trailingBreak')
+            ? value.replace(/\n$/, '') : value;
+        }).join('\n');
+      }
+      return element.innerText;
+    };
+    const draft = readEditor(editor);
+    // The document can finish loading while React or the site's verification page
+    // is still initializing. Inspect those states without attempting a challenge.
+    const verification = !visible(editor) && (!!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, input[id^="cf-chl-widget-"], iframe[src*="challenges.cloudflare.com"]') || /^(请稍候|Just a moment)/i.test(document.title.trim()));
+    const login = [...document.querySelectorAll('[data-testid="login-button"], a[href="/auth/login"], a[href^="https://auth.openai.com/"]')].some(visible);
+    const readiness: BrowserReadiness = verification ? 'verification_required' : login ? 'login_required' : visible(editor) ? 'ready' : 'loading';
+    const busy = [...document.querySelectorAll('[data-testid="stop-button"], [data-is-streaming="true"], [aria-busy="true"]')].some(visible);
+    if (operation.kind === 'diagnose') {
+      const send = document.querySelector<HTMLButtonElement>('[data-testid="send-button"]');
+      const messages = [...document.querySelectorAll<HTMLElement>('[data-message-author-role]')];
+      const last = messages.at(-1);
+      const turn = last?.closest('article, [data-testid^="conversation-turn-"]') ?? last;
+      return { url: location.href, title: document.title.slice(0, 120), readiness,
+        editor: visible(editor), draftLength: draft.length, busy, documentReady: document.readyState,
+        dom: { editorTag: editor?.tagName.toLowerCase() ?? null, contentEditable: !!editor?.isContentEditable,
+          visibleEditorCount: [...document.querySelectorAll('#prompt-textarea')].filter(visible).length,
+          draftLineLengths: draft.split('\n').slice(0, 20).map(line => line.length),
+          editorBlocks: [...(editor?.children ?? [])].slice(0, 20).map(child => ({ tag: child.tagName.toLowerCase(),
+            textLength: child.textContent.length, lineBreaks: child.querySelectorAll('br').length })),
+          sendVisible: visible(send), sendEnabled: visible(send) && !send.disabled && send.getAttribute('aria-disabled') !== 'true',
+          stopVisible: [...document.querySelectorAll('[data-testid="stop-button"]')].some(visible),
+          streamingVisible: [...document.querySelectorAll('[data-is-streaming="true"]')].some(visible),
+          ariaBusyVisible: [...document.querySelectorAll('[aria-busy="true"]')].some(visible),
+          messageCount: messages.length, lastRole: last?.dataset.messageAuthorRole ?? null,
+          lastTurnTerminal: !!turn && [...turn.querySelectorAll('[data-testid="copy-turn-action-button"]')].some(visible) }
+      };
+    }
+    const elements = [...document.querySelectorAll<HTMLElement>('[data-message-author-role]')];
+    const readMessage = (element: HTMLElement, index: number) => {
+      const turn = element.closest('article, [data-testid^="conversation-turn-"]') ?? element;
+      const body = element.dataset.messageAuthorRole === 'user'
+        ? element.querySelector<HTMLElement>('[data-testid="collapsible-user-message-content"]') ?? element : element;
+      return { id: element.dataset.messageId ?? `position:${index}`, role: element.dataset.messageAuthorRole ?? '',
+        text: body.innerText.trim(), terminal: [...turn.querySelectorAll('[data-testid="copy-turn-action-button"]')].some(visible) };
+    };
+    const error = [...document.querySelectorAll<HTMLElement>('[data-testid="conversation-error"], [data-testid="error-message"]')].find(visible)?.innerText;
+    if (operation.kind === 'activity') {
+      let user: Message | undefined; let assistant: Message | undefined;
+      for (let index = elements.length - 1; index >= 0 && (!user || !assistant); index--) {
+        const role = elements[index].dataset.messageAuthorRole;
+        if (role === 'user' && !user) user = readMessage(elements[index], index);
+        else if (role === 'assistant' && !assistant) assistant = readMessage(elements[index], index);
+      }
+      return { url: location.href, title: document.title.slice(0, 120), editor: visible(editor), busy,
+        hasDraft: !!draft.trim(), error, user: user && { id: user.id, text: user.text.slice(0, 32000) },
+        assistant: assistant && { ...assistant, text: assistant.text.slice(0, 64000) },
+        lastRole: elements.at(-1)?.dataset.messageAuthorRole };
+    }
+    const messages = elements.map(readMessage);
+    const page: Page = { url: location.href, title: document.title.slice(0, 120), readiness, editor: visible(editor), draft, busy, messages, error };
+    if (operation.kind === 'inspect') return page;
+    stage = 'verify_target';
+    if (operation.url !== location.href) throw new Error('TARGET_CHANGED: page changed before action');
+    if (operation.kind === 'snapshot') return { url: location.href, title: document.title, text: (document.querySelector('main') ?? document.body).innerText.slice(0, 64000) };
+    const anchor = JSON.stringify(messages.filter(message => message.role === 'user').map(message => [message.id, message.text]));
+    if (operation.anchor !== anchor || busy) throw new Error('PAGE_CHANGED: conversation is no longer idle');
+    if (operation.kind === 'send' || operation.kind === 'check_send') {
+      stage = 'verify_send';
+      // Textareas and contenteditable normalize Windows file line endings to LF.
+      if (draft.replace(/\r\n?/g, '\n').trim() !== operation.value?.replace(/\r\n?/g, '\n').trim()) throw new Error('DRAFT_CHANGED: prompt was edited');
+      const button = document.querySelector<HTMLButtonElement>('[data-testid="send-button"]');
+      if (!visible(button) || button.disabled || button.getAttribute('aria-disabled') === 'true') throw new Error('SEND_UNAVAILABLE: prompt remains a draft');
+      if (operation.kind === 'check_send') return { ready: true };
+      stage = 'click_send';
+      button.click(); return { clicked: true };
+    }
+    stage = 'find_editor';
+    const element = document.querySelector<HTMLElement>(operation.selector ?? '#prompt-textarea');
+    if (!visible(element) || element.matches(':disabled, [aria-disabled="true"]')) throw new Error('Element unavailable');
+    if (element instanceof HTMLInputElement && element.type === 'password') throw new Error('Password fields cannot be automated');
+    if (operation.kind === 'click') { element.click(); return { clicked: true }; }
+    stage = 'check_draft';
+    const existing = readEditor(element);
+    if (operation.kind === 'clear') {
+      if (existing.replace(/\r\n?/g, '\n').trim() !== operation.value?.replace(/\r\n?/g, '\n').trim()) throw new Error('DRAFT_CHANGED: prompt was edited');
+    } else if (existing.trim()) throw new Error('DRAFT_CONFLICT: clear or send the existing draft first');
+    const nextValue = operation.kind === 'clear' ? '' : operation.value;
+    stage = 'focus_editor';
+    element.focus();
+    stage = 'write_text';
+    if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
+      const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, 'value')!.set!.call(element, nextValue);
+    } else if (element.isContentEditable) {
+      const range = document.createRange(); range.selectNodeContents(element);
+      const selection = window.getSelection(); selection?.removeAllRanges(); selection?.addRange(range);
+      if (!document.execCommand('insertText', false, nextValue)) element.textContent = nextValue ?? '';
+    } else throw new Error('Element is not editable');
+    stage = 'dispatch_input';
+    element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: nextValue }));
+    stage = 'dispatch_change';
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+    return operation.kind === 'clear' ? { cleared: true } : { prepared: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    // Do not persist arbitrary page exception text, which can contain prompt
+    // content. Preserve only our known guard messages and safe error names.
+    const guards = ['LOGIN_REQUIRED: sign in to ChatGPT', 'TARGET_CHANGED: page changed before action',
+      'PAGE_CHANGED: conversation is no longer idle', 'DRAFT_CHANGED: prompt was edited',
+      'SEND_UNAVAILABLE: prompt remains a draft', 'Element unavailable', 'Password fields cannot be automated',
+      'DRAFT_CONFLICT: clear or send the existing draft first', 'Element is not editable'];
+    const name = error instanceof Error && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : 'Error';
+    throw new Error(`${guards.includes(message) ? message : 'PAGE_SCRIPT_FAILED'} [stage=${stage}; error=${name}]`);
   }
-  const messages = elements.map(readMessage);
-  const page: Page = { url: location.href, title: document.title.slice(0, 120), readiness, editor: visible(editor), draft, busy, messages, error };
-  if (operation.kind === 'inspect') return page;
-  if (operation.url !== location.href) throw new Error('TARGET_CHANGED: page changed before action');
-  if (operation.kind === 'snapshot') return { url: location.href, title: document.title, text: (document.querySelector('main') ?? document.body).innerText.slice(0, 64000) };
-  const anchor = JSON.stringify(messages.filter(message => message.role === 'user').map(message => [message.id, message.text]));
-  if (operation.anchor !== anchor || busy) throw new Error('PAGE_CHANGED: conversation is no longer idle');
-  if (operation.kind === 'send' || operation.kind === 'check_send') {
-    // Textareas and contenteditable normalize Windows file line endings to LF.
-    if (draft.replace(/\r\n?/g, '\n').trim() !== operation.value?.replace(/\r\n?/g, '\n').trim()) throw new Error('DRAFT_CHANGED: prompt was edited');
-    const button = document.querySelector<HTMLButtonElement>('[data-testid="send-button"]');
-    if (!visible(button) || button.disabled || button.getAttribute('aria-disabled') === 'true') throw new Error('SEND_UNAVAILABLE: prompt remains a draft');
-    if (operation.kind === 'check_send') return { ready: true };
-    button.click(); return { clicked: true };
-  }
-  const element = document.querySelector<HTMLElement>(operation.selector ?? '#prompt-textarea');
-  if (!visible(element) || element.matches(':disabled, [aria-disabled="true"]')) throw new Error('Element unavailable');
-  if (element instanceof HTMLInputElement && element.type === 'password') throw new Error('Password fields cannot be automated');
-  if (operation.kind === 'click') { element.click(); return { clicked: true }; }
-  const existing = element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement ? element.value : element.innerText;
-  if (existing.trim()) throw new Error('DRAFT_CONFLICT: clear or send the existing draft first');
-  element.focus();
-  if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
-    const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    Object.getOwnPropertyDescriptor(prototype, 'value')!.set!.call(element, operation.value);
-  } else if (element.isContentEditable) {
-    const range = document.createRange(); range.selectNodeContents(element);
-    const selection = window.getSelection(); selection?.removeAllRanges(); selection?.addRange(range);
-    if (!document.execCommand('insertText', false, operation.value)) element.textContent = operation.value ?? '';
-  } else throw new Error('Element is not editable');
-  element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: operation.value }));
-  element.dispatchEvent(new Event('change', { bubbles: true }));
-  return { prepared: true };
 }
 
 export class ChatGPTAdapter {
@@ -121,7 +216,7 @@ export class ChatGPTAdapter {
   }
   private async evaluate<T>(operation: Operation): Promise<T> {
     this.signal.throwIfAborted();
-    return this.track(this.contents.executeJavaScript(`(${pageOperation.toString()})(${JSON.stringify(operation)})`, true) as Promise<T>);
+    return pageOperationResult<T>(await this.track(this.contents.executeJavaScript(pageOperationScript(operation), true)));
   }
   private inspect(): Promise<Page> { return this.evaluate<Page>({ kind: 'inspect' }); }
   private anchor(page: Page): string { return JSON.stringify(page.messages.filter(message => message.role === 'user').map(message => [message.id, message.text])); }
@@ -129,10 +224,16 @@ export class ChatGPTAdapter {
   private async idle(): Promise<Page> {
     this.context.stage('waiting_idle', this.context.task().idleTimeoutMs);
     let previous = ''; let since = Date.now();
+    let lastSample = Date.now();
     let composerMissingSince = Date.now();
     const composerBudget = Math.min(this.context.task().prepareTimeoutMs ?? 60000, 30000);
     while (true) {
+      this.context.checkpoint?.();
       const page = await this.inspect();
+      const now = Date.now();
+      // A suspend or stalled renderer is not continuous evidence of completion.
+      if (now - lastSample > 2000) since = now;
+      lastSample = now;
       if (page.error) throw new Error(page.error);
       if (!page.editor || page.readiness === 'login_required' || page.readiness === 'verification_required') {
         if (Date.now() - composerMissingSince >= composerBudget) {
@@ -149,7 +250,7 @@ export class ChatGPTAdapter {
       const ready = !page.busy && (!last || (last.role === 'assistant' && last.terminal));
       const fingerprint = JSON.stringify([page.url, page.messages]);
       if (!ready || previous !== fingerprint) since = Date.now();
-      if (ready && Date.now() - since >= 1000) return page;
+      if (ready && Date.now() - since >= (last ? COMPLETION_STABLE_MS : 1000)) return page;
       previous = fingerprint;
       await this.delay();
     }
@@ -175,16 +276,17 @@ export class ChatGPTAdapter {
     const task = this.context.task();
     await this.loaded();
     if (!isChatUrl(this.contents.getURL())) throw new Error('LOGIN_REQUIRED: sign in to ChatGPT first');
-    if (input.type !== 'snapshot') await this.idle();
+    const initial = input.type !== 'snapshot' ? await this.idle() : undefined;
     const conversation = task.conversationId ? this.conversations.get(task.accountId, task.conversationId) : undefined;
     if (conversation?.binding === 'uncertain') throw new Error('NEW_CHAT_UNRESOLVED: inspect the page and register its actual conversation URL; this new conversation will not be created again');
     const target = conversation?.url ?? (conversation ? HOME_URL : task.targetUrl);
     if (!target) throw new Error('TARGET_REQUIRED: choose a conversation');
     if (input.type === 'snapshot' && this.contents.getURL() !== target) await this.idle();
-    if (this.contents.getURL() !== target || conversation?.binding === 'new') await this.navigate(target);
+    const navigate = this.contents.getURL() !== target || conversation?.binding === 'new';
+    if (navigate) await this.navigate(target);
     if (this.contents.getURL() !== target) throw new Error('TARGET_CHANGED: target redirected');
     if (input.type === 'snapshot') return this.evaluate({ kind: 'snapshot', url: target });
-    const baseline = await this.idle();
+    const baseline = !navigate && initial ? initial : await this.idle();
     if (baseline.url !== target) throw new Error('TARGET_CHANGED: conversation changed while waiting');
     if (conversation?.binding === 'new' && baseline.messages.length) throw new Error('NEW_CHAT_UNAVAILABLE: expected an empty conversation');
     if (input.type === 'navigate') return { url: target };
@@ -195,22 +297,40 @@ export class ChatGPTAdapter {
       return this.evaluate({ ...guard, kind: 'click', selector: input.selector });
     }
     const value = input.type === 'prompt' ? input.prompt : input.text;
-    const result = await this.evaluate({ ...guard, kind: 'fill', selector: input.type === 'fill' ? input.selector : undefined, value });
-    if (input.type !== 'prompt' || !input.submit) return result;
-    await this.delay();
-    await this.evaluate({ ...guard, kind: 'check_send', value });
-    if (conversation?.binding === 'new') this.conversations.markSending(task.accountId, conversation.id);
-    this.context.intent();
-    await this.evaluate({ ...guard, kind: 'send', value });
+    let prepared = false;
+    try {
+      this.context.checkpoint?.();
+      const result = await this.evaluate({ ...guard, kind: 'fill', selector: input.type === 'fill' ? input.selector : undefined, value });
+      prepared = true;
+      if (input.type !== 'prompt' || !input.submit) return result;
+      await this.delay();
+      this.context.checkpoint?.();
+      await this.evaluate({ ...guard, kind: 'check_send', value });
+      this.context.checkpoint?.();
+      this.context.intent();
+      if (conversation?.binding === 'new') this.conversations.markSending(task.accountId, conversation.id);
+      await this.evaluate({ ...guard, kind: 'send', value });
+    } catch (error) {
+      if (error instanceof QueuePausedError && prepared && !this.context.task().sendIntentAt) {
+        await this.evaluate({ ...guard, kind: 'clear', value });
+        await this.delay();
+        if ((await this.inspect()).draft.trim()) throw new Error('DRAFT_CONFLICT: 无法确认已清理本次自动填写的草稿，请接管检查');
+      }
+      throw error;
+    }
     this.context.stage('generating', task.replyTimeoutMs);
-    const oldUsers = baseline.messages.filter(message => message.role === 'user');
+    const turns = new ReplyTurnTracker(baseline.messages, value);
     let acknowledged = false; let boundUrl = conversation?.url;
     let observedConversationUrl = boundUrl;
     let optimisticUrl: string | undefined;
     let previous = ''; let since = Date.now();
+    let lastSample = Date.now();
     while (true) {
       await this.delay();
       const page = await this.inspect();
+      const now = Date.now();
+      if (now - lastSample > 2000) since = now;
+      lastSample = now;
       if (page.error) throw new Error(page.error);
       const replyUrl = replyPageUrl(page.url, !boundUrl && conversation?.binding === 'new');
       const optimistic = replyUrl?.includes('/c/WEB:');
@@ -219,10 +339,7 @@ export class ChatGPTAdapter {
         if (optimisticUrl && replyUrl !== optimisticUrl) throw changedReplyTarget(optimisticUrl, page.url);
         optimisticUrl = replyUrl;
       } else if (replyUrl !== HOME_URL) observedConversationUrl ??= replyUrl;
-      const users = page.messages.filter(message => message.role === 'user');
-      if (users.length > oldUsers.length + 1 || users.slice(0, oldUsers.length).some((message, index) => message.id !== oldUsers[index].id || message.text !== oldUsers[index].text)) throw new Error('CONVERSATION_CHANGED: another turn appeared');
-      const ownUser = users.length === oldUsers.length + 1 ? users.at(-1) : undefined;
-      if (ownUser && ownUser.text.replace(/\r\n?/g, '\n') !== value.replace(/\r\n?/g, '\n').trim()) throw new Error('CONVERSATION_CHANGED: submitted turn does not match');
+      const ownUser = turns.read(page.messages);
       if (ownUser && !acknowledged) { this.context.submitted(ownUser.id); acknowledged = true; }
       if (acknowledged && !boundUrl && !optimistic && replyUrl !== HOME_URL && conversation) {
         boundUrl = conversationUrl(replyUrl).url;

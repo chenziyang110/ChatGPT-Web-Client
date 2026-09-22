@@ -20,7 +20,10 @@ let page;
 let cleanExit = false;
 const errors = [];
 async function launch(scale = 1) {
-  const env = { ...process.env, WORKSPACE_USER_DATA: directory };
+  // This long scenario returns to old fixture pages to drive notifications.
+  // Keep them alive here; memory-desktop separately tests real hibernation.
+  const env = { ...process.env, WORKSPACE_USER_DATA: directory,
+    WORKSPACE_PAGE_IDLE_MS: '3600000', WORKSPACE_HIDDEN_PAGE_IDLE_MS: '3600000' };
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.WORKSPACE_DEV_URL;
   desktop = await electron.launch({ args: ['--no-sandbox', `--force-device-scale-factor=${scale}`, bootstrap], env });

@@ -42,7 +42,9 @@ Object.defineProperty(app,'isPackaged',{get:()=>true});
 app.getVersion=()=>${JSON.stringify(version)};
 app.setPath('cache',${JSON.stringify(path.join(directory,'cache'))});
 Notification.isSupported=()=>false;
-app.on('browser-window-created',(_,win)=>win.on('show',()=>win.hide()));
+// Keep a live compositor for Playwright's actionability checks after tasks
+// finish. Hiding the window can suspend animation frames on Windows runners.
+app.on('browser-window-created',(_,win)=>{win.webContents.setBackgroundThrottling(false);win.setSkipTaskbar(true);win.setPosition(-20000,-20000);});
 app.on('session-created',s=>s.protocol.handle('https',()=>new Response(${JSON.stringify(fixture)},{headers:{'Content-Type':'text/html'}})));
 global.fetch=async url=>{if(url!=='https://api.github.com/repos/chenziyang110/ChatGPT-Web-Client/releases/latest')throw new Error('Unexpected update request');return new Response(JSON.stringify({tag_name:${JSON.stringify('v'+latest)}}));};
 updater.NsisUpdater=class extends Original {
@@ -57,7 +59,7 @@ const env={...process.env,WORKSPACE_USER_DATA:directory,WORKSPACE_HIDDEN_PAGE_ID
 delete env.ELECTRON_RUN_AS_NODE;delete env.WORKSPACE_DEV_URL;
 let desktop, page;
 try {
-  const launch=()=>electron.launch({args:['--disable-renderer-backgrounding','--disable-background-timer-throttling',bootstrap],env});
+  const launch=()=>electron.launch({args:['--disable-renderer-backgrounding','--disable-background-timer-throttling','--disable-backgrounding-occluded-windows',bootstrap],env});
   desktop=await launch();
   page=await desktop.firstWindow();page.setDefaultTimeout(20000);await page.waitForFunction(()=>!!window.workspace);
   const rpc=(method,params={})=>page.evaluate(({method,params})=>window.workspace.call(method,params),{method,params});

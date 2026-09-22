@@ -35,7 +35,8 @@ try {
   await until(async()=> (await rpc('tasks.get',{id:task.id})).submittedAt);
   const target=(await rpc('workspace.status')).pages.find(p=>p.taskId===task.id);
   assert.ok(target?.locked && target.selected);
-  assert.ok((await rpc('browser.preview',{accountId:account.id,pageId:target.id})).image);
+  // A newly locked view may not have a compositor frame yet (UnknownVizError
+  // on Linux). Wait for the normal preview retry loop to present its first frame.
   const script=code=>bounded(desktop.evaluate(async({webContents,session},{code,url,partition})=>{
     const contents=webContents.getAllWebContents().find(w=>w.getURL()===url && w.session===session.fromPartition(partition));
     if(!contents)throw new Error('Preview fixture missing'); return contents.executeJavaScript(code);

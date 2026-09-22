@@ -7,8 +7,10 @@ export const idleTimeoutCopy = {
 
 // Also clarify persisted notices created by older versions, without changing their decision token.
 export function taskAttentionCopy(task: AgentTask) {
-  const attention = task.attention?.kind === 'page' && !task.sendIntentAt && task.error?.includes('waiting_idle timed out')
-    ? { ...task.attention, ...idleTimeoutCopy } : task.attention;
+  const attention = task.attention?.kind === 'review_send' && task.submittedAt && task.submittedMessageId
+    ? { ...task.attention, title: '消息已发送，回复需核对', detail: '已确认问题出现在目标会话中，但客户端确认回复的过程被中断。请核对网页结果；此任务不会重发。' }
+    : task.attention?.kind === 'page' && !task.sendIntentAt && task.error?.includes('waiting_idle timed out')
+      ? { ...task.attention, ...idleTimeoutCopy } : task.attention;
   return attention ? { ...attention, choices: attention.choices.map(choice =>
     choice.id === 'takeover' ? { ...choice, label: '接管' } : choice) } : undefined;
 }

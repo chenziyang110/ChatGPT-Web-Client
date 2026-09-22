@@ -3,6 +3,8 @@ export function friendlyError(value: unknown): string {
   const raw = value instanceof Error ? value.message : String(value);
   const message = raw.replace(/^(?:Error:\s*)?(?:Error invoking remote method '[^']+':\s*)?(?:Error:\s*)?/, '').trim();
   const messages: [RegExp, string][] = [
+    [/QUEUE_CHANGED/, '这条消息或队列已更新，请查看最新状态后再操作。'],
+    [/Task queue is full/, '队列已满，请等待部分消息完成或移除不需要的条目。'],
     [/Use a personal .*conversation URL|Shared, temporary and special chats/, '当前会话暂不支持 Agent 协作，请切换到普通会话或新建会话。'],
     [/Only https:\/\/chatgpt.com|Invalid URL/, '这个链接暂不支持，请使用 ChatGPT 会话链接。'],
     [/USER_DECISION_REQUIRED/, '有任务需要确认，请到任务中心选择处理方式。'],

@@ -12,13 +12,13 @@
 
 ## 下载与开始
 
-**当前正式版 v1.3.1**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，按下表选择系统和 CPU 对应的安装包。
+**当前正式版 v1.4.0**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，按下表选择系统和 CPU 对应的安装包。
 
 1. 添加账号，在独立的 ChatGPT 网页中自行登录。
 2. 添加其他账号，在侧栏随时切换；各账号的登录状态互相隔离。
 3. 在任务中心准备提示词，或通过 **Agent 协作** 让本机 Agent 获取网页回复。
 
-Windows 安装包尚未配置发布者签名，可能显示未知发布者提示。请核对来源与 Release 附带的 SHA-256。v1.3.1 提供以下六种系统 / CPU 组合的安装包。
+Windows 安装包尚未配置发布者签名，可能显示未知发布者提示。请核对来源与 Release 附带的 SHA-256。v1.4.0 提供以下六种系统 / CPU 组合的安装包。
 
 | 系统 | x64（Intel / AMD） | ARM64 | 安装包 |
 | --- | --- | --- | --- |
@@ -43,7 +43,7 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 签名及公证；首次打�
 | 安全接管 | 遇到登录、验证、已有草稿或发送状态不明时暂停，由你处理 |
 | 并行协作 | 同一会话按顺序执行，不同会话最多两个自动任务并行 |
 | Agent 接口 | 本地 HTTP、JSON CLI 和 Windows Go 工具；支持流式输出、断线续读与防重发 |
-| 新版通知 | 启动后及每 6 小时检查正式版本，侧栏提醒，设置中可手动检查或关闭 |
+| 软件内更新 | 启动后及每 6 小时检查正式版本；Windows / Linux AppImage 支持下载、校验、安装并重启 |
 
 ### 任务有进度，也能随时接管
 
@@ -51,13 +51,23 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 签名及公证；首次打�
 
 任务默认只准备草稿；明确选择发送才会提交。发送结果不明确时暂停核对，避免重复提交。重启后队列保持暂停，普通任务记录最多保留 200 条，未处理任务优先保留。
 
+### 会话队列
+
+打开目标账号和会话，点击网页工具栏的 **会话队列**，写好下一条消息后点击 **加入队列**。当前回复完成后依次发送；页面空闲时按钮显示 **加入并发送**。每个账号下的每个会话独立排队，切换页面或关闭面板后仍按原目标执行。
+
+面板只显示状态、消息列表和输入框。点击消息右侧 **…** 可编辑、调整顺序或移除尚未开始的消息；**暂停后续** 保留当前已发送的回复，**恢复队列** 继续后续消息。任务中心可查看各会话队列并打开对应页面。
+
+队列输入框支持 **Enter 加入队列、Shift+Enter 换行**，也可用 Ctrl / Command + Enter。中文输入法选词时的回车不会提交，按住回车不会重复入队。编辑已有消息时 Ctrl / Command + Enter 保存、Esc 取消；Esc 优先收起消息操作，再关闭队列面板并保留未入队草稿。
+
+队列消息保存在本机。等待上一轮和等待本条回复各有 60 分钟预算，按网页完成状态接续，而非固定 30 分钟定时发送。观看模式自动跟随最新回复，接管后可自由浏览。退出后不会继续运行，重启后需恢复队列。普通短回复已在真实 ChatGPT 页面验证，30+ 分钟边界通过模拟时间测试；真实长回复和特殊工作模式仍待专项验证。接口详见 [API](docs/API.md)。
+
 ### 设置、快捷键与版本更新
 
 ![设置与更新](docs/images/settings.png)
 
-更新检查仅请求 GitHub 的公开发布信息，不上传账号、对话、Cookie 或本地 API 令牌。GitHub 会像普通网络访问一样收到 IP 地址等连接信息。发现新版本后，点击前往本仓库 Release 下载并手动安装；不静默下载、不强制重启。检查失败会显示可重试状态，不影响日常使用。
+更新检查仅请求 GitHub 的公开发布信息，不上传账号、对话、Cookie 或本地 API 令牌。发现新版后点击 **下载更新**，查看下载进度；校验完成后点击 **安装并重启**，覆盖当前版本并打开新版。Windows 安装版和 Linux AppImage 支持此流程；macOS、Linux tar.gz 和开发运行保留官方下载入口。
 
-**更新通知从 v1.0.0 开始生效**。更早的开发版本需要先手动安装本版。覆盖安装前退出客户端，保留原有用户数据目录；不要在卸载时选择清除数据。
+**软件内安装更新从 v1.4.0 开始支持**。v1.3.1 及更早版本需要先下载并覆盖安装一次 v1.4.0。更新不会清除账号、会话和排队消息；正在回复时会提示等任务完成，重启后队列保持暂停。下载失败或校验失败可重试，不会执行不完整安装包。
 
 ## 运行
 
@@ -151,7 +161,7 @@ npm run dist:linux       # Linux x64 + ARM64（建议在 Linux 上运行）
 npm run build:agent:all  # 交叉编译六种原生 Agent
 ```
 
-Linux 无头测试：`xvfb-run --auto-servernum npm run test:desktop`。一次性 CI 测试程序使用 `--no-sandbox`；正式应用保持沙箱。GitHub Actions 配置了三平台检查/打包和 Linux 桌面测试。发布矩阵覆盖三个系统的 x64 / ARM64；代码签名、公证和发布凭据不在仓库中。更新采用公开 Release 检查与手动下载安装。发布流程见 [发布指南](docs/RELEASING.md)。
+Linux 无头测试：`xvfb-run --auto-servernum npm run test:desktop`。一次性 CI 测试程序使用 `--no-sandbox`；正式应用保持沙箱。GitHub Actions 配置了三平台检查/打包和 Linux 桌面测试。发布矩阵覆盖三个系统的 x64 / ARM64；代码签名、公证和发布凭据不在仓库中。更新使用公开 Release 和按架构生成的校验清单。发布流程见 [发布指南](docs/RELEASING.md)。
 
 ## 已知边界
 
@@ -169,7 +179,7 @@ Linux 无头测试：`xvfb-run --auto-servernum npm run test:desktop`。一次�
 - 使用与开发：[Agent 协作](docs/AGENT_COLLABORATION.md)、[API 与 CLI](docs/API.md)、[发布流程](docs/RELEASING.md)、[macOS 安装](docs/MACOS.md)
 - 产品与技术：[产品需求](docs/PRODUCT_REQUIREMENTS.md)、[会话自动化方案](docs/CONVERSATION_AUTOMATION_PROPOSAL.md)、[架构](docs/ARCHITECTURE.md)、[技术栈](docs/TECH_STACK.md)、[路线图](docs/ROADMAP.md)、[验证记录](docs/VALIDATION.md)
 - 视觉与平台记录：[视觉规范](docs/BRAND.md)、[macOS 签名调查](docs/MACOS-SIGNATURE-INVESTIGATION.md)
-- 发布记录：[v1.0.0](docs/RELEASE-v1.0.0.md)、[v1.1.0](docs/RELEASE-v1.1.0.md)、[v1.1.1](docs/RELEASE-v1.1.1.md)、[v1.2.0](docs/RELEASE-v1.2.0.md)、[v1.3.0](docs/RELEASE-v1.3.0.md)、[v1.3.1](docs/RELEASE-v1.3.1.md)
+- 发布记录：[v1.0.0](docs/RELEASE-v1.0.0.md)、[v1.1.0](docs/RELEASE-v1.1.0.md)、[v1.1.1](docs/RELEASE-v1.1.1.md)、[v1.2.0](docs/RELEASE-v1.2.0.md)、[v1.3.0](docs/RELEASE-v1.3.0.md)、[v1.3.1](docs/RELEASE-v1.3.1.md)、[v1.4.0](docs/RELEASE-v1.4.0.md)
 
 ## 账号会话通知与快捷键
 

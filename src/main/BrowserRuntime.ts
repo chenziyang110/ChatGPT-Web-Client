@@ -3,9 +3,9 @@ import { BrowserWindow, WebContentsView, session, dialog, shell, type WebContent
 import { AccountManager } from '../core/account/AccountManager';
 import { SessionManager } from '../core/session/SessionManager';
 import { AppError, HOME_URL, chatUrl, isAccountNavigation, isChatUrl } from '../core/validation';
-import type { AgentTask, BrowserBounds, BrowserDiagnostics, BrowserPreview, BrowserPage, PageState, TaskInput, TaskResponse } from '../shared/types';
+import type { AgentTask, BrowserBounds, BrowserDiagnostics, BrowserPreview, BrowserPage, Conversation, PageState, TaskInput, TaskResponse } from '../shared/types';
 import { bindShortcuts } from './shortcuts';
-import { ChatGPTAdapter, pageOperation, replyPageUrl, type Page } from './adapters/ChatGPTAdapter';
+import { ChatGPTAdapter, pageOperationScript, pageOperationResult, replyPageUrl, type Page } from './adapters/ChatGPTAdapter';
 import { ReplyReader } from './adapters/ReplyReader';
 import { ConversationActivityObserver, type ActivitySnapshot, type ConversationNotifications } from '../core/notifications/ConversationNotifications';
 import type { ShortcutSettings } from '../core/settings/ShortcutSettings';
@@ -86,7 +86,7 @@ export class BrowserRuntime {
     if (!isChatUrl(url)) { owner.hibernationReady = false; return; }
     this.observing.add(id);
     try {
-      const snapshot = await contents.executeJavaScript(`(${pageOperation.toString()})({kind:'activity'})`) as ActivitySnapshot;
+      const snapshot = pageOperationResult<ActivitySnapshot>(await contents.executeJavaScript(pageOperationScript({ kind: 'activity' })));
       if (this.closing || this.views.get(id) !== view || contents.isDestroyed() || contents.getURL() !== url) return;
       snapshot.title = this.title(owner.accountId, snapshot.url, snapshot.title);
       const activityKey = JSON.stringify([snapshot.url, snapshot.busy, snapshot.hasDraft, snapshot.user?.id,
@@ -159,6 +159,9 @@ export class BrowserRuntime {
       try { owner.conversationId = this.conversations.register(owner.accountId, url).id; } catch { /* Home and project pages remain independent tabs. */ }
     } else {
       const conversation = this.conversations.get(owner.accountId, owner.conversationId);
+      if (conversation.binding === 'new' && !this.isLocked(id)) {
+        try { this.conversations.bind(owner.accountId, conversation.id, url); } catch { /* Wait for an ordinary stable conversation URL. */ }
+      }
       if (conversation.url && conversation.url !== url && !this.isLocked(id)) {
         try { owner.conversationId = this.conversations.register(owner.accountId, url).id; } catch { owner.conversationId = undefined; }
       }
@@ -246,6 +249,31 @@ export class BrowserRuntime {
     this.changed();
   }
   select(accountId: string, pageId: string): void { this.activate(accountId, pageId); }
+  async queueTarget(accountId: string, pageId: string): Promise<Conversation> {
+    const owner = this.owners.get(pageId);
+    if (!owner || owner.accountId !== accountId) throw new AppError('会话页面已关闭或不属于此账号', 404);
+    const contents = this.openView(pageId).webContents;
+    if (contents.isLoading()) throw new AppError('页面正在加载，请稍后打开队列', 409);
+    const url = contents.getURL();
+    if (owner.conversationId) {
+      const existing = this.conversations.get(accountId, owner.conversationId);
+      if (this.isLocked(pageId) || existing.url === url || existing.binding !== 'bound' && url === HOME_URL) return existing;
+    }
+    let conversation: Conversation;
+    if (url === HOME_URL) {
+      const page = pageOperationResult<Page>(await contents.executeJavaScript(pageOperationScript({ kind: 'inspect' })));
+      if (contents.isDestroyed() || contents.getURL() !== url || this.owners.get(pageId) !== owner || page.busy || page.messages.length || !page.editor) throw new AppError('请等待网页生成会话地址后再打开队列', 409);
+      conversation = this.conversations.create(accountId);
+    } else conversation = this.conversations.register(accountId, url);
+    owner.conversationId = conversation.id;
+    this.changed();
+    return conversation;
+  }
+  openConversation(accountId: string, conversationId: string): void {
+    const conversation = this.conversations.get(accountId, conversationId);
+    const existing = [...this.owners].find(([, owner]) => owner.accountId === accountId && (owner.conversationId === conversationId || !!conversation.url && owner.url === conversation.url));
+    this.activate(accountId, existing?.[0] ?? this.createView(accountId, conversation.url ?? HOME_URL, conversationId));
+  }
   closePage(accountId: string, pageId: string): void {
     if (this.owners.get(pageId)?.accountId !== accountId) throw new AppError('会话页面不存在', 404);
     if (this.isLocked(pageId)) throw new AppError('请先接管或结束此会话的任务，再关闭页面', 409);
@@ -300,7 +328,7 @@ export class BrowserRuntime {
     const contents = id && this.owners.get(id)?.accountId === task.accountId ? this.openView(id).webContents : undefined;
     if (!contents || contents.isDestroyed()) return { taskId: task.id, state: 'unavailable', reason: '请在原账号打开已发送的咨询页面，再用 resume TASK_ID --url 会话地址读取' };
     if (contents.isLoading()) return { taskId: task.id, state: 'reading' };
-    const page = await contents.executeJavaScript(`(${pageOperation.toString()})({kind:'inspect'})`) as Page;
+    const page = pageOperationResult<Page>(await contents.executeJavaScript(pageOperationScript({ kind: 'inspect' })));
     if (contents.isDestroyed() || contents.getURL() !== page.url) return { taskId: task.id, state: 'reading' };
     return this.replyReader.read(task, page, bound ?? url);
   }
@@ -314,13 +342,14 @@ export class BrowserRuntime {
     if (contents.isLoading()) return { ...base, readiness: 'loading', suggestion: '页面正在加载，请稍后再次诊断' };
     if (!isChatUrl(contents.getURL())) return { ...base, readiness: 'login_required', suggestion: '请在此账号页面完成登录' };
     try {
-      const detail = await contents.executeJavaScript(`(${pageOperation.toString()})({kind:'diagnose'})`) as Omit<BrowserDiagnostics, 'accountId' | 'suggestion'>;
+      const detail = pageOperationResult<Omit<BrowserDiagnostics, 'accountId' | 'suggestion'>>(await contents.executeJavaScript(pageOperationScript({ kind: 'diagnose' })));
       const suggestions = { ready: detail.draftLength ? '页面已有草稿，请由人类处理后再继续任务' : detail.busy ? '网页正在回复，请等待完成' : '输入框已就绪；暂停的队列仍需明确恢复',
         loading: '输入框尚未就绪，请稍后再次诊断', verification_required: '请在此账号网页完成验证后继续原任务，不要重复提交',
         login_required: '请在此账号网页完成登录', not_open: '请先打开此账号', unavailable: '页面不可用，请在客户端检查' };
       return { ...detail, accountId, suggestion: suggestions[detail.readiness] };
-    } catch {
-      return { ...base, readiness: contents.isDestroyed() ? 'unavailable' : 'loading', suggestion: '页面正在切换或不可用，请稍后再次诊断' };
+    } catch (error) {
+      return { ...base, readiness: contents.isDestroyed() ? 'unavailable' : 'loading', suggestion: '页面正在切换或不可用，请稍后再次诊断',
+        error: error instanceof Error && error.message.startsWith('PAGE_SCRIPT_FAILED') ? error.message : undefined };
     }
   }
   async preview(accountId: string, pageId?: string): Promise<BrowserPreview | null> {
@@ -333,13 +362,37 @@ export class BrowserRuntime {
     const existing = this.previews.get(id);
     if (existing) return existing;
     const pending = (async () => {
+      const url = contents.getURL();
+      if (this.activeId === id && this.visible && !contents.isLoading() && isChatUrl(url)) {
+        try {
+          await contents.executeJavaScript(pageOperationScript({ kind: 'follow_latest', url }));
+        } catch { /* Navigation can interrupt following; a later preview retries. */ }
+      }
+      if (!this.isLocked(id) || contents.isDestroyed() || contents.getURL() !== url) return null;
       const captured = await contents.capturePage(undefined, { stayHidden: true, stayAwake: true });
-      if (!this.isLocked(id) || contents.isDestroyed() || captured.isEmpty()) return null;
+      if (!this.isLocked(id) || contents.isDestroyed() || contents.getURL() !== url || captured.isEmpty()) return null;
       const resized = captured.getSize().width > 1600 ? captured.resize({ width: 1600 }) : captured;
       return { accountId, pageId: id, image: `data:image/jpeg;base64,${resized.toJPEG(75).toString('base64')}`, capturedAt: Date.now() };
     })();
     this.previews.set(id, pending);
     try { return await pending; } finally { this.previews.delete(id); }
+  }
+  async hasBusyPage(): Promise<boolean> {
+    for (const view of this.views.values()) {
+      const contents = view.webContents;
+      if (contents.isDestroyed() || !isChatUrl(contents.getURL())) continue;
+      if (contents.isLoading()) return true;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const busy = await Promise.race([
+          contents.executeJavaScript(pageOperationScript({ kind: 'activity' })).then(value => pageOperationResult<ActivitySnapshot>(value).busy),
+          new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(true), 3000); })
+        ]);
+        if (busy) return true;
+      } catch { return true; }
+      finally { clearTimeout(timer); }
+    }
+    return false;
   }
   private async waitUntilLoaded(id: string): Promise<void> {
     const contents = this.views.get(id)!.webContents;
@@ -439,9 +492,12 @@ export class BrowserRuntime {
     if (!pageId) pageId = this.createView(id, conversation?.url ?? (conversation ? HOME_URL : task.targetUrl) ?? HOME_URL, task.conversationId);
     else if (task.conversationId) this.owners.get(pageId)!.conversationId = task.conversationId;
     this.taskPages.set(task.id, pageId);
-    this.selected.set(id, pageId);
-    if (this.accounts.activeId() === id) this.activate(id, pageId);
+    if (!task.background) {
+      this.selected.set(id, pageId);
+      if (this.accounts.activeId() === id) this.activate(id, pageId);
+    }
     const contents = this.openView(pageId).webContents;
+    contents.setBackgroundThrottling(false);
     try {
       const result = await new ChatGPTAdapter(contents, signal, context, this.conversations).execute(input);
       signal.throwIfAborted();
@@ -451,6 +507,7 @@ export class BrowserRuntime {
       return result;
     }
     finally {
+      if (!contents.isDestroyed()) contents.setBackgroundThrottling(true);
       if (contents.isDestroyed()) {
         const active = this.activeId === pageId;
         this.closeView(pageId);

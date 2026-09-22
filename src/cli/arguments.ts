@@ -1,6 +1,6 @@
 export function argumentsFor(args: string[]): { positional: string[]; options: Record<string, string | boolean> } {
-  const boolean = new Set(['submit', 'wait', 'new', 'current', 'acknowledged']);
-  const valued = new Set(['data-dir', 'account', 'conversation', 'url', 'alias', 'text', 'text-file', 'idempotency-key', 'reply-timeout', 'wait-timeout']);
+  const boolean = new Set(['submit', 'wait', 'new', 'current', 'acknowledged', 'background']);
+  const valued = new Set(['data-dir', 'account', 'conversation', 'url', 'alias', 'text', 'text-file', 'idempotency-key', 'reply-timeout', 'idle-timeout', 'wait-timeout']);
   const positional: string[] = []; const options: Record<string, string | boolean> = {};
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];

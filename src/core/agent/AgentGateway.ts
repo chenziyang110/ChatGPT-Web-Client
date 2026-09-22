@@ -3,20 +3,23 @@ import { Database } from '../storage/Database';
 import { AppError, chatUrl, record, text } from '../validation';
 import { taskAttention } from './TaskAttention';
 import { canClearTask } from '../../shared/taskHistory';
+import { orderedTasks, taskOrder } from '../../shared/conversationQueue';
 import type { AccountQueue, AgentTask, Conversation, TaskInput, TaskPhase } from '../../shared/types';
 export type { AgentTask } from '../../shared/types';
 const queueKey = (accountId: string, conversationId?: string) => conversationId ? `${accountId}:conversation:${conversationId}` : accountId;
+export class QueuePausedError extends Error { constructor() { super('Queue paused before send'); } }
 export interface ExecutionContext {
   task(): AgentTask;
   stage(phase: TaskPhase, timeoutMs?: number): void;
   intent(): void;
   submitted(messageId?: string): void;
   progress?(response: string, url?: string): void;
+  checkpoint?(): void;
 }
 export type TaskExecutor = (accountId: string, input: TaskInput, signal: AbortSignal, context: ExecutionContext) => Promise<unknown>;
 export interface TaskOptions {
   conversationId?: string; targetUrl?: string; idempotencyKey?: string; requestHash?: string;
-  replyTimeoutMs?: number; prepareTimeoutMs?: number; idleTimeoutMs?: number;
+  replyTimeoutMs?: number; prepareTimeoutMs?: number; idleTimeoutMs?: number; background?: boolean;
 }
 interface RequestRecord { accountId: string; hash: string; taskId: string; task?: AgentTask }
 export const requestHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -114,9 +117,9 @@ export class AgentGateway {
     const ids = new Set([...this.listTasks().map(task => task.accountId), ...stored.map(queue => queue.accountId)]);
     const summaries = [...ids].map(accountId => {
       const own = this.db.read<AccountQueue>('account_queues', accountId);
-      const paused = stored.find(queue => queue.accountId === accountId && queue.paused);
+      const pausedConversationCount = stored.filter(queue => queue.accountId === accountId && queue.conversationId && queue.paused).length;
       const runningTaskIds = [...this.running.values()].filter(slot => this.get(slot.id).accountId === accountId).map(slot => slot.id);
-      return { ...own, accountId, paused: own?.paused || !!paused, reason: own?.reason ?? paused?.reason, runningTaskId: runningTaskIds[0], runningTaskIds };
+      return { ...own, accountId, paused: own?.paused ?? false, pausedConversationCount, runningTaskId: runningTaskIds[0], runningTaskIds };
     });
     return [...summaries, ...stored.filter(queue => queue.conversationId).map(queue => ({ ...queue, runningTaskId: this.running.get(queueKey(queue.accountId, queue.conversationId))?.id }))];
   }
@@ -137,7 +140,17 @@ export class AgentGateway {
     if (notify) this.changed();
     return queue;
   }
-  pause(accountId: string, conversationId?: string): AccountQueue { return this.setQueue(accountId, true, '队列已暂停；正在执行的任务会继续', true, conversationId); }
+  pause(accountId: string, conversationId?: string): AccountQueue {
+    const queue = this.setQueue(accountId, true, '后续发送已暂停；已发送的回复继续', true, conversationId);
+    for (const active of this.running.values()) {
+      const task = this.get(active.id);
+      // Do not interrupt an in-flight fill: the adapter will check the gate and
+      // remove only its own unchanged draft before returning the item to pending.
+      if (task.accountId === accountId && (!conversationId || task.conversationId === conversationId) && !task.sendIntentAt &&
+        ['preparing', 'waiting_idle', 'queued'].includes(task.phase ?? 'queued')) active.controller.abort(new QueuePausedError());
+    }
+    return queue;
+  }
   async takeover(accountId: string, conversationId?: string): Promise<AccountQueue> {
     this.setQueue(accountId, true, '已人工接管；继续前请核对页面', true, conversationId);
     const selected = [...this.running.values()].filter(slot => { const task = this.get(slot.id); return task.accountId === accountId && (!conversationId || task.conversationId === conversationId); });
@@ -171,7 +184,11 @@ export class AgentGateway {
     return this.get(id);
   }
   resume(accountId: string, acknowledged = false, conversationId?: string): AccountQueue {
-    if (this.isRunning(accountId, conversationId)) throw new AppError('Wait for the current task to finish or take over first', 409);
+    if ([...this.running.values()].some(slot => {
+      const task = this.get(slot.id);
+      return task.accountId === accountId && (!conversationId || task.conversationId === conversationId) &&
+        (slot.controller.signal.aborted || this.db.read<AccountQueue>('account_queues', queueKey(accountId, task.conversationId))?.control === 'human');
+    })) throw new AppError('请等待暂停操作完成后恢复队列', 409);
     if (this.listTasks().some(task => task.accountId === accountId && (!conversationId || task.conversationId === conversationId) && task.status === 'waiting_user')) throw new AppError('USER_DECISION_REQUIRED: 请在客户端选择如何处理等待中的任务', 409);
     const uncertain = this.listTasks().filter(task => task.accountId === accountId && (!conversationId || task.conversationId === conversationId) && task.status === 'uncertain' && !task.resolvedAt);
     if (uncertain.length && !acknowledged) throw new AppError('REVIEW_REQUIRED: A message may already have been sent. Inspect the conversation and acknowledge before resuming; it will not be resent.', 409);
@@ -210,6 +227,7 @@ export class AgentGateway {
       createdAt: now, updatedAt: now };
     this.db.transaction(() => {
       task.seq = (this.db.get<number>('taskSequence') ?? 0) + 1;
+      task.queueOrder = task.seq;
       this.db.set('taskSequence', task.seq);
       this.persist(task);
       const history = this.listTasks();
@@ -232,6 +250,32 @@ export class AgentGateway {
     for (const waiter of [...this.waiters]) waiter(id);
     if (notify) this.changed();
     return task;
+  }
+  edit(accountId: string, conversationId: string, id: string, expectedUpdatedAt: unknown, prompt: unknown): AgentTask {
+    const task = this.pendingTask(accountId, conversationId, id, expectedUpdatedAt);
+    if (task.input.type !== 'prompt') throw new AppError('只有消息任务可编辑');
+    return this.update(id, { input: { ...task.input, prompt: text(prompt, 'Prompt', 32000) } });
+  }
+  private pendingTask(accountId: string, conversationId: string, id: string, expectedUpdatedAt: unknown): AgentTask {
+    const task = this.get(id);
+    if (task.accountId !== accountId || task.conversationId !== conversationId) throw new AppError('任务不属于此会话', 404);
+    if (task.status !== 'pending' || task.sendIntentAt || [...this.running.values()].some(slot => slot.id === id) || task.updatedAt !== expectedUpdatedAt) throw new AppError('QUEUE_CHANGED: 任务已开始或已被修改，请刷新后再试', 409);
+    return task;
+  }
+  removeQueued(accountId: string, conversationId: string, id: string, expectedUpdatedAt: unknown): AgentTask {
+    this.pendingTask(accountId, conversationId, id, expectedUpdatedAt);
+    return this.cancel(id);
+  }
+  reorder(accountId: string, conversationId: string, value: unknown): AgentTask[] {
+    if (!Array.isArray(value) || value.length > 30) throw new AppError('items must contain the pending task IDs and versions');
+    const pending = orderedTasks(this.listTasks().filter(task => task.accountId === accountId && task.conversationId === conversationId && task.status === 'pending'));
+    const entries = value.map(item => record(item));
+    if (entries.length !== pending.length || new Set(entries.map(item => item.id)).size !== pending.length || entries.some(item =>
+      !pending.some(task => task.id === item.id && task.updatedAt === item.updatedAt && !task.sendIntentAt && ![...this.running.values()].some(slot => slot.id === task.id)))) throw new AppError('QUEUE_CHANGED: 排队顺序已变化，请刷新后再试', 409);
+    const positions = pending.map(taskOrder);
+    this.db.transaction(() => entries.forEach((item, index) => this.update(item.id as string, { queueOrder: positions[index] }, false)));
+    this.changed(); this.schedule();
+    return orderedTasks(this.listTasks().filter(task => task.accountId === accountId && task.conversationId === conversationId && task.status === 'pending'));
   }
   cancel(id: string): AgentTask {
     const task = this.get(id);
@@ -273,7 +317,7 @@ export class AgentGateway {
   private pump(): void {
     while (!this.stopped && this.running.size < this.concurrency) {
       const tasks = this.listTasks();
-      const pending = [...tasks].reverse().filter(task => task.status === 'pending' && !this.running.has(queueKey(task.accountId, task.conversationId)) && !this.db.read<AccountQueue>('account_queues', task.accountId)?.paused && !this.db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.paused &&
+      const pending = orderedTasks(tasks).filter(task => task.status === 'pending' && !this.running.has(queueKey(task.accountId, task.conversationId)) && !this.db.read<AccountQueue>('account_queues', task.accountId)?.paused && !this.db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.paused &&
         !tasks.some(other => queueKey(other.accountId, other.conversationId) === queueKey(task.accountId, task.conversationId) && (other.status === 'waiting_user' || other.status === 'uncertain' && !other.resolvedAt)));
       const accounts = [...new Set(pending.map(task => task.accountId))];
       if (!accounts.length) return;
@@ -295,9 +339,15 @@ export class AgentGateway {
       if (timeoutMs !== undefined) { clearTimeout(timer); timer = setTimeout(() => controller.abort(new Error(`${phase} timed out`)), timeoutMs); }
       this.update(task.id, { phase });
     };
+    const checkpoint = () => {
+      controller.signal.throwIfAborted();
+      if (!this.get(task.id).sendIntentAt && (this.db.read<AccountQueue>('account_queues', task.accountId)?.paused ||
+        this.db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.paused)) throw new QueuePausedError();
+    };
     const context: ExecutionContext = {
+      checkpoint,
       task: () => this.get(task.id), stage,
-      intent: () => { controller.signal.throwIfAborted(); this.update(task.id, { phase: 'send_intent', sendIntentAt: Date.now() }); },
+      intent: () => { checkpoint(); this.update(task.id, { phase: 'send_intent', sendIntentAt: Date.now() }); },
       submitted: messageId => { controller.signal.throwIfAborted(); this.update(task.id, { phase: 'submitted', submittedAt: Date.now(), submittedMessageId: messageId }); },
       progress: (response, url) => {
         controller.signal.throwIfAborted();
@@ -315,6 +365,10 @@ export class AgentGateway {
     } catch (error) {
       const current = this.get(task.id);
       if (current.status === 'running') {
+        if (error instanceof QueuePausedError && !current.sendIntentAt) {
+          this.update(task.id, { status: 'pending', phase: 'queued', error: undefined });
+          return;
+        }
         const uncertain = !!current.sendIntentAt;
         const message = error instanceof Error ? error.message : String(error);
         this.update(task.id, { status: uncertain ? 'uncertain' : 'waiting_user', attention: taskAttention(message, uncertain), error: message });

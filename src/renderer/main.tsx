@@ -12,6 +12,8 @@ import { accountActivity, ReplyBadge, NotificationList } from './components/Acco
 import { AgentPromptPanel } from './components/AgentPromptPanel';
 import { AgentPreview } from './components/AgentPreview';
 import { TaskDecision } from './components/TaskDecision';
+import { ConversationQueue } from './components/ConversationQueue';
+import { isQueueTask } from '../shared/conversationQueue';
 import { Toast } from './components/Toast';
 import { friendlyError } from './errors';
 import './style.css';
@@ -37,6 +39,8 @@ function App() {
   const dismissNotice = useCallback(() => setNotice(undefined), []);
   const [busy, setBusy] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [queueDrafts, setQueueDrafts] = useState<Record<string, string>>({});
   const [focusMode, setFocusMode] = useState(() => {
     try { return localStorage.getItem('workspace.focusMode') === 'true'; } catch { return false; }
   });
@@ -169,7 +173,9 @@ function App() {
   const modalTask = modal?.kind === 'task' ? state?.tasks.find(task => task.id === modal.task.id) ?? modal.task : undefined;
   if (!bridge) return <div className="standalone"><Logo /><h1>请在桌面应用中打开</h1>
     <p>请启动 ChatGPT Web Client 使用账号和对话功能。</p></div>;
-  return <div className={`app ${focused ? 'focus-mode' : ''}`}>
+  const queueCount = state?.tasks.filter(task => task.accountId === active?.id && !!activePage?.conversationId && task.conversationId === activePage.conversationId && isQueueTask(task) && !task.sendIntentAt).length ?? 0;
+  function closeQueue() { setQueueOpen(false); requestAnimationFrame(() => document.getElementById('queue-toggle')?.focus()); }
+  return <div className={`app ${focused ? 'focus-mode' : ''} ${queueOpen && tab === 'workspace' ? 'queue-open' : ''}`}>
     <Titlebar bridge={bridge} onError={setError} />
     <aside className="sidebar">
       <div className="brand"><Logo /><div>Workspace<small>多账号客户端</small></div></div>
@@ -194,7 +200,7 @@ function App() {
       </div>
       <div className="sidebar-footer">
         <div className="local-note"><Icon name="shield" size={20} /><div>本机存储<small>独立登录 · 本地保存</small></div><span className="green-dot" /></div>
-        <Updates bridge={bridge} compact />
+        <Updates bridge={bridge} compact openSettings={() => setTab('settings')} />
         <button className={tab === 'settings' ? 'nav active' : 'nav'} aria-current={tab === 'settings' ? 'page' : undefined} onClick={() => setTab('settings')}><Icon name="settings" /> 设置与集成</button>
         <div className="version">ChatGPT Web Client <span>v{packageInfo.version}</span></div>
       </div>
@@ -216,6 +222,7 @@ function App() {
           <button aria-label="前进" title="前进" disabled={!state?.page?.canGoForward || busy || pageLocked} onClick={() => void action('browser.control', { accountId: active.id, action: 'forward' })}><Icon name="arrow" size={16} /></button>
           <button aria-label="重新加载" title="重新加载" disabled={busy || pageLocked} onClick={() => void action('browser.control', { accountId: active.id, action: 'reload' })}><Icon name="refresh" size={16} className={state?.page?.loading ? 'spinning' : ''} /></button>
           <span className="page-url"><Icon name="lock" size={13} /><span>{state?.page?.loading ? '正在加载…' : state?.page?.url || 'https://chatgpt.com/'}</span></span>
+          <button id="queue-toggle" className={`queue-toggle ${queueOpen ? 'selected' : ''}`} aria-expanded={queueOpen} aria-label={`会话队列${queueCount ? `，${queueCount} 条待发送` : ''}`} onClick={() => setQueueOpen(value => !value)}><Icon name="tasks" size={15} /> 会话队列{queueCount > 0 && <b>{queueCount}</b>}</button>
           <button className="agent-toolbar" disabled={busy} onClick={() => void openPageAgent(active.id)}><Icon name="terminal" size={15} /> Agent 协作</button>
           <button className="new-chat" disabled={busy} onClick={() => void action('browser.newConversation', { accountId: active.id })}><Icon name="plus" size={15} /> 新对话</button>
         </> : <span className="toolbar-note"><Icon name={tab === 'tasks' ? 'terminal' : tab === 'settings' ? 'lock' : 'shield'} size={14} />{tab === 'tasks' ? '按账号和会话管理队列' : tab === 'settings' ? '快捷键、接口和数据设置' : '添加账号后登录 ChatGPT'}</span>}
@@ -228,7 +235,7 @@ function App() {
         <div className="workspace-status-label" role="status">
           <span aria-hidden="true" className={`preview-dot ${!showPreview || previewTask?.attention ? 'needs-attention' : ''}`} />
           <span className="workspace-status-text" title={showPreview ? previewStatus : attentionTask && !pageLocked ? '当前页面可操作，该会话有暂停的任务等待你的选择' : '其他会话或账号有任务等待处理，不影响当前页面'}>{showPreview ? previewStatus : attentionTask && !pageLocked ? '当前页面可操作 · 此会话任务待处理' : '当前页面可操作 · 其他任务待处理'}</span>
-          {showPreview && <span className="preview-mode" title="页面由 Agent 控制。需要操作网页时，请选择接管。">只读预览</span>}
+          {showPreview && <span className="preview-mode" title="自动跟随最新回复。需要浏览历史或操作网页时，请选择接管。">只读预览 · 自动跟随</span>}
         </div>
         <div className="workspace-status-actions">
           {attentionTask && (attentionTask.status === 'waiting_user' && !pageLocked && attentionTask.attention?.choices.some(choice => choice.id === 'retry')
@@ -240,7 +247,13 @@ function App() {
           </>}
         </div>
       </div>}
-      {tab === 'workspace' && active && <div className="browser-slot" ref={browserSlot}>{pageLocked && <AgentPreview key={activePage?.id} bridge={bridge} accountId={active.id} pageId={activePage?.id} />}</div>}
+      {tab === 'workspace' && active && <div className={`workspace-body ${queueOpen ? 'with-queue' : ''}`}>
+        <div className="browser-slot" ref={browserSlot}>{pageLocked && <AgentPreview key={activePage?.id} bridge={bridge} accountId={active.id} pageId={activePage?.id} />}</div>
+        {queueOpen && activePage && state && <ConversationQueue key={`${active.id}:${activePage.id}`} account={active} page={activePage} state={state} bridge={bridge}
+          drafts={queueDrafts} changeDraft={(key, text) => setQueueDrafts(values => ({ ...values, [key]: text }))}
+          clearDraft={(key, text) => setQueueDrafts(values => values[key] === text ? { ...values, [key]: '' } : values)} refresh={refresh} close={closeQueue}
+          inspect={task => openModal({ kind: 'task', task })} takeover={takeover} />}
+      </div>}
       {tab === 'workspace' && (!state || !active) && <section className="welcome">
         <div className="welcome-body"><div className="welcome-art"><div className="orbit-ring" /><div className="logo-tile"><Logo /></div><span className="orbit-label orbit-personal"><span className="mini-avatar">P</span> 个人账号 <span className="green-dot" /></span><span className="orbit-label orbit-work"><span className="mini-avatar warm">W</span> 工作账号 <Icon name="check" size={12} /></span></div>
 
@@ -254,7 +267,8 @@ function App() {
         <div className="empty-icon"><Icon name="refresh" size={32} /></div><h2>页面暂时无法加载</h2><p>{friendlyError(state.page.error)}</p><p>请检查网络连接，然后重新加载。</p>
         <button className="primary" onClick={() => void action('browser.control', { accountId: active.id, action: 'reload' })}>重新加载</button>
       </section>}
-      {tab === 'tasks' && <TaskCenter state={state} busy={busy} action={action} inspect={task => openModal({ kind: 'task', task })} takeover={takeover} agentPrompt={target => openModal({ kind: 'agent', target })} />}
+      {tab === 'tasks' && <TaskCenter state={state} busy={busy} action={action} inspect={task => openModal({ kind: 'task', task })} takeover={takeover} agentPrompt={target => openModal({ kind: 'agent', target })}
+        openQueue={(accountId, conversation) => void action('conversations.open', { accountId, conversation }, () => { setTab('workspace'); setQueueOpen(true); })} />}
       {tab === 'settings' && <section className="content settings-page">
         <div className="page-heading"><div><h2>设置</h2><p>管理快捷键、本地接口和账号数据。</p></div><span className="settings-emblem"><Icon name="terminal" size={30} /></span></div>
         <Updates bridge={bridge} />

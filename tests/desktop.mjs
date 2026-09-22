@@ -310,7 +310,7 @@ try {
   await page.locator('.notification-item').filter({ hasText: 'ChatGPT fixture' }).getByRole('button', { name: '查看会话', exact: true }).click();
   await page.waitForFunction(() => !document.querySelector('dialog'));
   assert.equal((await rpc('workspace.status')).page.url, 'https://chatgpt.com/c/work');
-  assert.equal(await page.locator('.account-row').filter({ hasText: 'Work' }).locator('.reply-badge').count(), 0);
+  await page.locator('.account-row').filter({ hasText: 'Work' }).locator('.reply-badge').waitFor({ state: 'detached' });
   // A manual turn alone (no gateway task) must also generate an unread receipt.
   await accountScript(work, "window.fixtureHold = true; document.querySelector('textarea').value = 'Manual notification'; document.querySelector('[data-testid=send-button]').click()");
   await page.getByRole('status', { name: 'Work 会话运行中', exact: true }).waitFor();
@@ -479,7 +479,7 @@ try {
   assert.equal(await page.getByRole('combobox', { name: '协作范围', exact: true }).getAttribute('data-value'), fresh.conversationId);
   assert.match(await preview.inputValue(), new RegExp(fresh.conversationId));
   await page.getByRole('button', { name: '关闭弹窗', exact: true }).click();
-  await page.locator('.queue-card').filter({ hasText: 'Work' }).getByRole('button', { name: '暂停队列', exact: true }).click();
+  await page.locator('.queue-card').filter({ hasText: 'Work' }).getByRole('button', { name: '暂停此账号全部队列', exact: true }).click();
   await page.getByLabel('提示词', { exact: true }).fill('Queued from UI');
   await page.getByLabel('发送给 ChatGPT 并等待回复', { exact: true }).check();
   await page.getByRole('button', { name: '加入发送队列', exact: true }).click();

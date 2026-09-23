@@ -66,6 +66,7 @@ try {
   const until=async check=>{const end=Date.now()+25000;while(!await check()){assert.ok(Date.now()<end,'Update condition timed out');await new Promise(resolve=>setTimeout(resolve,100));}};
   await rpc('updates.configure',{enabled:false});
   await assert.rejects(rpc('updates.install'),/先完成/);
+  await assert.rejects(rpc('updates.install',{force:true}),/先完成/);
   const account=await rpc('accounts.create',{name:'Update survivor'});
   const task=await rpc('tasks.create',{accountId:account.id,new:true,input:{type:'prompt',prompt:'HOLD:keep running',submit:true}});
   await until(async()=>!!(await rpc('tasks.get',{id:task.id})).submittedAt);
@@ -97,7 +98,38 @@ try {
   assert.equal((await rpc('accounts.list'))[0].name,'Update survivor');
   assert.equal((await rpc('tasks.get',{id:queued.id})).status,'pending');
   assert.equal((await rpc('queues.status')).find(q=>q.conversationId===task.conversationId).paused,true);
-  console.log('Update install integration passed: native downloader, progress, SHA-512 rejection/retry, explicit restart, busy-task guard, saved account/queue and credential isolation. Final installer launch is stubbed.');
+  // A deliberate force update may interrupt a long reply. The sent task must
+  // need review after restart, while queued messages stay paused and unsent.
+  await rm(marker);
+  const second=await rpc('accounts.create',{name:'Force update survivor'});
+  const held=await rpc('tasks.create',{accountId:second.id,new:true,input:{type:'prompt',prompt:'HOLD:force update',submit:true}});
+  await until(async()=>!!(await rpc('tasks.get',{id:held.id})).submittedAt);
+  const pending=await rpc('tasks.create',{accountId:second.id,conversation:held.conversationId,input:{type:'prompt',prompt:'Wait until reviewed',submit:true}});
+  await page.getByRole('button',{name:/设置与集成/}).click();
+  await page.getByRole('button',{name:'检查更新',exact:true}).click();
+  await page.getByRole('button',{name:'下载更新',exact:true}).click();
+  await page.getByRole('button',{name:'安装并重启',exact:true}).waitFor();
+  await assert.rejects(rpc('updates.install',{force:'yes'}),/force must be a boolean/);
+  await page.getByRole('button',{name:'强制安装',exact:true}).click();
+  const confirmation=page.getByRole('group',{name:'确认强制安装'});
+  await confirmation.getByText('重启后请核对会话。',{exact:false}).waitFor();
+  await confirmation.getByRole('button',{name:'取消',exact:true}).click();
+  assert.equal((await rpc('tasks.get',{id:held.id})).status,'running','Cancelling force confirmation leaves reply tracking active');
+  await assert.rejects(readFile(marker),/ENOENT/);
+  await page.getByRole('button',{name:'强制安装',exact:true}).click();
+  const forced=desktop.waitForEvent('close');
+  await page.getByRole('button',{name:'确认强制安装并重启',exact:true}).click();
+  await forced;
+  const forcedInstall=JSON.parse(await readFile(marker,'utf8'));
+  assert.equal(forcedInstall.restart,true);
+  desktop=await launch();page=await desktop.firstWindow();await page.waitForFunction(()=>!!window.workspace);
+  assert.equal((await rpc('accounts.list')).length,2);
+  const interrupted=await rpc('tasks.get',{id:held.id});
+  assert.equal(interrupted.status,'uncertain','Interrupted sent message requires review, never replay');
+  assert.ok(interrupted.sendIntentAt);
+  assert.equal((await rpc('tasks.get',{id:pending.id})).status,'pending');
+  assert.equal((await rpc('queues.status')).find(q=>q.conversationId===held.conversationId).paused,true);
+  console.log('Update install integration passed: native downloader, progress, SHA-512 rejection/retry, normal busy guard, explicit force/cancel, interrupted reply review, paused queue and credential isolation. Final installer launch is stubbed.');
 } catch(error) {
   console.error({requests,binaries,state:await page?.evaluate(()=>window.workspace.call('updates.status')).catch(()=>null)});
   throw error;

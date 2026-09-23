@@ -29,7 +29,7 @@ Agent 位于 Windows / Linux 的 `resources/agent/` 或 macOS 的 `Contents/Reso
 
 v1.0.0 起，安装版启动 10 秒后及每 6 小时请求本仓库 GitHub Latest Release；设置中可关闭或手动检查。只通知更高稳定版本，跳过预发布/草稿。v1.4.0 起，Windows NSIS / Linux AppImage 支持显式下载、取消、失败重试和安装并重启。更新请求不携带账户 Cookie、令牌或对话。
 
-`release-manifest.mjs` 从实际安装包计算 SHA-512 和大小，生成 `latest-x64.yml`、`latest-arm64.yml`、`latest-linux.yml`、`latest-linux-arm64.yml`；每份只指向同一 CPU 的一个二进制，避免矩阵上传时架构相互覆盖。主进程把下载源固定在已检查版本的 GitHub Release 目录，校验版本、文件名、架构、大小和哈希后交给 electron-updater 下载验证。安装只允许可信本地 UI 发起，HTTP 不提供更新安装能力。普通退出不自动安装；安装前检查任务和网页是否正在回复，正常保存数据、暂停队列、关闭 SQLite 后再启动安装器。
+`release-manifest.mjs` 从实际安装包计算 SHA-512 和大小，生成 `latest-x64.yml`、`latest-arm64.yml`、`latest-linux.yml`、`latest-linux-arm64.yml`；每份只指向同一 CPU 的一个二进制，避免矩阵上传时架构相互覆盖。主进程把下载源固定在已检查版本的 GitHub Release 目录，校验版本、文件名、架构、大小和哈希后交给 electron-updater 下载验证。安装只允许可信本地 UI 发起，HTTP 不提供更新安装能力。普通退出不自动安装；常规安装在任务或网页正在回复时拦截，用户可明确选择强制安装。强制安装仍正常保存数据、暂停队列、关闭 SQLite 后再启动安装器；已发送但未确认完成的任务会标记为待核对，不会自动重发。
 
 macOS 的 ad-hoc 签名不足以支持当前 Squirrel.Mac 更新部署，保留官方安装包入口；Linux tar.gz 和开发态同样手动安装。v1.3.1 及更早版本需手动覆盖安装 v1.4.0 一次，不能回溯添加旧版没有的更新功能。
 

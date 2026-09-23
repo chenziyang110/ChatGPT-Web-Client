@@ -110,15 +110,18 @@ else void app.whenReady().then(async () => {
     if (name === 'updates.download') return updates.download();
     if (name === 'updates.cancel') { updates.cancelDownload(); return null; }
     if (name === 'updates.install') {
+      if (params.force !== undefined && typeof params.force !== 'boolean') throw new AppError('force must be a boolean');
+      const force = params.force === true;
       preparingUpdate = true;
       try {
         await workspace.settled();
         if (stopping) throw new AppError('Runtime is stopping', 503);
-        if (tasks.runningAccounts().length || await browser.hasBusyPage()) throw new AppError('还有回复或任务正在进行，请完成后再安装。', 409);
+        if (!force && (tasks.runningAccounts().length || await browser.hasBusyPage())) throw new AppError('还有回复或任务正在进行，请完成后再安装，或选择强制安装。', 409);
         // No further await before shutdown blocks new work. Pending queue items
-        // are persisted and paused by the ordinary shutdown path.
+        // are persisted and paused by the ordinary shutdown path. Sent tasks
+        // become uncertain on interruption and cannot be resent automatically.
         if (stopping) throw new AppError('Runtime is stopping', 503);
-        if (tasks.runningAccounts().length) throw new AppError('还有任务正在进行，请完成后再安装。', 409);
+        if (!force && tasks.runningAccounts().length) throw new AppError('还有任务正在进行，请完成后再安装，或选择强制安装。', 409);
         updates.beginInstall();
         void shutdown(true);
         return null;

@@ -12,13 +12,13 @@
 
 ## 下载与开始
 
-**当前正式版 v1.4.1**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，按下表选择系统和 CPU 对应的安装包。
+**当前正式版 v1.4.2**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，按下表选择系统和 CPU 对应的安装包。
 
 1. 添加账号，在独立的 ChatGPT 网页中自行登录。
 2. 添加其他账号，在侧栏随时切换；各账号的登录状态互相隔离。
 3. 在任务中心准备提示词，或通过 **Agent 协作** 让本机 Agent 获取网页回复。
 
-Windows 安装包尚未配置发布者签名，可能显示未知发布者提示。请核对来源与 Release 附带的 SHA-256。v1.4.1 提供以下六种系统 / CPU 组合的安装包。
+Windows 安装包尚未配置发布者签名，可能显示未知发布者提示。请核对来源与 Release 附带的 SHA-256。v1.4.2 提供以下六种系统 / CPU 组合的安装包。
 
 | 系统 | x64（Intel / AMD） | ARM64 | 安装包 |
 | --- | --- | --- | --- |
@@ -43,7 +43,7 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 签名及公证；首次打�
 | 安全接管 | 遇到登录、验证、已有草稿或发送状态不明时暂停，由你处理 |
 | 并行协作 | 同一会话按顺序执行；不同账号、会话独立等待回复，不占用其他会话的发送名额 |
 | Agent 接口 | 本地 HTTP、JSON CLI 和 Windows Go 工具；支持流式输出、断线续读与防重发 |
-| 软件内更新 | 启动后及每 6 小时检查正式版本；Windows / Linux AppImage 支持下载、校验、安装并重启 |
+| 软件内更新 | 启动后及每 6 小时检查正式版本；Windows / Linux AppImage 支持下载、校验、安装并重启，也可明确选择强制安装 |
 
 ### 任务有进度，也能随时接管
 
@@ -179,7 +179,7 @@ Linux 无头测试：`xvfb-run --auto-servernum npm run test:desktop`。一次�
 - 使用与开发：[Agent 协作](docs/AGENT_COLLABORATION.md)、[API 与 CLI](docs/API.md)、[发布流程](docs/RELEASING.md)、[macOS 安装](docs/MACOS.md)
 - 产品与技术：[产品需求](docs/PRODUCT_REQUIREMENTS.md)、[会话自动化方案](docs/CONVERSATION_AUTOMATION_PROPOSAL.md)、[架构](docs/ARCHITECTURE.md)、[技术栈](docs/TECH_STACK.md)、[路线图](docs/ROADMAP.md)、[验证记录](docs/VALIDATION.md)
 - 视觉与平台记录：[视觉规范](docs/BRAND.md)、[macOS 签名调查](docs/MACOS-SIGNATURE-INVESTIGATION.md)
-- 发布记录：[v1.0.0](docs/RELEASE-v1.0.0.md)、[v1.1.0](docs/RELEASE-v1.1.0.md)、[v1.1.1](docs/RELEASE-v1.1.1.md)、[v1.2.0](docs/RELEASE-v1.2.0.md)、[v1.3.0](docs/RELEASE-v1.3.0.md)、[v1.3.1](docs/RELEASE-v1.3.1.md)、[v1.4.0](docs/RELEASE-v1.4.0.md)、[v1.4.1](docs/RELEASE-v1.4.1.md)
+- 发布记录：[v1.0.0](docs/RELEASE-v1.0.0.md)、[v1.1.0](docs/RELEASE-v1.1.0.md)、[v1.1.1](docs/RELEASE-v1.1.1.md)、[v1.2.0](docs/RELEASE-v1.2.0.md)、[v1.3.0](docs/RELEASE-v1.3.0.md)、[v1.3.1](docs/RELEASE-v1.3.1.md)、[v1.4.0](docs/RELEASE-v1.4.0.md)、[v1.4.1](docs/RELEASE-v1.4.1.md)、[v1.4.2](docs/RELEASE-v1.4.2.md)
 
 ## 账号会话通知与快捷键
 

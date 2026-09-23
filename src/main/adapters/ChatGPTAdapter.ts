@@ -8,7 +8,7 @@ import { COMPLETION_STABLE_MS, replyToken } from '../../core/notifications/Conve
 import { ReplyTurnTracker, type ConversationMessage } from './ReplyTurnTracker';
 
 type Message = ConversationMessage;
-export interface Page { url: string; title: string; readiness: BrowserReadiness; editor: boolean; draft: string; busy: boolean; messages: Message[]; error?: string }
+export interface Page { url: string; title: string; readiness: BrowserReadiness; editor: boolean; draft: string; busy: boolean; messages: Message[]; error?: string; failure?: 'thinking' }
 interface Operation { kind: 'inspect' | 'diagnose' | 'activity' | 'follow_latest' | 'fill' | 'clear' | 'check_send' | 'send' | 'click' | 'snapshot'; url?: string; anchor?: string; value?: string; selector?: string }
 
 // Electron otherwise replaces page exceptions with an unhelpful "Script failed
@@ -140,7 +140,22 @@ export function pageOperation(operation: Operation): unknown {
       }
       return false;
     });
-    const error = markedError?.innerText || (inlineError ? 'ChatGPT 检测到异常活动，请稍后重试' : undefined);
+    // A failed reasoning block can replace the answer without a Retry card or
+    // copy action. Match only its own interactive label after the latest user
+    // turn; historical failures and assistant quotes are not current errors.
+    const finishedAnswer = elements.some((element, index) => element.dataset.messageAuthorRole === 'assistant' &&
+      afterLastUser(element) && readMessage(element, index).terminal);
+    const thinkingLabel = /^(无法思考|Unable to think)(?:\s*[›>])?$/i;
+    const thinkingFailure = !!lastUserElement && visible(editor) && !busy && !finishedAnswer &&
+      [...document.querySelectorAll<HTMLElement>('main button, main [role="button"], main [aria-expanded]')].some(control => {
+        if (!visible(control) || !afterLastUser(control) || control.closest('[data-message-author-role="user"]')) return false;
+        const label = (control.innerText || control.getAttribute('aria-label') || '').trim();
+        return thinkingLabel.test(label);
+      });
+    const markedThinkingFailure = !!lastUserElement && visible(editor) && !busy && !finishedAnswer &&
+      !!markedError && thinkingLabel.test(markedError.innerText.trim());
+    const error = markedError?.innerText || (inlineError ? 'ChatGPT 检测到异常活动，请稍后重试' : thinkingFailure ? 'ChatGPT 无法思考，本轮回复未完成' : undefined);
+    const failure = (thinkingFailure || markedThinkingFailure) && !inlineError ? 'thinking' : undefined;
     if (operation.kind === 'activity') {
       let user: Message | undefined; let assistant: Message | undefined;
       for (let index = elements.length - 1; index >= 0 && (!user || !assistant); index--) {
@@ -154,7 +169,7 @@ export function pageOperation(operation: Operation): unknown {
         lastRole: elements.at(-1)?.dataset.messageAuthorRole };
     }
     const messages = elements.map(readMessage);
-    const page: Page = { url: location.href, title: document.title.slice(0, 120), readiness, editor: visible(editor), draft, busy, messages, error };
+    const page: Page = { url: location.href, title: document.title.slice(0, 120), readiness, editor: visible(editor), draft, busy, messages, error, failure };
     if (operation.kind === 'inspect') return page;
     stage = 'verify_target';
     if (operation.url !== location.href) throw new Error('TARGET_CHANGED: page changed before action');
@@ -261,7 +276,8 @@ export class ChatGPTAdapter {
       if (now - lastSample > Math.max(2000, interval * 2 + 500)) since = now;
       lastSample = now;
       const previousFailure = failedTail(page);
-      if (page.error && !(previousFailure && page.error === priorError?.error)) throw new Error(page.error);
+      const terminalThinkingFailure = page.failure === 'thinking';
+      if (page.error && !terminalThinkingFailure && !(previousFailure && page.error === priorError?.error)) throw new Error(page.error);
       if (!page.editor || page.readiness === 'login_required' || page.readiness === 'verification_required') {
         if (Date.now() - composerMissingSince >= composerBudget) {
           if (page.readiness === 'login_required') throw new Error('LOGIN_REQUIRED: 请在此账号网页完成登录，再继续原任务');
@@ -274,7 +290,7 @@ export class ChatGPTAdapter {
       composerMissingSince = Date.now();
       if (page.draft.trim()) throw new Error('DRAFT_CONFLICT: clear or send the existing draft first');
       const last = page.messages.at(-1);
-      const ready = !page.busy && (!last || (last.role === 'assistant' && last.terminal) || previousFailure);
+      const ready = !page.busy && (!last || (last.role === 'assistant' && last.terminal) || previousFailure || terminalThinkingFailure);
       const fingerprint = JSON.stringify([page.url, page.messages, page.error]);
       if (!ready || previous !== fingerprint) since = Date.now();
       if (ready && Date.now() - since >= (last ? COMPLETION_STABLE_MS : 1000)) {
@@ -283,7 +299,7 @@ export class ChatGPTAdapter {
         // Another operation may have held capacity while this page changed.
         // Recheck after acquisition before using the baseline for a write.
         const confirmed = await this.inspect();
-        if (confirmed.editor && confirmed.readiness === 'ready' && (!confirmed.error || (failedTail(confirmed) && confirmed.error === priorError?.error)) &&
+        if (confirmed.editor && confirmed.readiness === 'ready' && (!confirmed.error || confirmed.failure === 'thinking' || (failedTail(confirmed) && confirmed.error === priorError?.error)) &&
           !confirmed.busy && !confirmed.draft.trim() && JSON.stringify([confirmed.url, confirmed.messages, confirmed.error]) === fingerprint) return confirmed;
         this.context.releaseExecution?.();
         previous = ''; since = Date.now(); interval = 250;
@@ -363,6 +379,7 @@ export class ChatGPTAdapter {
     let observedConversationUrl = boundUrl;
     let optimisticUrl: string | undefined;
     let previous = ''; let since = Date.now();
+    let failureFingerprint = ''; let failureSince = Date.now();
     let lastSample = Date.now();
     let nextPollMs = 250;
     while (true) {
@@ -370,7 +387,7 @@ export class ChatGPTAdapter {
       await this.delay(interval);
       const page = await this.inspect();
       const now = Date.now();
-      if (now - lastSample > Math.max(2000, interval * 2 + 500)) since = now;
+      if (now - lastSample > Math.max(2000, interval * 2 + 500)) { since = now; failureSince = now; }
       lastSample = now;
       const replyUrl = replyPageUrl(page.url, !boundUrl && conversation?.binding === 'new');
       const optimistic = replyUrl?.includes('/c/WEB:');
@@ -390,9 +407,17 @@ export class ChatGPTAdapter {
         // A visible reply error is terminal only after the sent user turn and
         // the actual conversation are confirmed. Earlier failures stay in the
         // uncertain path so the prompt is never replayed by mistake.
-        if (acknowledged && boundUrl) throw new ReportedReplyError(page.error);
+        if (acknowledged && boundUrl) {
+          if (page.failure === 'thinking') {
+            const fingerprint = JSON.stringify([replyUrl, page.messages, page.error]);
+            if (fingerprint !== failureFingerprint) { failureFingerprint = fingerprint; failureSince = now; }
+            if (now - failureSince < COMPLETION_STABLE_MS) continue;
+          }
+          throw new ReportedReplyError(page.error, page.failure === 'thinking');
+        }
         throw new Error(page.error);
       }
+      failureFingerprint = '';
       const last = page.messages.at(-1);
       const userIndex = ownUser ? page.messages.indexOf(ownUser) : -1;
       if (acknowledged && userIndex >= 0 && last?.role === 'assistant' && page.messages.indexOf(last) > userIndex) {

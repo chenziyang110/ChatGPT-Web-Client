@@ -120,6 +120,31 @@ try {
     card.textContent = 'Something went wrong'; document.querySelector('main').append(card);
   });
   assert.equal((await execute({ kind: 'inspect' })).error, 'Something went wrong');
+  await page.evaluate(() => {
+    document.body.innerHTML = `<main>
+      <article><div data-message-author-role="user" data-message-id="old">Earlier</div></article>
+      <button aria-expanded="false">无法思考</button>
+      <article><div data-message-author-role="user" data-message-id="current">Current</div></article>
+      <article><div data-message-author-role="assistant" data-message-id="quote">The label 无法思考 was shown earlier.</div></article>
+      <textarea id="prompt-textarea"></textarea></main>`;
+  });
+  assert.equal((await execute({ kind: 'inspect' })).error, undefined, 'Historical controls and assistant quotes are not current failures');
+  await page.evaluate(() => {
+    const control = document.createElement('button'); control.setAttribute('aria-expanded', 'false');
+    control.textContent = '无法思考'; document.querySelector('main').append(control);
+  });
+  assert.match((await execute({ kind: 'inspect' })).error, /无法思考/);
+  await page.evaluate(() => {
+    const stop = document.createElement('button'); stop.dataset.testid = 'stop-button'; document.querySelector('main').append(stop);
+  });
+  assert.equal((await execute({ kind: 'inspect' })).error, undefined, 'A visible stop control means the reply is still active');
+  await page.evaluate(() => {
+    document.querySelector('[data-testid="stop-button"]').remove();
+    const answer = document.createElement('article');
+    answer.innerHTML = '<div data-message-author-role="assistant" data-message-id="final">A completed answer</div><button data-testid="copy-turn-action-button">Copy</button>';
+    document.querySelector('main').append(answer);
+  });
+  assert.equal((await execute({ kind: 'inspect' })).error, undefined, 'A finished answer supersedes the failed reasoning label');
   // Replies scroll inside their own viewport, separately from sidebar history
   // and code blocks. Following must not click controls or disturb a draft.
   await page.evaluate(() => {

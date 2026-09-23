@@ -52,6 +52,49 @@ try {
   await until(atBottom);
   await rpc('browser.preview',{accountId:account.id,pageId:target.id});
   assert.equal(await script('window.fixtureSendCount'),1,'Following never sends another message');
+  await script("const marker=document.createElement('div');marker.id='frame-marker';marker.style.cssText='position:fixed;top:0;left:0;width:140px;height:140px;background:red;z-index:99999';document.body.append(marker)");
+  const firstFrame=await rpc('browser.preview',{accountId:account.id,pageId:target.id});
+  const other=await rpc('accounts.create',{name:'切换预览测试'});
+  await until(async()=> (await rpc('browser.inspect',{accountId:other.id})).editor);
+  await rpc('accounts.switch',{id:other.id});
+  await script("document.querySelector('#frame-marker').style.background='blue'");
+  await new Promise(resolve=>setTimeout(resolve,3200));
+  await rpc('accounts.switch',{id:account.id});
+  await until(async()=>{
+    const frame=await rpc('browser.preview',{accountId:account.id,pageId:target.id});
+    return !!frame?.image && frame.image!==firstFrame.image;
+  });
+  const beforeStall=await page.locator('.preview-canvas img').getAttribute('src');
+  await desktop.evaluate(({webContents,session},{url,partition})=>{
+    const contents=webContents.getAllWebContents().find(w=>w.getURL()===url && w.session===session.fromPartition(partition));
+    if(!contents)throw new Error('Preview fixture missing');
+    const capture=contents.capturePage.bind(contents);
+    let once=true;
+    contents.capturePage=(...args)=>{
+      if(once){once=false;return new Promise(()=>{});}
+      return capture(...args);
+    };
+  },{url:target.url,partition:account.partition});
+  await script("document.querySelector('#frame-marker').style.background='green'");
+  await until(async()=> (await page.locator('.preview-canvas img').getAttribute('src'))!==beforeStall);
+  const beforeStale=await page.locator('.preview-canvas img').getAttribute('src');
+  await desktop.evaluate(async({webContents,session},{url,partition})=>{
+    const contents=webContents.getAllWebContents().find(w=>w.getURL()===url && w.session===session.fromPartition(partition));
+    if(!contents)throw new Error('Preview fixture missing');
+    const capture=contents.capturePage.bind(contents);
+    const stale=await capture(undefined,{stayHidden:true,stayAwake:true});
+    contents.fixtureWoke=false;
+    contents.capturePage=(rect,options)=>{
+      if(options?.stayHidden)return Promise.resolve(stale);
+      contents.fixtureWoke=true;
+      return capture(rect,options);
+    };
+  },{url:target.url,partition:account.partition});
+  await script("document.querySelector('#frame-marker').style.background='yellow';document.querySelector('[data-message-author-role=assistant]').textContent+=' Continued reply content.'");
+  await until(async()=> (await page.locator('.preview-canvas img').getAttribute('src'))!==beforeStale);
+  assert.equal(await desktop.evaluate(({webContents,session},{url,partition})=>webContents.getAllWebContents()
+    .find(w=>w.getURL()===url && w.session===session.fromPartition(partition))?.fixtureWoke,
+  {url:target.url,partition:account.partition}),true,'Stale frames wake the hidden page for a fresh capture');
   await rpc('browser.select',{accountId:account.id,pageId:original.id});
   await script("document.querySelector('#messages').scrollTo({top:0,behavior:'instant'})");
   // Wait longer than two preview intervals to catch a leaked follow timer.

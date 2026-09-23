@@ -29,6 +29,7 @@ interface PageOwner {
 const DEFAULT_PAGE_IDLE_MS = 60_000;
 const DEFAULT_HIDDEN_PAGE_IDLE_MS = 15_000;
 const MONITOR_INTERVAL_MS = 1_500;
+const PREVIEW_TIMEOUT_MS = 5_000;
 
 function pageIdleMs(): number {
   const value = Number(process.env.WORKSPACE_PAGE_IDLE_MS);
@@ -57,6 +58,9 @@ export class BrowserRuntime {
   private readonly observer: ConversationActivityObserver;
   private readonly observing = new Set<string>();
   private readonly previews = new Map<string, Promise<BrowserPreview | null>>();
+  private readonly previewAwaken = new Set<string>();
+  private readonly previewStale = new Set<string>();
+  private readonly previewFrames = new Map<string, { activityKey?: string; image: string }>();
   private readonly redirectingDuplicates = new Set<string>();
   private readonly monitor: ReturnType<typeof setInterval>;
   private readonly idlePageMs = pageIdleMs();
@@ -388,7 +392,7 @@ export class BrowserRuntime {
     if (!this.isLocked(id) || !contents || contents.isDestroyed()) return null;
     const existing = this.previews.get(id);
     if (existing) return existing;
-    const pending = (async () => {
+    const capture = (async () => {
       const url = contents.getURL();
       if (this.activeId === id && this.visible && !contents.isLoading() && isChatUrl(url)) {
         try {
@@ -396,13 +400,36 @@ export class BrowserRuntime {
         } catch { /* Navigation can interrupt following; a later preview retries. */ }
       }
       if (!this.isLocked(id) || contents.isDestroyed() || contents.getURL() !== url) return null;
-      const captured = await contents.capturePage(undefined, { stayHidden: true, stayAwake: true });
+      const captured = await contents.capturePage(undefined, { stayHidden: !this.previewAwaken.has(id), stayAwake: true });
       if (!this.isLocked(id) || contents.isDestroyed() || contents.getURL() !== url || captured.isEmpty()) return null;
       const resized = captured.getSize().width > 1600 ? captured.resize({ width: 1600 }) : captured;
       return { accountId, pageId: id, image: `data:image/jpeg;base64,${resized.toJPEG(75).toString('base64')}`, capturedAt: Date.now() };
     })();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const pending = Promise.race([capture, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new AppError('预览画面更新超时，正在重试')), PREVIEW_TIMEOUT_MS);
+    })]);
     this.previews.set(id, pending);
-    try { return await pending; } finally { this.previews.delete(id); }
+    try {
+      const frame = await pending;
+      if (frame) {
+        const activityKey = this.owners.get(id)?.activityKey;
+        const previous = this.previewFrames.get(id);
+        const stale = !!previous && !!activityKey && activityKey !== previous.activityKey && frame.image === previous.image;
+        if (stale) { this.previewStale.add(id); this.previewAwaken.add(id); }
+        else if (!this.previewStale.has(id) || frame.image !== previous?.image) {
+          this.previewStale.delete(id); this.previewAwaken.delete(id);
+        }
+        this.previewFrames.set(id, { activityKey, image: frame.image });
+      }
+      return frame;
+    } catch (error) {
+      if (this.views.get(id)?.webContents === contents && !contents.isDestroyed() && this.isLocked(id)) this.previewAwaken.add(id);
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (this.previews.get(id) === pending) this.previews.delete(id);
+    }
   }
   async hasBusyPage(): Promise<boolean> {
     for (const view of this.views.values()) {
@@ -475,6 +502,10 @@ export class BrowserRuntime {
     }
   }
   private destroyView(id: string): void {
+    this.previews.delete(id);
+    this.previewAwaken.delete(id);
+    this.previewStale.delete(id);
+    this.previewFrames.delete(id);
     const owner = this.owners.get(id);
     if (owner?.lastUrl) this.observer.disconnected(owner.accountId, owner.lastUrl);
     if (owner) { owner.lastUrl = undefined; owner.hibernationReady = false; owner.activityKey = undefined; }
@@ -507,6 +538,9 @@ export class BrowserRuntime {
   setLocked(tasks: AgentTask[]): void {
     this.locks = tasks;
     for (const taskId of this.taskPages.keys()) if (!tasks.some(task => task.id === taskId)) this.taskPages.delete(taskId);
+    for (const id of this.previewFrames.keys()) if (!this.isLocked(id)) {
+      this.previewFrames.delete(id); this.previewStale.delete(id); this.previewAwaken.delete(id);
+    }
     if (this.activeId && this.isLocked(this.activeId) && this.views.get(this.activeId)?.webContents.isFocused()) this.window.webContents.focus();
     for (const [id, popups] of this.popups) for (const popup of popups) {
       if (this.isLocked(id) || !this.visible || this.activeId !== id) popup.hide(); else popup.show();

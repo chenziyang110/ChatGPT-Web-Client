@@ -8,7 +8,9 @@ import type { AccountQueue, AgentTask, Conversation, TaskInput, TaskPhase } from
 export type { AgentTask } from '../../shared/types';
 const queueKey = (accountId: string, conversationId?: string) => conversationId ? `${accountId}:conversation:${conversationId}` : accountId;
 export class QueuePausedError extends Error { constructor() { super('Queue paused before send'); } }
-export class ReportedReplyError extends Error { constructor(message: string) { super(message); this.name = 'ReportedReplyError'; } }
+export class ReportedReplyError extends Error {
+  constructor(message: string, readonly continueQueue = false) { super(message); this.name = 'ReportedReplyError'; }
+}
 export interface ExecutionContext {
   task(): AgentTask;
   precedingReplyError?: { messageId: string; error: string };
@@ -416,7 +418,7 @@ export class AgentGateway {
         }
         if (error instanceof ReportedReplyError && current.sendIntentAt && current.submittedAt) {
           this.update(task.id, { status: 'failed', phase: 'completed', attention: undefined, error: error.message });
-          this.setQueue(task.accountId, true, 'ChatGPT 回复报错，请核对后恢复后续发送', true, task.conversationId);
+          if (!error.continueQueue) this.setQueue(task.accountId, true, 'ChatGPT 回复报错，请核对后恢复后续发送', true, task.conversationId);
           return;
         }
         const uncertain = !!current.sendIntentAt;

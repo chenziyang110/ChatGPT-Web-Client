@@ -37,7 +37,10 @@ try {
  assert.notEqual(aPage.id,bPage.id);assert.notEqual(aPage.url,bPage.url);
  assert.equal(await execute(bPage.url,"localStorage.getItem('shared-login-check')"),'same-account');
  await until(async()=> (await rpc('notifications.list',{accountId:account.id})).filter(n=>n.running).length===2);
- assert.equal((await rpc('notifications.list',{accountId:account.id})).filter(n=>n.unread).length,0,'The completed foreground conversation is already viewed');
+ await page.bringToFront();
+ await rpc('browser.select',{accountId:account.id,pageId:bPage.id});
+ await until(async()=> !(await rpc('notifications.list',{accountId:account.id})).find(n=>n.url===bPage.url)?.unread);
+ assert.equal((await rpc('notifications.list',{accountId:account.id})).filter(n=>n.unread).length,0,'Viewing the completed conversation clears its notice');
  await rpc('browser.select',{accountId:account.id,pageId:aPage.id});
  await page.locator('.preview-canvas img').waitFor();
  assert.equal((await rpc('browser.preview',{accountId:account.id,pageId:manual.id})),null,'Manual page is not locked by another conversation');

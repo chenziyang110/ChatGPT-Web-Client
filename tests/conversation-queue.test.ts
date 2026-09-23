@@ -76,6 +76,25 @@ test('reported ChatGPT reply error finishes the sent item and pauses only its co
   } finally { failure.resolve(); await gateway.stop(); db.close(); }
 });
 
+test('failed reasoning finishes the sent item and advances its conversation queue without resending', async () => {
+  const db = new Database(':memory:'); const failure = gate(); const sent: string[] = [];
+  const gateway = new AgentGateway(db, async (_id, input, _signal, context) => {
+    if (input.type !== 'prompt') return;
+    context.intent(); context.submitted(input.prompt); sent.push(input.prompt);
+    if (input.prompt === 'first') { await failure.promise; throw new ReportedReplyError('ChatGPT 无法思考，本轮回复未完成', true); }
+  }, () => {});
+  try {
+    const first = gateway.createTask('a', prompt('first'), { conversationId: 'one' });
+    const next = gateway.createTask('a', prompt('next'), { conversationId: 'one' });
+    await until(() => sent.length === 1); failure.resolve();
+    await until(() => gateway.get(next.id).status === 'done');
+    assert.equal(gateway.get(first.id).status, 'failed');
+    assert.equal(gateway.get(first.id).phase, 'completed');
+    assert.equal(gateway.queues().find(queue => queue.conversationId === 'one')?.paused, false);
+    assert.deepEqual(sent, ['first', 'next']);
+  } finally { failure.resolve(); await gateway.stop(); db.close(); }
+});
+
 test('pausing during preparation gates send intent without aborting cleanup; sent replies can resume without duplication', async () => {
   const db = new Database(':memory:'); const prepared = gate(); const reply = gate(); let sends = 0; let cleaned = 0; let attempts = 0;
   const gateway = new AgentGateway(db, async (_id, _input, signal, context) => {

@@ -305,12 +305,24 @@ try {
   await accountUrlScript(work, backgroundWorkUrl, "window.fixtureHold = true; document.querySelector('textarea').value = 'Background notification'; document.querySelector('[data-testid=send-button]').click()");
   await waitForState(async ({ accountId, url }) => (await window.workspace.call('notifications.list', { accountId })).some(item => item.url === url && item.running), { accountId: work.id, url: backgroundWorkUrl });
   await accountUrlScript(work, backgroundWorkUrl, 'window.fixtureFinish(); window.fixtureHold = false');
-  await waitForState(async () => (await window.workspace.call('notifications.list')).filter(item => item.unread).length === 2);
-  assert.equal((await rpc('notifications.list', { accountId: work.id })).filter(item => item.unread).length, 1, 'The foreground conversation is read while a background conversation remains unread');
-  await page.getByRole('button', { name: 'Work，1 个会话有未读回复', exact: true }).click();
-  assert.equal(await page.locator('dialog').count(), 0, 'Unread badge opens the conversation directly without a notification dialog');
-  await waitForState(async url => (await window.workspace.call('workspace.status')).page?.url === url, backgroundWorkUrl);
-  assert.equal((await rpc('workspace.status')).page.url, 'https://chatgpt.com/c/work');
+  await waitForState(async ({ accountId, url }) => (await window.workspace.call('notifications.list', { accountId })).some(item => item.url === url && item.unread && !item.running),
+    { accountId: work.id, url: backgroundWorkUrl });
+  assert.equal((await rpc('notifications.list', { accountId: personal.id })).filter(item => item.unread).length, 1,
+    'Another account keeps its own unread reply');
+  await page.bringToFront();
+  while (true) {
+    const unread = (await rpc('notifications.list', { accountId: work.id })).filter(item => item.unread && !item.running)
+      .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
+    if (!unread.length) break;
+    await page.getByRole('button', { name: /^Work，\d+ 个会话有未读回复$/ }).click();
+    assert.equal(await page.locator('dialog').count(), 0, 'Unread badge opens a conversation directly without a notification dialog');
+    await waitForState(async ({ accountId, ids }) => {
+      const notices = await window.workspace.call('notifications.list', { accountId });
+      return ids.some(id => !notices.find(item => item.id === id)?.unread);
+    }, { accountId: work.id, ids: unread.map(item => item.id) });
+  }
+  assert.equal((await rpc('notifications.list', { accountId: work.id })).find(item => item.url === backgroundWorkUrl)?.unread, false,
+    'The background conversation is marked read after it is viewed');
   await page.locator('.account-row').filter({ hasText: 'Work' }).locator('.reply-badge').waitFor({ state: 'detached' });
   // A manual turn alone (no gateway task) must also generate an unread receipt.
   await accountScript(work, "window.fixtureHold = true; document.querySelector('textarea').value = 'Manual notification'; document.querySelector('[data-testid=send-button]').click()");

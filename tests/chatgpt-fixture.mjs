@@ -38,5 +38,11 @@ document.querySelector('[data-testid="send-button"]').onclick = () => {
   card.innerHTML = 'Unusual activity has been detected from your device. Try again later. (fixture-id) <button>重试</button>';
   document.querySelector('#messages').append(card);
  };
+ window.fixtureFailThinking = () => {
+  stop.remove(); messages.pop(); render();
+  const block = document.createElement('div'); block.id = 'fixture-thinking-error';
+  block.innerHTML = '<button aria-expanded="false">无法思考</button><div>来源</div>';
+  document.querySelector('#messages').append(block);
+ };
  if (!window.fixtureHold && !value.startsWith('HOLD:')) setTimeout(() => window.fixtureFinish(), window.fixtureDelay || 200);
 };</script></body></html>`;

@@ -20,7 +20,7 @@ export class ReplyReader {
     const answer = last?.role === 'assistant' && page.messages.indexOf(last) > page.messages.indexOf(own) ? last : undefined;
     const result = answer ? { response: answer.text.slice(0, 64000), url: canonical ? url : undefined, conversationId: task.conversationId } : undefined;
     const fingerprint = JSON.stringify([url, page.messages]);
-    const finished = canonical && page.editor && !page.busy && !page.error && !page.draft.trim() && answer?.terminal && !!answer.text;
+    const finished = canonical && page.editor && !page.busy && !page.error && !page.draft.trim() && answer?.terminal && (!!answer.text || !!answer.hasContent);
     const sample = this.samples.get(task.id);
     if (!finished || sample?.fingerprint !== fingerprint) this.samples.set(task.id, { fingerprint, since: now });
     if (this.samples.size > 128) this.samples.delete(this.samples.keys().next().value!);

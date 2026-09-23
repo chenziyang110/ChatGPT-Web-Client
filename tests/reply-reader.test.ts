@@ -23,3 +23,15 @@ test('uncertain reply recovery matches the original question and waits for stabl
   page.messages.unshift({ id: 'older', role: 'user', text: 'Question', terminal: false });
   assert.equal(reader.read(task, page).state, 'unavailable', 'Without a recorded message ID, repeated questions are ambiguous');
 });
+
+test('uncertain image-only replies finish after stable media content', () => {
+  const reader = new ReplyReader();
+  const task = { id: 'image', input: { type: 'prompt', prompt: 'Draw it', submit: true } } as AgentTask;
+  const page: Page = { url: 'https://chatgpt.com/c/image', title: '', readiness: 'ready', editor: true, draft: '', busy: false,
+    messages: [{ id: 'user', role: 'user', text: 'Draw it', terminal: false },
+      { id: 'assistant', role: 'assistant', text: '', terminal: true, hasContent: true }] };
+  assert.equal(reader.read(task, page, undefined, 100).state, 'reading');
+  assert.equal(reader.read(task, page, undefined, 6100).state, 'done');
+  page.messages[1].hasContent = false;
+  assert.equal(reader.read(task, page, undefined, 12200).state, 'reading', 'An empty answer without media remains unverified');
+});

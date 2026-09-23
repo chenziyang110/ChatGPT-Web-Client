@@ -78,6 +78,18 @@ test('manual generation transitions to one unread conversation after a stable co
   assert.equal(notices.list('a')[0].unread, false, 'task completion and page observer share one deduplication token'); db.close();
 });
 
+test('a completed image with no reply text produces one unread notice', () => {
+  const db = new Database(':memory:'); const notices = new ConversationNotifications(db, () => {}); const observer = new ConversationActivityObserver(notices);
+  const image = { ...finished, assistant: { id: 'image-reply', text: '', terminal: true, hasContent: true } };
+  observer.observe('a', generating, 0);
+  observer.observe('a', image, 100); observer.observe('a', image, 6100);
+  assert.equal(notices.list('a')[0].unread, true);
+  const receipt = notices.list('a')[0]; notices.read('a', receipt.id, receipt.token);
+  observer.observe('a', image, 9000);
+  assert.equal(notices.list('a')[0].unread, false, 'The same image is not reported twice');
+  db.close();
+});
+
 test('a temporary idle-looking gap does not complete a reply that resumes generating', () => {
   const db = new Database(':memory:'); const notices = new ConversationNotifications(db, () => {}); const observer = new ConversationActivityObserver(notices);
   observer.observe('a', idle, 0); observer.observe('a', generating, 100);

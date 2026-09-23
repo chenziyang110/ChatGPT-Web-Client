@@ -221,9 +221,10 @@ else void app.whenReady().then(async () => {
       }
     } else app.quit();
   };
-  // Keep the native window alive until task execution and SQLite have shut down.
+  // The window close control keeps account pages and queues running in the tray.
+  // Explicit app.quit() (tray Exit, system quit, or test shutdown) uses before-quit.
   win.on('close', event => {
-    if (!stopped) { event.preventDefault(); if (!stopping) void shutdown(); }
+    if (!stopped) { event.preventDefault(); if (!stopping) win.hide(); }
   });
   app.on('before-quit', event => {
     if (!stopped) { event.preventDefault(); if (!stopping) void shutdown(); }

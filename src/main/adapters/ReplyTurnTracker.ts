@@ -1,4 +1,4 @@
-export interface ConversationMessage { id: string; role: string; text: string; terminal: boolean }
+export interface ConversationMessage { id: string; role: string; text: string; terminal: boolean; hasContent?: boolean }
 
 const stableId = (message: ConversationMessage) => !!message.id && !message.id.startsWith('position:');
 const changed = (detail: string): never => { throw new Error(`CONVERSATION_CHANGED: ${detail}`); };

@@ -15,6 +15,8 @@ export interface ExecutionContext {
   submitted(messageId?: string): void;
   progress?(response: string, url?: string): void;
   checkpoint?(): void;
+  releaseExecution?(): void;
+  acquireExecution?(): Promise<void>;
 }
 export type TaskExecutor = (accountId: string, input: TaskInput, signal: AbortSignal, context: ExecutionContext) => Promise<unknown>;
 export interface TaskOptions {
@@ -45,6 +47,10 @@ function duration(value: number | undefined, fallback: number): number {
 }
 export class AgentGateway {
   private readonly running = new Map<string, { id: string; controller: AbortController; promise: Promise<void> }>();
+  // Conversation locks live through the reply. Only active browser operations
+  // consume execution capacity; idle/reply polling must not block other queues.
+  private readonly executing = new Set<string>();
+  private readonly executionWaiters = new Map<string, () => void>();
   private stopped = false;
   private scheduled = false;
   private readonly dispatched = new Map<string, number>();
@@ -314,8 +320,32 @@ export class AgentGateway {
     this.scheduled = true;
     queueMicrotask(() => { this.scheduled = false; this.pump(); });
   }
+  private releaseExecution(id: string): void {
+    if (this.executing.delete(id)) this.schedule();
+  }
+  private acquireExecution(id: string, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    if (this.executing.has(id)) return Promise.resolve();
+    if (this.executionWaiters.has(id)) throw new Error('Task is already waiting for execution');
+    return new Promise((resolve, reject) => {
+      const aborted = () => {
+        this.executionWaiters.delete(id); signal.removeEventListener('abort', aborted);
+        reject(signal.reason); this.schedule();
+      };
+      this.executionWaiters.set(id, () => {
+        signal.removeEventListener('abort', aborted);
+        this.executing.add(id); resolve();
+      });
+      signal.addEventListener('abort', aborted, { once: true });
+      this.schedule();
+    });
+  }
   private pump(): void {
-    while (!this.stopped && this.running.size < this.concurrency) {
+    while (!this.stopped && this.executing.size < this.concurrency) {
+      // Resume ready pages before opening more pages. Cancelled or paused
+      // waiters are removed by their abort listener before capacity is reused.
+      const ready = this.executionWaiters.entries().next().value;
+      if (ready) { this.executionWaiters.delete(ready[0]); ready[1](); continue; }
       const tasks = this.listTasks();
       const pending = orderedTasks(tasks).filter(task => task.status === 'pending' && !this.running.has(queueKey(task.accountId, task.conversationId)) && !this.db.read<AccountQueue>('account_queues', task.accountId)?.paused && !this.db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.paused &&
         !tasks.some(other => queueKey(other.accountId, other.conversationId) === queueKey(task.accountId, task.conversationId) && (other.status === 'waiting_user' || other.status === 'uncertain' && !other.resolvedAt)));
@@ -327,6 +357,7 @@ export class AgentGateway {
       const slot = { id: task.id, controller, promise: Promise.resolve() };
       const key = queueKey(task.accountId, task.conversationId);
       this.running.set(key, slot);
+      this.executing.add(task.id);
       this.db.write('account_queues', key, { ...(this.db.read<AccountQueue>('account_queues', key) ?? { accountId: task.accountId, conversationId: task.conversationId, paused: false }), control: 'agent' });
       this.dispatched.set(task.accountId, ++this.dispatchSequence);
       slot.promise = this.run(task, controller);
@@ -347,8 +378,14 @@ export class AgentGateway {
     const context: ExecutionContext = {
       checkpoint,
       task: () => this.get(task.id), stage,
+      releaseExecution: () => this.releaseExecution(task.id),
+      acquireExecution: () => this.acquireExecution(task.id, controller.signal),
       intent: () => { checkpoint(); this.update(task.id, { phase: 'send_intent', sendIntentAt: Date.now() }); },
-      submitted: messageId => { controller.signal.throwIfAborted(); this.update(task.id, { phase: 'submitted', submittedAt: Date.now(), submittedMessageId: messageId }); },
+      submitted: messageId => {
+        controller.signal.throwIfAborted();
+        this.update(task.id, { phase: 'submitted', submittedAt: Date.now(), submittedMessageId: messageId });
+        this.releaseExecution(task.id);
+      },
       progress: (response, url) => {
         controller.signal.throwIfAborted();
         const progress = { response: response.slice(0, 64000), url };
@@ -376,6 +413,7 @@ export class AgentGateway {
       }
     } finally {
       clearTimeout(timer!);
+      this.releaseExecution(task.id);
       this.running.delete(queueKey(task.accountId, task.conversationId));
       this.changed(); this.schedule();
     }

@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-web-client",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Local-first desktop AI workspace with isolated accounts and an agent gateway",
   "private": true,
   "type": "module",
@@ -40,7 +40,10 @@
       "package.json"
     ],
     "npmRebuild": false,
-    "publish": { "provider": "generic", "url": "https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest/download/" },
+    "publish": {
+      "provider": "generic",
+      "url": "https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest/download/"
+    },
     "mac": {
       "identity": "-",
       "hardenedRuntime": false,

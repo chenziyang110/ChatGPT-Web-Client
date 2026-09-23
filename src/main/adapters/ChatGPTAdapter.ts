@@ -199,7 +199,8 @@ export function pageOperation(operation: Operation): unknown {
 export class ChatGPTAdapter {
   private readonly pending = new Set<Promise<unknown>>();
   constructor(private readonly contents: WebContents, private readonly signal: AbortSignal,
-    private readonly context: ExecutionContext, private readonly conversations: ConversationManager) {}
+    private readonly context: ExecutionContext, private readonly conversations: ConversationManager,
+    private readonly pollingInterval: () => number = () => 250) {}
   private async wait<T>(promise: Promise<T>): Promise<T> {
     this.signal.throwIfAborted();
     return new Promise<T>((resolve, reject) => {
@@ -223,8 +224,10 @@ export class ChatGPTAdapter {
   private async loaded(): Promise<void> { while (this.contents.isLoading()) await this.delay(); }
   private async idle(): Promise<Page> {
     this.context.stage('waiting_idle', this.context.task().idleTimeoutMs);
+    this.context.releaseExecution?.();
     let previous = ''; let since = Date.now();
     let lastSample = Date.now();
+    let interval = 250;
     let composerMissingSince = Date.now();
     const composerBudget = Math.min(this.context.task().prepareTimeoutMs ?? 60000, 30000);
     while (true) {
@@ -232,7 +235,7 @@ export class ChatGPTAdapter {
       const page = await this.inspect();
       const now = Date.now();
       // A suspend or stalled renderer is not continuous evidence of completion.
-      if (now - lastSample > 2000) since = now;
+      if (now - lastSample > Math.max(2000, interval * 2 + 500)) since = now;
       lastSample = now;
       if (page.error) throw new Error(page.error);
       if (!page.editor || page.readiness === 'login_required' || page.readiness === 'verification_required') {
@@ -242,7 +245,7 @@ export class ChatGPTAdapter {
           throw new Error(`COMPOSER_NOT_READY: 等待输入框超时，请用 browser inspect 检查此账号页面；未发送消息 (${page.url})`);
         }
         previous = ''; since = Date.now();
-        await this.delay(); continue;
+        interval = 250; await this.delay(interval); continue;
       }
       composerMissingSince = Date.now();
       if (page.draft.trim()) throw new Error('DRAFT_CONFLICT: clear or send the existing draft first');
@@ -250,9 +253,21 @@ export class ChatGPTAdapter {
       const ready = !page.busy && (!last || (last.role === 'assistant' && last.terminal));
       const fingerprint = JSON.stringify([page.url, page.messages]);
       if (!ready || previous !== fingerprint) since = Date.now();
-      if (ready && Date.now() - since >= (last ? COMPLETION_STABLE_MS : 1000)) return page;
+      if (ready && Date.now() - since >= (last ? COMPLETION_STABLE_MS : 1000)) {
+        await this.context.acquireExecution?.();
+        this.context.checkpoint?.();
+        // Another operation may have held capacity while this page changed.
+        // Recheck after acquisition before using the baseline for a write.
+        const confirmed = await this.inspect();
+        if (confirmed.editor && confirmed.readiness === 'ready' && !confirmed.error && !confirmed.busy && !confirmed.draft.trim() &&
+          JSON.stringify([confirmed.url, confirmed.messages]) === fingerprint) return confirmed;
+        this.context.releaseExecution?.();
+        previous = ''; since = Date.now(); interval = 250;
+        continue;
+      }
       previous = fingerprint;
-      await this.delay();
+      interval = page.busy ? this.pollingInterval() : 250;
+      await this.delay(interval);
     }
   }
   private async navigate(url: string): Promise<void> {
@@ -325,11 +340,13 @@ export class ChatGPTAdapter {
     let optimisticUrl: string | undefined;
     let previous = ''; let since = Date.now();
     let lastSample = Date.now();
+    let nextPollMs = 250;
     while (true) {
-      await this.delay();
+      const interval = nextPollMs;
+      await this.delay(interval);
       const page = await this.inspect();
       const now = Date.now();
-      if (now - lastSample > 2000) since = now;
+      if (now - lastSample > Math.max(2000, interval * 2 + 500)) since = now;
       lastSample = now;
       if (page.error) throw new Error(page.error);
       const replyUrl = replyPageUrl(page.url, !boundUrl && conversation?.binding === 'new');
@@ -341,6 +358,7 @@ export class ChatGPTAdapter {
       } else if (replyUrl !== HOME_URL) observedConversationUrl ??= replyUrl;
       const ownUser = turns.read(page.messages);
       if (ownUser && !acknowledged) { this.context.submitted(ownUser.id); acknowledged = true; }
+      nextPollMs = acknowledged && page.busy ? this.pollingInterval() : 250;
       if (acknowledged && !boundUrl && !optimistic && replyUrl !== HOME_URL && conversation) {
         boundUrl = conversationUrl(replyUrl).url;
         this.conversations.bind(task.accountId, conversation.id, boundUrl);

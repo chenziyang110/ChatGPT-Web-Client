@@ -314,6 +314,7 @@ try {
     const unread = (await rpc('notifications.list', { accountId: work.id })).filter(item => item.unread && !item.running)
       .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
     if (!unread.length) break;
+    await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].focus());
     await page.getByRole('button', { name: /^Work，\d+ 个会话有未读回复$/ }).click();
     assert.equal(await page.locator('dialog').count(), 0, 'Unread badge opens a conversation directly without a notification dialog');
     await waitForState(async ({ accountId, ids }) => {

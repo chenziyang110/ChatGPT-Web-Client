@@ -59,9 +59,8 @@ export function notifyConversationCompleted(factory: NativeNotificationFactory, 
   accountName: string, open: (notice: ConversationNotice) => void): boolean {
   if (!factory.supported()) return false;
   const account = accountName.replace(/\s+/g, ' ').trim().slice(0, 80) || 'ChatGPT';
-  const conversation = notice.title.replace(/\s+/g, ' ').trim().slice(0, 120) || '会话';
   try {
-    const notification = factory.create({ title: 'ChatGPT 回复完成', body: `${account} · ${conversation}`, silent: false });
+    const notification = factory.create({ title: 'ChatGPT 有未读回复', body: account, silent: false });
     notification.once('click', () => open(notice));
     notification.show();
     return true;

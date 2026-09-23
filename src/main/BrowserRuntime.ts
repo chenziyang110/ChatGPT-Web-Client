@@ -57,6 +57,7 @@ export class BrowserRuntime {
   private readonly observer: ConversationActivityObserver;
   private readonly observing = new Set<string>();
   private readonly previews = new Map<string, Promise<BrowserPreview | null>>();
+  private readonly redirectingDuplicates = new Set<string>();
   private readonly monitor: ReturnType<typeof setInterval>;
   private readonly idlePageMs = pageIdleMs();
   private readonly hiddenIdlePageMs = hiddenPageIdleMs();
@@ -80,6 +81,7 @@ export class BrowserRuntime {
     const contents = view.webContents;
     if (this.closing || this.observing.has(id) || contents.isDestroyed() || contents.isLoading()) return;
     const owner = this.owners.get(id); if (!owner) return;
+    if (this.redirectingDuplicates.has(id)) return;
     const url = contents.getURL();
     if (owner.lastUrl && owner.lastUrl !== url) this.observer.disconnected(owner.accountId, owner.lastUrl);
     owner.lastUrl = url; owner.url = url;
@@ -152,6 +154,31 @@ export class BrowserRuntime {
   }
   private savePage(id: string, url: string): void {
     const owner = this.owners.get(id); if (!owner) return;
+    if (this.redirectingDuplicates.has(id) && url !== owner.url) return;
+    const target = replyPageUrl(url);
+    if (target && target !== HOME_URL && !this.redirectingDuplicates.has(id)) {
+      const registered = this.conversations.list(owner.accountId).find(item => item.url === target);
+      const duplicates = [...this.owners].filter(([otherId, other]) => otherId !== id && !this.redirectingDuplicates.has(otherId) &&
+        other.accountId === owner.accountId && (Boolean(registered && other.conversationId === registered.id) || replyPageUrl(other.url) === target));
+      const duplicate = duplicates.find(([otherId]) => this.locks.some(task => this.taskPage(task) === otherId)) ?? duplicates[0];
+      if (duplicate) {
+        const previous = owner.conversationId ? this.conversations.get(owner.accountId, owner.conversationId) : undefined;
+        const fallback = previous?.url && previous.url !== target ? previous.url : replyPageUrl(owner.url);
+        owner.url = fallback && fallback !== target ? fallback : HOME_URL;
+        if (previous?.url === target) owner.conversationId = undefined;
+        this.redirectingDuplicates.add(id);
+        if (this.selected.get(owner.accountId) === id) {
+          if (this.accounts.activeId() === owner.accountId) this.activate(owner.accountId, duplicate[0]);
+          else this.selected.set(owner.accountId, duplicate[0]);
+        }
+        const contents = this.views.get(id)?.webContents;
+        if (contents && !contents.isDestroyed()) void contents.loadURL(owner.url).catch(() => {
+          if (this.views.get(id)?.webContents === contents) this.destroyView(id);
+        }).finally(() => { this.redirectingDuplicates.delete(id); this.changed(); });
+        else this.redirectingDuplicates.delete(id);
+        return;
+      }
+    }
     owner.url = url;
     if (this.selected.get(owner.accountId) === id) this.sessions.save(owner.accountId, url);
     // A manually opened ordinary conversation is indexed for the same queue key.
@@ -438,6 +465,7 @@ export class BrowserRuntime {
   }
   private closeView(id: string): void {
     const owner = this.owners.get(id);
+    this.redirectingDuplicates.delete(id);
     this.destroyView(id);
     this.owners.delete(id); this.errors.delete(id);
     for (const [taskId, pageId] of this.taskPages) if (pageId === id) this.taskPages.delete(taskId);
@@ -464,7 +492,7 @@ export class BrowserRuntime {
     const active = this.activeId === id;
     const idleSince = active ? this.backgroundedAt : owner?.idleSince;
     const idleMs = active ? this.hiddenIdlePageMs : this.idlePageMs;
-    if (!owner || this.views.get(id) !== view || active && !this.backgrounded() || this.isLocked(id) || this.observing.has(id) ||
+    if (!owner || this.views.get(id) !== view || active && !this.backgrounded() || this.isLocked(id) || this.redirectingDuplicates.has(id) || this.observing.has(id) ||
       owner.hasDraft || owner.busy || !owner.hibernationReady || !idleSince || Date.now() - idleSince < idleMs ||
       view.webContents.isDestroyed() || view.webContents.isLoading() || !isChatUrl(view.webContents.getURL())) return;
     this.destroyView(id);

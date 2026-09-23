@@ -36,7 +36,7 @@ try {
   };
   const livePages = account => desktop.evaluate(({ session, webContents }, partition) => webContents.getAllWebContents()
     .filter(contents => contents.session === session.fromPartition(partition) && contents.getURL().startsWith('https://chatgpt.com'))
-    .map(contents => ({ url: contents.getURL(), backgroundThrottling: contents.backgroundThrottling })), account.partition);
+    .map(contents => ({ id: contents.id, url: contents.getURL(), backgroundThrottling: contents.backgroundThrottling })), account.partition);
   const waitForLiveCount = async (account, count) => {
     const deadline = Date.now() + 10000;
     while ((await livePages(account)).length !== count) {
@@ -60,13 +60,35 @@ try {
 
   const visiblePage = state.pages.find(page => page.accountId === account.id && page.selected);
   assert.ok(visiblePage);
+  const originalContent = (await livePages(account))[0];
+  await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].webContents
+    .executeJavaScript('window.warmMarker = "first-account"'));
   await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].hide());
-  await waitForLiveCount(account, 0);
-  assert.equal((await rpc('workspace.status')).pages.find(page => page.id === visiblePage.id)?.sleeping, true,
-    'A safe selected page hibernates while the native window is hidden');
+  await shell.waitForTimeout(2000);
+  await waitForLiveCount(account, 1);
+  assert.equal((await livePages(account))[0].id, originalContent.id, 'The account selected page stays resident while hidden');
   await desktop.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.show(); window.focus(); });
   await waitForLiveCount(account, 1);
-  assert.equal((await rpc('workspace.status')).page.url, visiblePage.url, 'Showing the window restores the selected page');
+  assert.equal((await rpc('workspace.status')).page.url, visiblePage.url, 'Showing the window reuses the selected page');
+
+  const secondAccount = await rpc('accounts.create', { name: 'Warm account' });
+  await shell.waitForFunction(async id => (await window.workspace.call('browser.inspect', { accountId: id })).editor, secondAccount.id);
+  await waitForLiveCount(secondAccount, 1);
+  const secondContent = (await livePages(secondAccount))[0];
+  await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].webContents
+    .executeJavaScript('window.warmMarker = "second-account"'));
+  await shell.waitForTimeout(2000);
+  await waitForLiveCount(account, 1);
+  await waitForLiveCount(secondAccount, 1);
+  await rpc('accounts.switch', { id: account.id });
+  assert.equal((await livePages(account))[0].id, originalContent.id, 'Switching back reuses the original WebContents');
+  assert.equal(await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].webContents
+    .executeJavaScript('window.warmMarker')), 'first-account', 'Account switching preserves the live DOM');
+  await rpc('accounts.switch', { id: secondAccount.id });
+  assert.equal((await livePages(secondAccount))[0].id, secondContent.id);
+  assert.equal(await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].webContents
+    .executeJavaScript('window.warmMarker')), 'second-account');
+  await rpc('accounts.switch', { id: account.id });
 
   await rpc('browser.select', { accountId: account.id, pageId: first.id });
   await shell.waitForFunction(async ({ accountId, pageId }) => {
@@ -105,4 +127,4 @@ try {
   await rm(directory, { recursive: true, force: true });
 }
 
-console.log('Memory lifecycle passed: idle tabs sleep, restore on selection, and drafts stay resident.');
+console.log('Memory lifecycle passed: unselected tabs sleep, selected account pages stay warm across account switches and tray hiding, and drafts stay resident.');

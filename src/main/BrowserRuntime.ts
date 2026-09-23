@@ -66,7 +66,6 @@ export class BrowserRuntime {
   private readonly monitor: ReturnType<typeof setInterval>;
   private readonly idlePageMs = pageIdleMs();
   private readonly hiddenIdlePageMs = hiddenPageIdleMs();
-  private backgroundedAt?: number;
   constructor(private readonly window: BrowserWindow, private readonly accounts: AccountManager,
     private readonly sessions: SessionManager, private readonly changed: () => void, private readonly conversations: ConversationManager,
     private readonly shortcuts: ShortcutSettings, private readonly notifications: ConversationNotifications) {
@@ -358,8 +357,7 @@ export class BrowserRuntime {
     if (accountId && id && this.owners.has(id) && !this.views.has(id)) this.activate(accountId, id);
   }
   private updateVisibility(): void {
-    if (this.backgrounded()) this.backgroundedAt ??= Date.now();
-    else { this.backgroundedAt = undefined; this.restoreSelectedView(); }
+    if (!this.backgrounded()) this.restoreSelectedView();
     this.layout();
   }
   setVisible(visible: boolean): void { this.visible = visible; this.updateVisibility(); }
@@ -554,11 +552,12 @@ export class BrowserRuntime {
   }
   private hibernateIfIdle(id: string, view: WebContentsView): void {
     const owner = this.owners.get(id);
-    const active = this.activeId === id;
-    const idleSince = active ? this.backgroundedAt : owner?.idleSince;
-    const idleMs = active ? this.hiddenIdlePageMs : this.idlePageMs;
-    if (!owner || this.views.get(id) !== view || active && !this.backgrounded() || this.isLocked(id) || this.redirectingDuplicates.has(id) || this.observing.has(id) ||
-      owner.hasDraft || owner.busy || !owner.hibernationReady || !idleSince || Date.now() - idleSince < idleMs ||
+    // Keep one warm page per account so switching accounts reattaches the same
+    // WebContents without loading ChatGPT again. Other idle tabs may still sleep.
+    if (owner && this.selected.get(owner.accountId) === id) return;
+    const idleMs = this.backgrounded() ? this.hiddenIdlePageMs : this.idlePageMs;
+    if (!owner || this.views.get(id) !== view || this.activeId === id && !this.backgrounded() || this.isLocked(id) || this.redirectingDuplicates.has(id) || this.observing.has(id) ||
+      owner.hasDraft || owner.busy || !owner.hibernationReady || Date.now() - owner.idleSince < idleMs ||
       view.webContents.isDestroyed() || view.webContents.isLoading() || !isChatUrl(view.webContents.getURL())) return;
     this.destroyView(id);
     this.changed();

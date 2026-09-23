@@ -283,7 +283,8 @@ export class ChatGPTAdapter {
       if (!priorError || !conversationId) return false;
       const target = this.conversations.get(this.context.task().accountId, conversationId);
       const lastUser = page.messages.filter(message => message.role === 'user').at(-1);
-      return !!target.url && replyPageUrl(page.url) === target.url && lastUser?.id === priorError.messageId;
+      return !!target.url && replyPageUrl(page.url) === target.url &&
+        (!!lastUser && (priorError.messageId ? lastUser.id === priorError.messageId : !!priorError.continueAfterInterruption));
     };
     let previous = ''; let since = Date.now();
     let lastSample = Date.now();
@@ -299,7 +300,7 @@ export class ChatGPTAdapter {
       lastSample = now;
       const previousFailure = failedTail(page);
       const terminalFailure = !!page.failure;
-      if (page.error && !terminalFailure && !(previousFailure && page.error === priorError?.error)) throw new Error(page.error);
+      if (page.error && !terminalFailure && !(previousFailure && (priorError?.continueAfterInterruption || page.error === priorError?.error))) throw new Error(page.error);
       if (!page.editor || page.readiness === 'login_required' || page.readiness === 'verification_required') {
         if (Date.now() - composerMissingSince >= composerBudget) {
           if (page.readiness === 'login_required') throw new Error('LOGIN_REQUIRED: 请在此账号网页完成登录，再继续原任务');
@@ -323,7 +324,8 @@ export class ChatGPTAdapter {
         // Another operation may have held capacity while this page changed.
         // Recheck after acquisition before using the baseline for a write.
         const confirmed = await this.inspect();
-        if (confirmed.editor && confirmed.readiness === 'ready' && (!confirmed.error || confirmed.failure || (failedTail(confirmed) && confirmed.error === priorError?.error)) &&
+        if (confirmed.editor && confirmed.readiness === 'ready' && (!confirmed.error || confirmed.failure ||
+          (failedTail(confirmed) && (priorError?.continueAfterInterruption || confirmed.error === priorError?.error))) &&
           !confirmed.busy && !confirmed.draft.trim() && JSON.stringify([confirmed.url, confirmed.messages, confirmed.error]) === fingerprint) return confirmed;
         this.context.releaseExecution?.();
         previous = ''; since = Date.now(); interval = 250;

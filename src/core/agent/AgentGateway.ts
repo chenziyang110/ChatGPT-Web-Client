@@ -13,7 +13,7 @@ export class ReportedReplyError extends Error {
 }
 export interface ExecutionContext {
   task(): AgentTask;
-  precedingReplyError?: { messageId: string; error: string };
+  precedingReplyError?: { messageId?: string; error: string; continueAfterInterruption?: boolean };
   stage(phase: TaskPhase, timeoutMs?: number): void;
   intent(): void;
   submitted(messageId?: string): void;
@@ -23,6 +23,10 @@ export interface ExecutionContext {
   acquireExecution?(): Promise<void>;
 }
 export type TaskExecutor = (accountId: string, input: TaskInput, signal: AbortSignal, context: ExecutionContext) => Promise<unknown>;
+// The conversation panel uses background prompt tasks. Once send intent is
+// recorded, its next item must never replay the interrupted prompt.
+const advancesAfterInterruption = (task: AgentTask): boolean => task.background === true && !!task.conversationId &&
+  task.input.type === 'prompt' && task.input.submit;
 export interface TaskOptions {
   conversationId?: string; targetUrl?: string; idempotencyKey?: string; requestHash?: string;
   replyTimeoutMs?: number; prepareTimeoutMs?: number; idleTimeoutMs?: number; background?: boolean;
@@ -101,7 +105,8 @@ export class AgentGateway {
         this.update(task.id, task.sendIntentAt
           ? { status: 'uncertain', attention: taskAttention('Application stopped after send intent', true), error: 'Application stopped after send intent. Check the conversation; do not resend automatically.' }
           : { status: 'pending', phase: 'queued', error: 'Restored paused; resume this account to continue.' }, false);
-        this.setQueue(task.accountId, true, '应用重启后已暂停，请核对会话再继续', false, task.conversationId);
+        if (!db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.paused)
+          this.setQueue(task.accountId, true, '应用重启后已暂停，请核对会话再继续', false, task.conversationId);
       }
     }
     // Old releases paused an entire account on one conversation error. Preserve
@@ -115,6 +120,20 @@ export class AgentGateway {
       }
       this.setQueue(queue.accountId, false, undefined, false);
     }
+    // Upgrade queues stranded by older releases' automatic review gate. Only
+    // clear that exact error pause, never an explicit pause or human takeover.
+    for (const queue of db.records<AccountQueue>('account_queues')) {
+      if (!queue.paused || !queue.conversationId || queue.control === 'human' ||
+        !['发送或回复结果不确定，请核对会话', 'ChatGPT 回复报错，请核对后恢复后续发送'].includes(queue.reason ?? '')) continue;
+      const tasks = this.listTasks().filter(task => task.accountId === queue.accountId && task.conversationId === queue.conversationId);
+      const interrupted = tasks.filter(task => advancesAfterInterruption(task) && task.sendIntentAt &&
+        (task.status === 'uncertain' && !task.resolvedAt || task.status === 'failed' && task.phase === 'completed'));
+      if (!interrupted.length || tasks.some(task => task.status === 'waiting_user')) continue;
+      for (const task of interrupted) if (task.status === 'uncertain') this.update(task.id,
+        { status: 'failed', phase: 'completed', attention: undefined, resolvedAt: Date.now() }, false);
+      this.setQueue(queue.accountId, false, undefined, false, queue.conversationId);
+    }
+    this.schedule();
   }
   listTasks(): AgentTask[] { return this.db.records<AgentTask>('tasks').reverse(); }
   get(id: string): AgentTask {
@@ -372,8 +391,10 @@ export class AgentGateway {
     const conversationTasks = task.conversationId
       ? orderedTasks(this.listTasks().filter(item => item.accountId === task.accountId && item.conversationId === task.conversationId)) : [];
     const predecessor = conversationTasks[conversationTasks.findIndex(item => item.id === task.id) - 1];
-    const precedingReplyError = predecessor?.status === 'failed' && predecessor.phase === 'completed' && predecessor.submittedAt && predecessor.submittedMessageId && predecessor.error
-      ? { messageId: predecessor.submittedMessageId, error: predecessor.error } : undefined;
+    const precedingReplyError = predecessor?.status === 'failed' && predecessor.phase === 'completed' && predecessor.sendIntentAt && predecessor.error &&
+      (predecessor.submittedMessageId || advancesAfterInterruption(predecessor))
+      ? { messageId: predecessor.submittedMessageId, error: predecessor.error,
+        continueAfterInterruption: advancesAfterInterruption(predecessor) } : undefined;
     const stage = (phase: TaskPhase, timeoutMs?: number) => {
       controller.signal.throwIfAborted();
       if (timeoutMs !== undefined) { clearTimeout(timer); timer = setTimeout(() => controller.abort(new Error(`${phase} timed out`)), timeoutMs); }
@@ -418,11 +439,15 @@ export class AgentGateway {
         }
         if (error instanceof ReportedReplyError && current.sendIntentAt && current.submittedAt) {
           this.update(task.id, { status: 'failed', phase: 'completed', attention: undefined, error: error.message });
-          if (!error.continueQueue) this.setQueue(task.accountId, true, 'ChatGPT 回复报错，请核对后恢复后续发送', true, task.conversationId);
+          if (!error.continueQueue && !advancesAfterInterruption(current)) this.setQueue(task.accountId, true, 'ChatGPT 回复报错，请核对后恢复后续发送', true, task.conversationId);
           return;
         }
         const uncertain = !!current.sendIntentAt;
         const message = error instanceof Error ? error.message : String(error);
+        if (uncertain && advancesAfterInterruption(current)) {
+          this.update(task.id, { status: 'failed', phase: 'completed', attention: undefined, error: message });
+          return;
+        }
         this.update(task.id, { status: uncertain ? 'uncertain' : 'waiting_user', attention: taskAttention(message, uncertain), error: message });
         this.setQueue(task.accountId, true, uncertain ? '发送或回复结果不确定，请核对会话' : '任务需要处理，请检查错误后继续', true, task.conversationId);
       }

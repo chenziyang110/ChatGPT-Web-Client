@@ -42,17 +42,14 @@ try {
   const failed = await rpc('tasks.get', { id: first.id });
   assert.match(failed.error, /异常活动/);
   assert.equal(failed.attention, undefined);
-  assert.equal((await rpc('tasks.get', { id: second.id })).status, 'pending');
-  assert.equal((await script(live.url, 'window.fixtureSendCount')), 1);
-  const queue = (await rpc('queues.status')).find(item => item.accountId === account.id && item.conversationId === first.conversationId);
-  assert.equal(queue?.paused, true);
-  assert.match(queue.reason, /ChatGPT 回复报错/);
-
-  await rpc('queues.resume', { accountId: account.id, conversation: first.conversationId });
   await until(async () => (await rpc('tasks.get', { id: second.id })).status === 'done');
+  assert.equal((await script(live.url, 'window.fixtureSendCount')), 2);
+  const queue = (await rpc('queues.status')).find(item => item.accountId === account.id && item.conversationId === first.conversationId);
+  assert.equal(queue?.paused, false);
+
   assert.equal(await script(live.url, 'window.fixtureSendCount'), 2, 'The failed message is never resent');
   assert.equal((await rpc('tasks.get', { id: first.id })).status, 'failed');
-  console.log('Reply error desktop passed: inline ChatGPT error terminates the sent item, pauses this conversation, and explicit resume sends the next item once.');
+  console.log('Reply error desktop passed: inline ChatGPT error terminates the sent item and sends the next queue item once.');
 } finally {
   await desktop?.close();
   const target = path.resolve(directory);

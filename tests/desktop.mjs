@@ -307,11 +307,9 @@ try {
   await accountUrlScript(work, backgroundWorkUrl, 'window.fixtureFinish(); window.fixtureHold = false');
   await waitForState(async () => (await window.workspace.call('notifications.list')).filter(item => item.unread).length === 2);
   assert.equal((await rpc('notifications.list', { accountId: work.id })).filter(item => item.unread).length, 1, 'The foreground conversation is read while a background conversation remains unread');
-  await page.getByRole('button', { name: 'Work，1 个会话待处理', exact: true }).click();
-  await page.getByRole('heading', { name: '待处理会话', exact: true }).waitFor();
-  await page.screenshot({ path: 'test-results/conversation-notifications.png', animations: 'disabled' });
-  await page.locator('.notification-item').filter({ hasText: 'ChatGPT fixture' }).getByRole('button', { name: '查看会话', exact: true }).click();
-  await page.waitForFunction(() => !document.querySelector('dialog'));
+  await page.getByRole('button', { name: 'Work，1 个会话有未读回复', exact: true }).click();
+  assert.equal(await page.locator('dialog').count(), 0, 'Unread badge opens the conversation directly without a notification dialog');
+  await waitForState(async url => (await window.workspace.call('workspace.status')).page?.url === url, backgroundWorkUrl);
   assert.equal((await rpc('workspace.status')).page.url, 'https://chatgpt.com/c/work');
   await page.locator('.account-row').filter({ hasText: 'Work' }).locator('.reply-badge').waitFor({ state: 'detached' });
   // A manual turn alone (no gateway task) must also generate an unread receipt.
@@ -319,7 +317,7 @@ try {
   await page.getByRole('status', { name: 'Work 会话运行中', exact: true }).waitFor();
   await rpc('accounts.switch', { id: personal.id });
   await accountScript(work, 'window.fixtureFinish(); window.fixtureHold = false');
-  await page.getByRole('button', { name: 'Work，1 个会话待处理', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Work，1 个会话有未读回复', exact: true }).waitFor();
   await rpc('accounts.switch', { id: work.id });
   await waitForState(async id => !(await window.workspace.call('notifications.list', { accountId: id })).some(item => item.unread), work.id);
   const workBadge = page.locator('.account-row').filter({ hasText: 'Work' }).locator('.reply-badge');

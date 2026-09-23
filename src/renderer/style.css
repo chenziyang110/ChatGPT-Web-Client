@@ -405,13 +405,6 @@ kbd { font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; paddin
 .shortcut-actions [role=status] { font-size: 12px; color: #527461; }
 .account-shortcut-details { border-top: 1px solid #e5e9e0; margin-top: 18px; padding-top: 14px; }
 .account-shortcut-details summary { cursor: pointer; color: #597565; font-size: 13px; }
-.notification-list > p { color: #67786d; }
-.notification-item { border: 1px solid #e0e6dc; border-radius: 10px; padding: 16px; margin: 12px 0; }
-.notification-item strong { display: inline-block; max-width: 90%; overflow-wrap: anywhere; }
-.notification-item small { display: block; color: #7b897f; margin: 8px 0 14px; }
-.notification-item .conversation-spinner { margin-left: 8px; }
-.notification-actions { display: flex; justify-content: flex-end; gap: 16px; }
-.notification-empty { padding: 24px; text-align: center; color: #527562; }
 @media (prefers-reduced-motion: reduce) { .conversation-spinner { animation: none; } }
 
 .agent-modal { width: 600px; }

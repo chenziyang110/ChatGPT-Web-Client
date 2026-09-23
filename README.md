@@ -12,13 +12,13 @@
 
 ## 下载与开始
 
-**当前正式版 v1.4.4**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，按下表选择系统和 CPU 对应的安装包。
+**当前正式版 v1.4.5**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，按下表选择系统和 CPU 对应的安装包。
 
 1. 添加账号，在独立的 ChatGPT 网页中自行登录。
 2. 添加其他账号，在侧栏随时切换；各账号的登录状态互相隔离。
 3. 在任务中心准备提示词，或通过 **Agent 协作** 让本机 Agent 获取网页回复。
 
-Windows 安装包尚未配置发布者签名，可能显示未知发布者提示。请核对来源与 Release 附带的 SHA-256。v1.4.4 提供以下六种系统 / CPU 组合的安装包。
+Windows 安装包尚未配置发布者签名，可能显示未知发布者提示。请核对来源与 Release 附带的 SHA-256。v1.4.5 提供以下六种系统 / CPU 组合的安装包。
 
 | 系统 | x64（Intel / AMD） | ARM64 | 安装包 |
 | --- | --- | --- | --- |
@@ -38,7 +38,7 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 签名及公证；首次打�
 | 老板键 | 在系统全局用 `Ctrl+Shift+S`（macOS 为 `⌘+Shift+S`）隐藏或唤回窗口 |
 | 系统托盘 | 托盘菜单可显示主窗口、隐藏到托盘或完全退出；单击图标即可恢复到前台 |
 | 专注模式 | 隐藏侧栏，保留账号切换和网页工具栏；快捷键可自定义 |
-| 回复完成提醒 | 账号显示生成状态和未处理会话数量，并发送系统原生通知；点击通知直达对应会话 |
+| 未读回复提醒 | 账号显示生成状态和未读会话数量，并发送系统原生通知；点击通知直达对应会话 |
 | 任务中心 | 准备提示词、明确发送、等待回复、查看任务和页面快照 |
 | 安全接管 | 遇到登录、验证、已有草稿或发送状态不明时暂停，由你处理 |
 | 并行协作 | 同一会话按顺序执行；不同账号、会话独立等待回复，不占用其他会话的发送名额 |
@@ -179,11 +179,11 @@ Linux 无头测试：`xvfb-run --auto-servernum npm run test:desktop`。一次�
 - 使用与开发：[Agent 协作](docs/AGENT_COLLABORATION.md)、[API 与 CLI](docs/API.md)、[发布流程](docs/RELEASING.md)、[macOS 安装](docs/MACOS.md)
 - 产品与技术：[产品需求](docs/PRODUCT_REQUIREMENTS.md)、[会话自动化方案](docs/CONVERSATION_AUTOMATION_PROPOSAL.md)、[架构](docs/ARCHITECTURE.md)、[技术栈](docs/TECH_STACK.md)、[路线图](docs/ROADMAP.md)、[验证记录](docs/VALIDATION.md)
 - 视觉与平台记录：[视觉规范](docs/BRAND.md)、[macOS 签名调查](docs/MACOS-SIGNATURE-INVESTIGATION.md)
-- 发布记录：[v1.0.0](docs/RELEASE-v1.0.0.md)、[v1.1.0](docs/RELEASE-v1.1.0.md)、[v1.1.1](docs/RELEASE-v1.1.1.md)、[v1.2.0](docs/RELEASE-v1.2.0.md)、[v1.3.0](docs/RELEASE-v1.3.0.md)、[v1.3.1](docs/RELEASE-v1.3.1.md)、[v1.4.0](docs/RELEASE-v1.4.0.md)、[v1.4.1](docs/RELEASE-v1.4.1.md)、[v1.4.2](docs/RELEASE-v1.4.2.md)、[v1.4.3](docs/RELEASE-v1.4.3.md)、[v1.4.4](docs/RELEASE-v1.4.4.md)
+- 发布记录：[v1.0.0](docs/RELEASE-v1.0.0.md)、[v1.1.0](docs/RELEASE-v1.1.0.md)、[v1.1.1](docs/RELEASE-v1.1.1.md)、[v1.2.0](docs/RELEASE-v1.2.0.md)、[v1.3.0](docs/RELEASE-v1.3.0.md)、[v1.3.1](docs/RELEASE-v1.3.1.md)、[v1.4.0](docs/RELEASE-v1.4.0.md)、[v1.4.1](docs/RELEASE-v1.4.1.md)、[v1.4.2](docs/RELEASE-v1.4.2.md)、[v1.4.3](docs/RELEASE-v1.4.3.md)、[v1.4.4](docs/RELEASE-v1.4.4.md)、[v1.4.5](docs/RELEASE-v1.4.5.md)
 
 ## 账号会话通知与快捷键
 
-账号头像旁的转圈表示该账号的会话正在生成回复；消息气泡按未处理的会话数计数。同一会话连续完成多轮仍计 1 个，不同会话分别累加。运行和待处理气泡可以同时显示。点击气泡可查看列表，打开对应会话或逐项标记已处理；直接在前台查看准确的会话也会自动消除它的气泡。切换账号不会清空其他会话，窗口隐藏、失焦或 Agent 只读预览不算已查看；真正未读的状态会在重启后保留。
+账号头像旁的转圈表示该账号的会话正在生成回复；消息气泡按有未读回复的会话数计数。同一会话连续完成多轮仍计 1 个，不同会话分别累加。点击气泡直接打开最近一个可查看的未读会话；看过后气泡数字减少，再点可查看下一个。正在回复的会话要等结束后才能通过气泡打开。直接在前台查看准确的会话也会自动消除对应提醒。切换账号不会清空其他会话，窗口隐藏、失焦或 Agent 只读预览不算已查看；未读状态会在重启后保留。系统通知只提示账号有未读回复，不展示会话内容。
 
 通知覆盖客户端中已打开的账号页面（包括切到其他账号后的后台页面）和任务队列。打开历史对话不会产生新通知。不监控外部浏览器或尚未打开的云端会话；在同一账号内导航离开正在生成的页面后，原页面的完成状态无法继续观察。结束判断依赖已支持的网页完成标记，错误和未知状态不会当作完成。
 

@@ -8,7 +8,7 @@ import { Titlebar } from './components/Titlebar';
 import { Select } from './components/Select';
 import { TaskCenter, statusLabels, phaseLabels } from './components/TaskCenter';
 import { ShortcutEditor } from './components/ShortcutEditor';
-import { accountActivity, ReplyBadge, NotificationList } from './components/AccountActivity';
+import { accountActivity, nextUnreadNotice, ReplyBadge } from './components/AccountActivity';
 import { AgentPromptPanel } from './components/AgentPromptPanel';
 import { AgentPreview } from './components/AgentPreview';
 import { TaskDecision } from './components/TaskDecision';
@@ -20,7 +20,7 @@ import './style.css';
 import { taskAttentionCopy } from '../shared/taskAttentionCopy';
 declare global { interface Window { workspace?: WorkspaceBridge } }
 type Tab = 'workspace' | 'tasks' | 'settings';
-type Modal = { kind: 'create' } | { kind: 'rename' | 'remove' | 'notifications'; account: Account } | { kind: 'task'; task: AgentTask } | { kind: 'agent'; target: AgentPromptTarget };
+type Modal = { kind: 'create' } | { kind: 'rename' | 'remove'; account: Account } | { kind: 'task'; task: AgentTask } | { kind: 'agent'; target: AgentPromptTarget };
 
 function App() {
   const bridge = window.workspace;
@@ -131,6 +131,11 @@ function App() {
     } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { actionPending.current = false; setBusy(false); }
   }
+  function openUnread(account: Account) {
+    const item = nextUnreadNotice(state?.notifications ?? [], account.id);
+    if (!item) { setError('未读会话仍在回复，请稍后查看'); return; }
+    void action('notifications.open', { accountId: account.id, id: item.id, token: item.token }, () => setTab('workspace'));
+  }
   function accountForm(event: FormEvent) {
     event.preventDefault();
     if (!modal) return;
@@ -193,7 +198,7 @@ function App() {
             <span className="account-name">{account.name}<small>{accountActivity(state, account.id).running ? '正在回复' : '独立登录'}</small></span>
             {active?.id === account.id && <span className="active-dot" />}
           </button>
-          <ReplyBadge account={account} count={accountActivity(state, account.id).count} onClick={() => openModal({ kind: 'notifications', account })} />
+          <ReplyBadge account={account} count={accountActivity(state, account.id).count} onClick={() => openUnread(account)} />
           <button className="account-edit" title={`管理 ${account.name}`} aria-label={`管理 ${account.name}`} onClick={() => openModal({ kind: 'rename', account })}><Icon name="more" size={17} /></button>
         </div>)}
         <button className="add-account" onClick={() => openModal({ kind: 'create' })}><Icon name="plus" size={16} /> 添加账号</button>
@@ -216,7 +221,7 @@ function App() {
         {focused && !!state?.accounts.length && <Select className="focus-account" label="切换账号" value={active?.id ?? ''} disabled={busy}
           options={state.accounts.map(account => ({ value: account.id, label: account.name }))}
           open={accountMenuOpen} onOpenChange={setAccountMenuOpen} onValueChange={id => void action('accounts.switch', { id })} />}
-        {focused && active && <><ReplyBadge account={active} count={accountActivity(state, active.id).count} onClick={() => openModal({ kind: 'notifications', account: active })} />{accountActivity(state, active.id).running && <span className="conversation-spinner" aria-label="会话运行中" />}</>}
+        {focused && active && <><ReplyBadge account={active} count={accountActivity(state, active.id).count} onClick={() => openUnread(active)} />{accountActivity(state, active.id).running && <span className="conversation-spinner" aria-label="会话运行中" />}</>}
         {tab === 'workspace' && active ? <>
           <button aria-label="后退" title="后退" disabled={!state?.page?.canGoBack || busy || pageLocked} onClick={() => void action('browser.control', { accountId: active.id, action: 'back' })}><Icon name="back" size={16} /></button>
           <button aria-label="前进" title="前进" disabled={!state?.page?.canGoForward || busy || pageLocked} onClick={() => void action('browser.control', { accountId: active.id, action: 'forward' })}><Icon name="arrow" size={16} /></button>
@@ -299,9 +304,9 @@ function App() {
         }
       }}>
         <button className="modal-close" aria-label="关闭弹窗" disabled={busy} onClick={() => setModal(undefined)}><Icon name="close" size={20} /></button>
-        <div className="modal-emblem"><Icon name={modal.kind === 'agent' ? 'terminal' : modal.kind === 'notifications' ? 'chat' : modal.kind === 'task' ? 'tasks' : modal.kind === 'remove' ? 'shield' : 'plus'} size={25} /></div>
-        <h2 id="modal-title">{modal.kind === 'agent' ? 'Agent 协作' : modal.kind === 'notifications' ? '待处理会话' : modal.kind === 'create' ? '添加账号' : modal.kind === 'rename' ? '管理账号' : modal.kind === 'remove' ? '删除账号？' : '任务详情'}</h2>
-        {modal.kind === 'agent' ? <AgentPromptPanel bridge={bridge} state={state} initial={modal.target} action={action} busy={busy} notifyError={setError} /> : modal.kind === 'notifications' ? <><NotificationList account={modal.account} notices={state?.notifications ?? []} busy={busy} action={action} opened={() => { setModal(undefined); setTab('workspace'); }} /></> : modal.kind === 'task' ? <><p className="hint">{state?.accounts.find(account => account.id === modalTask?.accountId)?.name} · {state?.conversations.find(item => item.id === modalTask?.conversationId)?.title ?? modalTask?.targetUrl ?? '新会话'}</p>{modalTask?.attention && <TaskDecision task={modalTask} busy={busy} choose={choice => choose(modalTask, choice)} />}<p>{statusLabels[(state?.tasks.find(t => t.id === modal.task.id) ?? modal.task).status]}</p>
+        <div className="modal-emblem"><Icon name={modal.kind === 'agent' ? 'terminal' : modal.kind === 'task' ? 'tasks' : modal.kind === 'remove' ? 'shield' : 'plus'} size={25} /></div>
+        <h2 id="modal-title">{modal.kind === 'agent' ? 'Agent 协作' : modal.kind === 'create' ? '添加账号' : modal.kind === 'rename' ? '管理账号' : modal.kind === 'remove' ? '删除账号？' : '任务详情'}</h2>
+        {modal.kind === 'agent' ? <AgentPromptPanel bridge={bridge} state={state} initial={modal.target} action={action} busy={busy} notifyError={setError} /> : modal.kind === 'task' ? <><p className="hint">{state?.accounts.find(account => account.id === modalTask?.accountId)?.name} · {state?.conversations.find(item => item.id === modalTask?.conversationId)?.title ?? modalTask?.targetUrl ?? '新会话'}</p>{modalTask?.attention && <TaskDecision task={modalTask} busy={busy} choose={choice => choose(modalTask, choice)} />}<p>{statusLabels[(state?.tasks.find(t => t.id === modal.task.id) ?? modal.task).status]}</p>
           <details open={!modalTask?.attention}><summary>任务记录</summary><pre className="task-result">{JSON.stringify(modalTask, null, 2)}</pre></details></>
         : <form onSubmit={accountForm}>
           <p>{modal.kind === 'remove' ? `这会取消「${modal.account.name}」尚未发送的任务，并清除它的登录状态、浏览器数据和任务记录。输入完整账号名称确认。` : '为账号起一个容易辨认的名字。添加后，在网页中自行登录。'}</p>

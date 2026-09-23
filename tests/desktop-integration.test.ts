@@ -51,7 +51,7 @@ test('completion uses a native notification and clicking it opens the exact conv
   }, notice, 'Work', value => { opened = value; });
 
   assert.equal(emitted, true); assert.equal(shown, 1);
-  assert.deepEqual(options, { title: 'ChatGPT 回复完成', body: 'Work · A very useful answer', silent: false });
+  assert.deepEqual(options, { title: 'ChatGPT 有未读回复', body: 'Work', silent: false });
   click(); assert.equal(opened, notice);
 });
 

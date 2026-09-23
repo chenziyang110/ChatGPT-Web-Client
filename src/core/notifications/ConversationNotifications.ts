@@ -8,7 +8,7 @@ export const COMPLETION_STABLE_MS = 6000;
 
 export interface ActivitySnapshot {
   url: string; title: string; editor: boolean; busy: boolean; hasDraft?: boolean; error?: string;
-  user?: { id: string; text: string }; assistant?: { id: string; text: string; terminal: boolean }; lastRole?: string;
+  user?: { id: string; text: string }; assistant?: { id: string; text: string; terminal: boolean; hasContent?: boolean }; lastRole?: string;
 }
 export function replyToken(user: { id: string; text: string }, assistant: { id: string; text: string }): string {
   return createHash('sha256').update(JSON.stringify([user.id, user.text.slice(0, 32000), assistant.id, assistant.text.slice(0, 64000)])).digest('hex');
@@ -83,7 +83,7 @@ export class ConversationActivityObserver {
     const key = `${accountId}:${url}`;
     // Discard old page baselines so opening a historical conversation is not a new reply.
     if (!this.multiplePages) for (const [other, value] of this.observed) if (value.accountId === accountId && other !== key) this.observed.delete(other);
-    const ready = !!page.user && page.lastRole === 'assistant' && !!page.assistant?.terminal && !!page.assistant.text && !page.busy;
+    const ready = !!page.user && page.lastRole === 'assistant' && !!page.assistant?.terminal && (!!page.assistant.text || !!page.assistant.hasContent) && !page.busy;
     const token = ready ? replyToken(page.user!, page.assistant!) : undefined;
     let previous = this.observed.get(key);
     if (!previous) {

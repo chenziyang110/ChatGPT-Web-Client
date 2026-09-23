@@ -49,6 +49,7 @@ export class BrowserRuntime {
   private locks: AgentTask[] = [];
   private readonly owners = new Map<string, PageOwner>();
   private readonly selected = new Map<string, string>();
+  private readonly restoredTabAccounts = new Set<string>();
   private readonly taskPages = new Map<string, string>();
   private readonly replyReader = new ReplyReader();
   private visible = true;
@@ -69,6 +70,24 @@ export class BrowserRuntime {
   constructor(private readonly window: BrowserWindow, private readonly accounts: AccountManager,
     private readonly sessions: SessionManager, private readonly changed: () => void, private readonly conversations: ConversationManager,
     private readonly shortcuts: ShortcutSettings, private readonly notifications: ConversationNotifications) {
+    for (const account of accounts.list()) {
+      const saved = sessions.restoreTabs(account.id);
+      if (!saved) continue;
+      this.restoredTabAccounts.add(account.id);
+      for (const tab of saved.pages) {
+        if (this.owners.has(tab.id)) continue;
+        let conversationId: string | undefined;
+        if (tab.conversationId) {
+          try { this.conversations.get(account.id, tab.conversationId); conversationId = tab.conversationId; }
+          catch { /* An old conversation record must not prevent restoring its tab. */ }
+        }
+        this.owners.set(tab.id, { accountId: account.id, conversationId, url: tab.url, title: tab.title,
+          idleSince: Date.now(), hasDraft: false, busy: false, hibernationReady: false });
+      }
+      const selected = saved.selectedId && this.owners.get(saved.selectedId)?.accountId === account.id ? saved.selectedId :
+        [...this.owners].find(([, owner]) => owner.accountId === account.id)?.[0];
+      if (selected) this.selected.set(account.id, selected);
+    }
     window.on('resize', () => this.layout());
     this.observer = new ConversationActivityObserver(notifications, true);
     this.monitor = setInterval(() => {
@@ -80,6 +99,14 @@ export class BrowserRuntime {
   }
   private title(id: string, url: string, fallback: string): string {
     return this.conversations.list(id).find(item => item.url === url)?.alias ?? fallback;
+  }
+  private saveTabs(accountId: string): void {
+    if (this.closing) return;
+    this.restoredTabAccounts.add(accountId);
+    this.sessions.saveTabs(accountId, { selectedId: this.selected.get(accountId),
+      pages: [...this.owners].filter(([, owner]) => owner.accountId === accountId).map(([id, owner]) => ({
+        id, url: isChatUrl(owner.url) ? owner.url : HOME_URL, title: owner.title, conversationId: owner.conversationId
+      })) });
   }
   private async observe(id: string, view: WebContentsView): Promise<void> {
     const contents = view.webContents;
@@ -175,6 +202,7 @@ export class BrowserRuntime {
           if (this.accounts.activeId() === owner.accountId) this.activate(owner.accountId, duplicate[0]);
           else this.selected.set(owner.accountId, duplicate[0]);
         }
+        this.saveTabs(owner.accountId);
         const contents = this.views.get(id)?.webContents;
         if (contents && !contents.isDestroyed()) void contents.loadURL(owner.url).catch(() => {
           if (this.views.get(id)?.webContents === contents) this.destroyView(id);
@@ -197,6 +225,7 @@ export class BrowserRuntime {
         try { owner.conversationId = this.conversations.register(owner.accountId, url).id; } catch { owner.conversationId = undefined; }
       }
     }
+    this.saveTabs(owner.accountId);
   }
   private createView(accountId: string, url: string, conversationId?: string): string {
     if ([...this.owners.values()].filter(owner => owner.accountId === accountId).length >= 20) throw new AppError('此账号已打开 20 个会话，请关闭不再使用的会话后继续', 409);
@@ -205,6 +234,7 @@ export class BrowserRuntime {
     this.owners.set(id, { accountId, conversationId, url, title: '新会话', idleSince: Date.now(),
       hasDraft: false, busy: false, hibernationReady: false });
     this.openView(id);
+    this.saveTabs(accountId);
     return id;
   }
   private openView(id: string): WebContentsView {
@@ -222,8 +252,8 @@ export class BrowserRuntime {
     this.secure(view.webContents, id, account.partition);
     const update = () => { if (!view.webContents.isDestroyed()) { this.layout(); this.changed(); } };
     view.webContents.on('did-start-loading', () => { owner.hibernationReady = false; this.errors.delete(id); update(); });
-    view.webContents.on('did-stop-loading', () => { owner.title = view.webContents.getTitle() || owner.title; update(); });
-    view.webContents.on('page-title-updated', (_event, title) => { owner.title = title || owner.title; update(); });
+    view.webContents.on('did-stop-loading', () => { owner.title = view.webContents.getTitle() || owner.title; this.saveTabs(owner.accountId); update(); });
+    view.webContents.on('page-title-updated', (_event, title) => { owner.title = title || owner.title; this.saveTabs(owner.accountId); update(); });
     const save = (url: string) => { if (!this.closing && this.views.has(id) && isChatUrl(url)) this.savePage(id, url); update(); };
     view.webContents.on('did-navigate', (_event, url) => save(url));
     view.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => { if (isMainFrame) save(url); });
@@ -262,7 +292,8 @@ export class BrowserRuntime {
   activate(accountId: string, pageId?: string): void {
     this.accounts.get(accountId);
     if (pageId && this.owners.get(pageId)?.accountId !== accountId) throw new AppError('会话页面不属于此账号', 404);
-    const id = pageId ?? this.pageId(accountId) ?? this.createView(accountId, this.sessions.restore(accountId)?.url ?? HOME_URL);
+    const id = pageId ?? this.pageId(accountId) ?? this.createView(accountId,
+      this.restoredTabAccounts.has(accountId) ? HOME_URL : this.sessions.restore(accountId)?.url ?? HOME_URL);
     const restoreFocus = !!(this.activeId && this.views.get(this.activeId)?.webContents.isFocused());
     for (const windows of this.popups.values()) for (const popup of windows) popup.hide();
     if (this.activeId && this.activeId !== id && this.views.has(this.activeId)) {
@@ -272,6 +303,7 @@ export class BrowserRuntime {
     const view = this.openView(id);
     this.owners.get(id)!.idleSince = Date.now();
     this.selected.set(accountId, id); this.activeId = id;
+    this.saveTabs(accountId);
     if (!this.window.contentView.children.includes(view)) this.window.contentView.addChildView(view);
     for (const popup of this.popups.get(id) ?? []) { if (!this.isLocked(id) && this.visible) popup.show(); }
     if (isChatUrl(view.webContents.getURL())) this.sessions.save(accountId, view.webContents.getURL());
@@ -297,6 +329,7 @@ export class BrowserRuntime {
       conversation = this.conversations.create(accountId);
     } else conversation = this.conversations.register(accountId, url);
     owner.conversationId = conversation.id;
+    this.saveTabs(accountId);
     this.changed();
     return conversation;
   }
@@ -500,6 +533,7 @@ export class BrowserRuntime {
       const next = [...this.owners].find(([, item]) => item.accountId === owner.accountId)?.[0];
       if (next) this.selected.set(owner.accountId, next); else this.selected.delete(owner.accountId);
     }
+    if (owner) this.saveTabs(owner.accountId);
   }
   private destroyView(id: string): void {
     this.previews.delete(id);
@@ -554,6 +588,7 @@ export class BrowserRuntime {
     if (!pageId) pageId = this.createView(id, conversation?.url ?? (conversation ? HOME_URL : task.targetUrl) ?? HOME_URL, task.conversationId);
     else if (task.conversationId) this.owners.get(pageId)!.conversationId = task.conversationId;
     this.taskPages.set(task.id, pageId);
+    this.saveTabs(id);
     if (!task.background) {
       this.selected.set(id, pageId);
       if (this.accounts.activeId() === id) this.activate(id, pageId);

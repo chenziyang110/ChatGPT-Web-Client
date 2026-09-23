@@ -9,6 +9,9 @@ function render() {
  for (const message of messages) {
   const turn = document.createElement('article'); const text = document.createElement('div');
   text.dataset.messageAuthorRole = message.role; text.dataset.messageId = message.id; text.textContent = message.text;
+  if (message.media) { const image = document.createElement('img'); image.width = 160; image.height = 160;
+    image.alt = 'Generated image'; image.setAttribute('aria-busy', 'true');
+    image.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="160" height="160"/%3E'; text.append(image); }
   turn.append(text);
   if (message.role === 'assistant' && message.finished) { const copy = document.createElement('button'); copy.dataset.testid = 'copy-turn-action-button'; copy.textContent = 'Copy'; turn.append(copy); }
   container.append(turn);
@@ -32,6 +35,7 @@ document.querySelector('[data-testid="send-button"]').onclick = () => {
  messages.push({ role: 'assistant', id: crypto.randomUUID(), text: 'Fixture reply: ' + value, finished: false });
  const stop = document.createElement('button'); stop.dataset.testid = 'stop-button'; stop.textContent = 'Stop'; document.querySelector('main').append(stop); render();
  window.fixtureFinish = () => { messages.at(-1).finished = true; stop.remove(); render(); };
+ window.fixtureFinishImage = () => { Object.assign(messages.at(-1), { text: '', media: true, finished: true }); stop.remove(); render(); };
  window.fixtureFail = () => {
   stop.remove(); messages.pop(); render();
   const card = document.createElement('div'); card.id = 'fixture-reply-error';

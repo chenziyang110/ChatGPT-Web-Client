@@ -96,10 +96,23 @@ export function pageOperation(operation: Operation): unknown {
     const verification = !visible(editor) && (!!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, input[id^="cf-chl-widget-"], iframe[src*="challenges.cloudflare.com"]') || /^(请稍候|Just a moment)/i.test(document.title.trim()));
     const login = [...document.querySelectorAll('[data-testid="login-button"], a[href="/auth/login"], a[href^="https://auth.openai.com/"]')].some(visible);
     const readiness: BrowserReadiness = verification ? 'verification_required' : login ? 'login_required' : visible(editor) ? 'ready' : 'loading';
-    const busy = [...document.querySelectorAll('[data-testid="stop-button"], [data-is-streaming="true"], [aria-busy="true"]')].some(visible);
+    const elements = [...document.querySelectorAll<HTMLElement>('[data-message-author-role]')];
+    const lastUserElement = elements.filter(element => element.dataset.messageAuthorRole === 'user' && visible(element)).at(-1);
+    const afterLastUser = (element: Element) => !lastUserElement || !!(lastUserElement.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const currentAssistant = elements.filter(element => element.dataset.messageAuthorRole === 'assistant' && visible(element) && afterLastUser(element)).at(-1);
+    const currentTurn = currentAssistant?.closest('article, [data-testid^="conversation-turn-"]') ?? currentAssistant;
+    const terminalAction = (turn: Element | null | undefined) => !!turn && [...turn.querySelectorAll('[data-testid="copy-turn-action-button"]')].some(visible);
+    // Sidebar loaders and completed image widgets can retain aria-busy. They
+    // are not evidence that the current reply is still streaming.
+    const stopVisible = [...document.querySelectorAll('[data-testid="stop-button"]')].some(visible);
+    const streamingVisible = !terminalAction(currentTurn) &&
+      [...document.querySelectorAll('main [data-is-streaming="true"]')].some(element => visible(element) && afterLastUser(element));
+    const ariaBusyVisible = !!currentTurn && !terminalAction(currentTurn) &&
+      (currentTurn.matches('[aria-busy="true"]') || [...currentTurn.querySelectorAll('[aria-busy="true"]')].some(visible));
+    const busy = stopVisible || streamingVisible || ariaBusyVisible;
     if (operation.kind === 'diagnose') {
       const send = document.querySelector<HTMLButtonElement>('[data-testid="send-button"]');
-      const messages = [...document.querySelectorAll<HTMLElement>('[data-message-author-role]')];
+      const messages = elements;
       const last = messages.at(-1);
       const turn = last?.closest('article, [data-testid^="conversation-turn-"]') ?? last;
       return { url: location.href, title: document.title.slice(0, 120), readiness,
@@ -110,23 +123,24 @@ export function pageOperation(operation: Operation): unknown {
           editorBlocks: [...(editor?.children ?? [])].slice(0, 20).map(child => ({ tag: child.tagName.toLowerCase(),
             textLength: child.textContent.length, lineBreaks: child.querySelectorAll('br').length })),
           sendVisible: visible(send), sendEnabled: visible(send) && !send.disabled && send.getAttribute('aria-disabled') !== 'true',
-          stopVisible: [...document.querySelectorAll('[data-testid="stop-button"]')].some(visible),
-          streamingVisible: [...document.querySelectorAll('[data-is-streaming="true"]')].some(visible),
-          ariaBusyVisible: [...document.querySelectorAll('[aria-busy="true"]')].some(visible),
+          stopVisible, streamingVisible, ariaBusyVisible,
           messageCount: messages.length, lastRole: last?.dataset.messageAuthorRole ?? null,
           lastTurnTerminal: !!turn && [...turn.querySelectorAll('[data-testid="copy-turn-action-button"]')].some(visible) }
       };
     }
-    const elements = [...document.querySelectorAll<HTMLElement>('[data-message-author-role]')];
     const readMessage = (element: HTMLElement, index: number) => {
       const turn = element.closest('article, [data-testid^="conversation-turn-"]') ?? element;
       const body = element.dataset.messageAuthorRole === 'user'
         ? element.querySelector<HTMLElement>('[data-testid="collapsible-user-message-content"]') ?? element : element;
+      const hasContent = element.dataset.messageAuthorRole === 'assistant' &&
+        [...turn.querySelectorAll('img, video, canvas')].some(media => {
+          if (!visible(media)) return false;
+          if (media instanceof HTMLImageElement && (!media.complete || media.naturalWidth < 32)) return false;
+          const bounds = media.getBoundingClientRect(); return bounds.width >= 32 && bounds.height >= 32;
+        });
       return { id: element.dataset.messageId ?? `position:${index}`, role: element.dataset.messageAuthorRole ?? '',
-        text: body.innerText.trim(), terminal: [...turn.querySelectorAll('[data-testid="copy-turn-action-button"]')].some(visible) };
+        text: body.innerText.trim(), terminal: terminalAction(turn), hasContent };
     };
-    const lastUserElement = elements.filter(element => element.dataset.messageAuthorRole === 'user' && visible(element)).at(-1);
-    const afterLastUser = (element: Element) => !lastUserElement || !!(lastUserElement.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING);
     const markedError = [...document.querySelectorAll<HTMLElement>('[data-testid="conversation-error"], [data-testid="error-message"]')]
       .find(element => visible(element) && afterLastUser(element));
     // ChatGPT also renders reply failures as an inline card with no stable
@@ -424,7 +438,7 @@ export class ChatGPTAdapter {
         this.context.progress?.(last.text, boundUrl);
       }
       const finished = acknowledged && !!boundUrl && page.editor && !page.busy && !page.draft.trim() && userIndex >= 0 &&
-        page.messages.length > userIndex + 1 && last?.role === 'assistant' && last.terminal && !!last.text;
+        page.messages.length > userIndex + 1 && last?.role === 'assistant' && last.terminal && (!!last.text || !!last.hasContent);
       const fingerprint = JSON.stringify([replyUrl, page.messages]);
       if (!finished || fingerprint !== previous) since = Date.now();
       if (finished && Date.now() - since >= COMPLETION_STABLE_MS) return { submitted: true, response: last!.text.slice(0, 64000), url: boundUrl, conversationId: conversation?.id, replyToken: replyToken(ownUser!, last!) };

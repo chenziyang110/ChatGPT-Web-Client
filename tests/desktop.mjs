@@ -330,6 +330,8 @@ try {
   await rpc('accounts.switch', { id: personal.id });
   await accountScript(work, 'window.fixtureFinish(); window.fixtureHold = false');
   await page.getByRole('button', { name: 'Work，1 个会话有未读回复', exact: true }).waitFor();
+  await page.bringToFront();
+  await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].focus());
   await rpc('accounts.switch', { id: work.id });
   await waitForState(async id => !(await window.workspace.call('notifications.list', { accountId: id })).some(item => item.unread), work.id);
   const workBadge = page.locator('.account-row').filter({ hasText: 'Work' }).locator('.reply-badge');
@@ -581,11 +583,19 @@ try {
   await rpc('settings.api', { enabled: false });
   await page.screenshot({ path: 'test-results/workspace.png', animations: 'disabled' });
   const exited = new Promise(resolve => desktop.process().once('exit', resolve));
-  await page.getByRole('button', { name: '关闭窗口', exact: true }).click();
+  await page.getByRole('button', { name: '隐藏到系统托盘', exact: true }).click();
+  const hideDeadline = Date.now() + 5000;
+  while (await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible())) {
+    assert.ok(Date.now() < hideDeadline, 'The close control must hide the window to the tray');
+    await page.waitForTimeout(50);
+  }
+  assert.equal(desktop.process().exitCode, null, 'Hiding the window keeps the app running');
+  assert.equal((await rpc('accounts.list')).length, 1, 'The hidden app keeps its account runtime');
+  await desktop.evaluate(({ app }) => app.quit());
   const closeTimeout = setTimeout(() => { desktop.process().kill(); }, 10000);
   const exitCode = await exited;
   clearTimeout(closeTimeout);
-  assert.equal(exitCode, 0, 'Custom close button must shut down cleanly');
+  assert.equal(exitCode, 0, 'Explicit quit must shut down cleanly');
   desktop = undefined;
   cleanExit = true;
   assert.equal(errors.some(message => /database is not open|Uncaught Exception|Uncaught ReferenceError|Untrusted IPC sender/i.test(message)), false, errors.join('\n'));

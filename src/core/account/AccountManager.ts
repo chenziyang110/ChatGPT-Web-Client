@@ -48,6 +48,7 @@ export class AccountManager {
     this.db.transaction(() => {
       this.db.set('accounts', this.list().filter(item => item.id !== account.id));
       this.db.delete(`session:${account.id}`);
+      this.db.delete(`sessionTabs:${account.id}`);
       if (this.activeId() === account.id) this.db.set('activeAccountId', this.list()[0]?.id ?? null);
     });
   }

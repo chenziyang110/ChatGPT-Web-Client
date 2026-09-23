@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { Database } from '../src/core/storage/Database';
 import { AccountManager } from '../src/core/account/AccountManager';
 import { SessionManager } from '../src/core/session/SessionManager';
@@ -27,6 +28,11 @@ test('accounts, partitions, active account, URLs and window state survive a data
     const sessions = new SessionManager(db);
     sessions.save(first.id, 'https://chatgpt.com/c/first');
     sessions.save(second.id, 'https://chatgpt.com/c/second');
+    const firstTab = randomUUID(), secondTab = randomUUID();
+    sessions.saveTabs(second.id, { pages: [
+      { id: firstTab, url: 'https://chatgpt.com/c/second', title: 'Second' },
+      { id: secondTab, url: 'https://chatgpt.com/c/another', title: 'Another' }
+    ], selectedId: secondTab });
     sessions.saveWindow({ x: 10, y: 20, width: 1280, height: 800, maximized: true });
     accounts.rename(first.id, 'Home');
     db.close();
@@ -36,10 +42,15 @@ test('accounts, partitions, active account, URLs and window state survive a data
     assert.equal(restored.get(first.id).partition, first.partition);
     assert.equal(restored.activeId(), second.id);
     assert.equal(new SessionManager(db).restore(second.id)?.url, 'https://chatgpt.com/c/second');
+    assert.deepEqual(new SessionManager(db).restoreTabs(second.id), { pages: [
+      { id: firstTab, url: 'https://chatgpt.com/c/second', title: 'Second', conversationId: undefined },
+      { id: secondTab, url: 'https://chatgpt.com/c/another', title: 'Another', conversationId: undefined }
+    ], selectedId: secondTab });
     assert.equal(new SessionManager(db).restoreWindow()?.maximized, true);
     restored.remove(second.id);
     assert.equal(restored.activeId(), first.id);
     assert.equal(new SessionManager(db).restore(second.id), undefined);
+    assert.equal(new SessionManager(db).restoreTabs(second.id), undefined);
     assert.equal(new SessionManager(db).restore(first.id)?.url, 'https://chatgpt.com/c/first');
     db.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Database } from '../src/core/storage/Database';
-import { AgentGateway, QueuePausedError } from '../src/core/agent/AgentGateway';
+import { AgentGateway, QueuePausedError, ReportedReplyError } from '../src/core/agent/AgentGateway';
 import { AccountManager } from '../src/core/account/AccountManager';
 import { ConversationManager } from '../src/core/conversation/ConversationManager';
 import { Workspace } from '../src/core/Workspace';
@@ -48,6 +48,32 @@ test('conversation pause returns a waiting item to pending, releases its slot, a
     assert.equal(gateway.queues().find(queue => !queue.conversationId)?.pausedConversationCount, 1);
     gateway.resume('a', false, 'c'); await until(() => gateway.get(task.id).status === 'done'); assert.equal(sends, 1);
   } finally { await gateway.stop(); db.close(); }
+});
+
+test('reported ChatGPT reply error finishes the sent item and pauses only its conversation', async () => {
+  const db = new Database(':memory:'); const failure = gate(); const sent: string[] = [];
+  const gateway = new AgentGateway(db, async (_id, input, _signal, context) => {
+    if (input.type !== 'prompt') return;
+    context.intent(); context.submitted(input.prompt); sent.push(input.prompt);
+    if (input.prompt === 'first') { await failure.promise; throw new ReportedReplyError('ChatGPT 检测到异常活动，请稍后重试'); }
+  }, () => {});
+  try {
+    const first = gateway.createTask('a', prompt('first'), { conversationId: 'one' });
+    const next = gateway.createTask('a', prompt('next'), { conversationId: 'one' });
+    const other = gateway.createTask('a', prompt('other'), { conversationId: 'two' });
+    await until(() => sent.includes('first') && gateway.get(other.id).status === 'done');
+    failure.resolve(); await until(() => gateway.get(first.id).status === 'failed');
+    assert.equal(gateway.get(first.id).phase, 'completed');
+    assert.match(gateway.get(first.id).error ?? '', /异常活动/);
+    assert.equal(gateway.get(first.id).attention, undefined);
+    assert.equal(gateway.get(next.id).status, 'pending');
+    assert.deepEqual(sent, ['first', 'other']);
+    assert.equal(gateway.queues().find(queue => queue.conversationId === 'one')?.paused, true);
+    assert.equal(gateway.queues().find(queue => queue.conversationId === 'two')?.paused, false);
+    gateway.resume('a', false, 'one');
+    await until(() => gateway.get(next.id).status === 'done');
+    assert.deepEqual(sent, ['first', 'other', 'next']);
+  } finally { failure.resolve(); await gateway.stop(); db.close(); }
 });
 
 test('pausing during preparation gates send intent without aborting cleanup; sent replies can resume without duplication', async () => {

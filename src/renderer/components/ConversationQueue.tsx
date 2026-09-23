@@ -116,6 +116,7 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
       {!accountQueue?.paused && <button className="text-button" disabled={busy || !conversation || !!attention} title={paused ? '恢复后依次发送' : '当前回复继续，暂停后续发送'} onClick={() => void run(paused ? 'queues.resume' : 'queues.pause', { accountId: account.id, conversation: conversation!.id })}>{paused ? '恢复队列' : '暂停后续'}</button>}
     </div>
     {accountQueue?.paused && <p className="cq-warning">账号已暂停，请到任务中心恢复。</p>}
+    {queue?.paused && queue.reason && <p className="cq-warning" role="status">{queue.reason}</p>}
     {error && <div className="cq-error" role="alert">{error}{!target && <button className="text-button" onClick={() => setAttempt(value => value + 1)}>重新检查页面</button>}</div>}
     <div className="cq-list">
       {attention && <div className="cq-attention"><strong>{attentionCopy?.title}</strong><button className="text-button" onClick={() => inspect(attention)}>处理</button></div>}

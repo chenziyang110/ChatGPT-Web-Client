@@ -1,4 +1,4 @@
-export const fixture = `<!doctype html><html><head><title>ChatGPT fixture</title><style>[data-message-author-role] { white-space: pre-wrap; }</style></head>
+export const fixture = `<!doctype html><html><head><meta charset="utf-8"><title>ChatGPT fixture</title><style>[data-message-author-role] { white-space: pre-wrap; }</style></head>
 <body><main><h1>Fixture conversation</h1><textarea id="prompt-textarea"></textarea>
 <button data-testid="send-button">Send</button><div id="messages"></div></main>
 <script>
@@ -32,5 +32,11 @@ document.querySelector('[data-testid="send-button"]').onclick = () => {
  messages.push({ role: 'assistant', id: crypto.randomUUID(), text: 'Fixture reply: ' + value, finished: false });
  const stop = document.createElement('button'); stop.dataset.testid = 'stop-button'; stop.textContent = 'Stop'; document.querySelector('main').append(stop); render();
  window.fixtureFinish = () => { messages.at(-1).finished = true; stop.remove(); render(); };
+ window.fixtureFail = () => {
+  stop.remove(); messages.pop(); render();
+  const card = document.createElement('div'); card.id = 'fixture-reply-error';
+  card.innerHTML = 'Unusual activity has been detected from your device. Try again later. (fixture-id) <button>重试</button>';
+  document.querySelector('#messages').append(card);
+ };
  if (!window.fixtureHold && !value.startsWith('HOLD:')) setTimeout(() => window.fixtureFinish(), window.fixtureDelay || 200);
 };</script></body></html>`;

@@ -1,6 +1,6 @@
 import type { WebContents } from 'electron';
 import type { ExecutionContext } from '../../core/agent/AgentGateway';
-import { QueuePausedError } from '../../core/agent/AgentGateway';
+import { QueuePausedError, ReportedReplyError } from '../../core/agent/AgentGateway';
 import { ConversationManager, conversationUrl } from '../../core/conversation/ConversationManager';
 import { HOME_URL, isChatUrl } from '../../core/validation';
 import type { BrowserReadiness, TaskInput } from '../../shared/types';
@@ -125,7 +125,22 @@ export function pageOperation(operation: Operation): unknown {
       return { id: element.dataset.messageId ?? `position:${index}`, role: element.dataset.messageAuthorRole ?? '',
         text: body.innerText.trim(), terminal: [...turn.querySelectorAll('[data-testid="copy-turn-action-button"]')].some(visible) };
     };
-    const error = [...document.querySelectorAll<HTMLElement>('[data-testid="conversation-error"], [data-testid="error-message"]')].find(visible)?.innerText;
+    const lastUserElement = elements.filter(element => element.dataset.messageAuthorRole === 'user' && visible(element)).at(-1);
+    const afterLastUser = (element: Element) => !lastUserElement || !!(lastUserElement.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const markedError = [...document.querySelectorAll<HTMLElement>('[data-testid="conversation-error"], [data-testid="error-message"]')]
+      .find(element => visible(element) && afterLastUser(element));
+    // ChatGPT also renders reply failures as an inline card with no stable
+    // test id. Require both the specific failure text and its Retry action so
+    // an assistant quoting the same words does not become a false failure.
+    const inlineError = [...document.querySelectorAll<HTMLButtonElement>('main button')].find(button => {
+      if (!visible(button) || !/^(重试|Retry|Try again)$/i.test((button.innerText || button.getAttribute('aria-label') || '').trim())) return false;
+      for (let card: HTMLElement | null = button.parentElement, depth = 0; card && depth < 5; card = card.parentElement, depth++) {
+        if (!afterLastUser(card) || card.innerText.length > 600) continue;
+        if (/Unusual activity has been detected from your device\.\s*Try again later\./i.test(card.innerText)) return true;
+      }
+      return false;
+    });
+    const error = markedError?.innerText || (inlineError ? 'ChatGPT 检测到异常活动，请稍后重试' : undefined);
     if (operation.kind === 'activity') {
       let user: Message | undefined; let assistant: Message | undefined;
       for (let index = elements.length - 1; index >= 0 && (!user || !assistant); index--) {
@@ -225,6 +240,14 @@ export class ChatGPTAdapter {
   private async idle(): Promise<Page> {
     this.context.stage('waiting_idle', this.context.task().idleTimeoutMs);
     this.context.releaseExecution?.();
+    const priorError = this.context.precedingReplyError;
+    const conversationId = this.context.task().conversationId;
+    const failedTail = (page: Page): boolean => {
+      if (!priorError || !conversationId) return false;
+      const target = this.conversations.get(this.context.task().accountId, conversationId);
+      const lastUser = page.messages.filter(message => message.role === 'user').at(-1);
+      return !!target.url && replyPageUrl(page.url) === target.url && lastUser?.id === priorError.messageId;
+    };
     let previous = ''; let since = Date.now();
     let lastSample = Date.now();
     let interval = 250;
@@ -237,7 +260,8 @@ export class ChatGPTAdapter {
       // A suspend or stalled renderer is not continuous evidence of completion.
       if (now - lastSample > Math.max(2000, interval * 2 + 500)) since = now;
       lastSample = now;
-      if (page.error) throw new Error(page.error);
+      const previousFailure = failedTail(page);
+      if (page.error && !(previousFailure && page.error === priorError?.error)) throw new Error(page.error);
       if (!page.editor || page.readiness === 'login_required' || page.readiness === 'verification_required') {
         if (Date.now() - composerMissingSince >= composerBudget) {
           if (page.readiness === 'login_required') throw new Error('LOGIN_REQUIRED: 请在此账号网页完成登录，再继续原任务');
@@ -250,8 +274,8 @@ export class ChatGPTAdapter {
       composerMissingSince = Date.now();
       if (page.draft.trim()) throw new Error('DRAFT_CONFLICT: clear or send the existing draft first');
       const last = page.messages.at(-1);
-      const ready = !page.busy && (!last || (last.role === 'assistant' && last.terminal));
-      const fingerprint = JSON.stringify([page.url, page.messages]);
+      const ready = !page.busy && (!last || (last.role === 'assistant' && last.terminal) || previousFailure);
+      const fingerprint = JSON.stringify([page.url, page.messages, page.error]);
       if (!ready || previous !== fingerprint) since = Date.now();
       if (ready && Date.now() - since >= (last ? COMPLETION_STABLE_MS : 1000)) {
         await this.context.acquireExecution?.();
@@ -259,8 +283,8 @@ export class ChatGPTAdapter {
         // Another operation may have held capacity while this page changed.
         // Recheck after acquisition before using the baseline for a write.
         const confirmed = await this.inspect();
-        if (confirmed.editor && confirmed.readiness === 'ready' && !confirmed.error && !confirmed.busy && !confirmed.draft.trim() &&
-          JSON.stringify([confirmed.url, confirmed.messages]) === fingerprint) return confirmed;
+        if (confirmed.editor && confirmed.readiness === 'ready' && (!confirmed.error || (failedTail(confirmed) && confirmed.error === priorError?.error)) &&
+          !confirmed.busy && !confirmed.draft.trim() && JSON.stringify([confirmed.url, confirmed.messages, confirmed.error]) === fingerprint) return confirmed;
         this.context.releaseExecution?.();
         previous = ''; since = Date.now(); interval = 250;
         continue;
@@ -348,7 +372,6 @@ export class ChatGPTAdapter {
       const now = Date.now();
       if (now - lastSample > Math.max(2000, interval * 2 + 500)) since = now;
       lastSample = now;
-      if (page.error) throw new Error(page.error);
       const replyUrl = replyPageUrl(page.url, !boundUrl && conversation?.binding === 'new');
       const optimistic = replyUrl?.includes('/c/WEB:');
       if (!replyUrl || (observedConversationUrl && replyUrl !== observedConversationUrl)) throw changedReplyTarget(observedConversationUrl ?? HOME_URL, page.url);
@@ -362,6 +385,13 @@ export class ChatGPTAdapter {
       if (acknowledged && !boundUrl && !optimistic && replyUrl !== HOME_URL && conversation) {
         boundUrl = conversationUrl(replyUrl).url;
         this.conversations.bind(task.accountId, conversation.id, boundUrl);
+      }
+      if (page.error) {
+        // A visible reply error is terminal only after the sent user turn and
+        // the actual conversation are confirmed. Earlier failures stay in the
+        // uncertain path so the prompt is never replayed by mistake.
+        if (acknowledged && boundUrl) throw new ReportedReplyError(page.error);
+        throw new Error(page.error);
       }
       const last = page.messages.at(-1);
       const userIndex = ownUser ? page.messages.indexOf(ownUser) : -1;

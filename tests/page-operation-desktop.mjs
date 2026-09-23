@@ -98,6 +98,28 @@ try {
   const busy = await execute({ ...guard, kind: 'send', value: prompt }, true);
   assert.match(busy.error, /PAGE_CHANGED.*stage=verify_target/);
   assert.equal(await page.evaluate(() => window.fixtureSends), 1);
+  await page.evaluate(() => {
+    document.body.innerHTML = `<main><article><div data-message-author-role="user">Earlier</div></article>
+      <div id="old-error">Unusual activity has been detected from your device. Try again later. <button>Retry</button></div>
+      <article><div data-message-author-role="user">Current</div></article>
+      <article><div data-message-author-role="assistant">The warning says: Unusual activity has been detected from your device. Try again later.</div></article>
+      <textarea id="prompt-textarea"></textarea></main>`;
+  });
+  assert.equal((await execute({ kind: 'inspect' })).error, undefined, 'Old cards and quoted errors are not current failures');
+  await page.evaluate(() => {
+    const card = document.createElement('div');
+    card.id = 'current-error';
+    card.innerHTML = 'Unusual activity has been detected from your device. Try again later. (request-id) <button>重试</button>';
+    document.querySelector('main').append(card);
+  });
+  assert.match((await execute({ kind: 'inspect' })).error, /检测到异常活动/);
+  await page.evaluate(() => { document.querySelector('#current-error').remove(); });
+  assert.equal((await execute({ kind: 'inspect' })).error, undefined);
+  await page.evaluate(() => {
+    const card = document.createElement('div'); card.dataset.testid = 'conversation-error';
+    card.textContent = 'Something went wrong'; document.querySelector('main').append(card);
+  });
+  assert.equal((await execute({ kind: 'inspect' })).error, 'Something went wrong');
   // Replies scroll inside their own viewport, separately from sidebar history
   // and code blocks. Following must not click controls or disturb a draft.
   await page.evaluate(() => {

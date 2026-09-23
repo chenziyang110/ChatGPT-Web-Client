@@ -8,8 +8,10 @@ import type { AccountQueue, AgentTask, Conversation, TaskInput, TaskPhase } from
 export type { AgentTask } from '../../shared/types';
 const queueKey = (accountId: string, conversationId?: string) => conversationId ? `${accountId}:conversation:${conversationId}` : accountId;
 export class QueuePausedError extends Error { constructor() { super('Queue paused before send'); } }
+export class ReportedReplyError extends Error { constructor(message: string) { super(message); this.name = 'ReportedReplyError'; } }
 export interface ExecutionContext {
   task(): AgentTask;
+  precedingReplyError?: { messageId: string; error: string };
   stage(phase: TaskPhase, timeoutMs?: number): void;
   intent(): void;
   submitted(messageId?: string): void;
@@ -365,6 +367,11 @@ export class AgentGateway {
   }
   private async run(task: AgentTask, controller: AbortController): Promise<void> {
     let timer: ReturnType<typeof setTimeout>;
+    const conversationTasks = task.conversationId
+      ? orderedTasks(this.listTasks().filter(item => item.accountId === task.accountId && item.conversationId === task.conversationId)) : [];
+    const predecessor = conversationTasks[conversationTasks.findIndex(item => item.id === task.id) - 1];
+    const precedingReplyError = predecessor?.status === 'failed' && predecessor.phase === 'completed' && predecessor.submittedAt && predecessor.submittedMessageId && predecessor.error
+      ? { messageId: predecessor.submittedMessageId, error: predecessor.error } : undefined;
     const stage = (phase: TaskPhase, timeoutMs?: number) => {
       controller.signal.throwIfAborted();
       if (timeoutMs !== undefined) { clearTimeout(timer); timer = setTimeout(() => controller.abort(new Error(`${phase} timed out`)), timeoutMs); }
@@ -378,6 +385,7 @@ export class AgentGateway {
     const context: ExecutionContext = {
       checkpoint,
       task: () => this.get(task.id), stage,
+      precedingReplyError,
       releaseExecution: () => this.releaseExecution(task.id),
       acquireExecution: () => this.acquireExecution(task.id, controller.signal),
       intent: () => { checkpoint(); this.update(task.id, { phase: 'send_intent', sendIntentAt: Date.now() }); },
@@ -404,6 +412,11 @@ export class AgentGateway {
       if (current.status === 'running') {
         if (error instanceof QueuePausedError && !current.sendIntentAt) {
           this.update(task.id, { status: 'pending', phase: 'queued', error: undefined });
+          return;
+        }
+        if (error instanceof ReportedReplyError && current.sendIntentAt && current.submittedAt) {
+          this.update(task.id, { status: 'failed', phase: 'completed', attention: undefined, error: error.message });
+          this.setQueue(task.accountId, true, 'ChatGPT 回复报错，请核对后恢复后续发送', true, task.conversationId);
           return;
         }
         const uncertain = !!current.sendIntentAt;

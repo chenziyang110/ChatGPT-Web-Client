@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-web-client",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "Local-first desktop AI workspace with isolated accounts and an agent gateway",
   "private": true,
   "type": "module",
@@ -16,7 +16,7 @@
     "build": "npm run typecheck && node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts && node --test tests/release-manifest.test.mjs",
-    "test:desktop": "node tests/page-operation-desktop.mjs && node tests/preview-desktop.mjs && node tests/conversation-queue-desktop.mjs && node tests/desktop.mjs && node tests/clipboard-desktop.mjs && node tests/memory-desktop.mjs && node tests/parallel-desktop.mjs && node tests/agent-target-desktop.mjs && node tests/reply-routing-desktop.mjs && node tests/updates-desktop.mjs && node tests/update-install-desktop.mjs",
+    "test:desktop": "node tests/page-operation-desktop.mjs && node tests/reply-error-desktop.mjs && node tests/preview-desktop.mjs && node tests/conversation-queue-desktop.mjs && node tests/desktop.mjs && node tests/clipboard-desktop.mjs && node tests/memory-desktop.mjs && node tests/parallel-desktop.mjs && node tests/agent-target-desktop.mjs && node tests/reply-routing-desktop.mjs && node tests/updates-desktop.mjs && node tests/update-install-desktop.mjs",
     "test:parallel": "node tests/parallel-desktop.mjs",
     "cli": "node --import tsx src/cli/index.ts",
     "build:agent": "node scripts/build-agent.mjs",

@@ -36,6 +36,12 @@ document.querySelector('[data-testid="send-button"]').onclick = () => {
  const stop = document.createElement('button'); stop.dataset.testid = 'stop-button'; stop.textContent = 'Stop'; document.querySelector('main').append(stop); render();
  window.fixtureFinish = () => { messages.at(-1).finished = true; stop.remove(); render(); };
  window.fixtureFinishImage = () => { Object.assign(messages.at(-1), { text: '', media: true, finished: true }); stop.remove(); render(); };
+ window.fixtureStopEmpty = () => { stop.remove(); messages.pop(); render(); };
+ window.fixtureInterrupt = () => {
+  stop.remove(); messages.pop(); render();
+  const card = document.createElement('div'); card.id = 'fixture-interrupted'; card.dataset.isStreaming = 'true';
+  card.textContent = '连接已中断。正在等待完整回复'; document.querySelector('#messages').append(card);
+ };
  window.fixtureFail = () => {
   stop.remove(); messages.pop(); render();
   const card = document.createElement('div'); card.id = 'fixture-reply-error';

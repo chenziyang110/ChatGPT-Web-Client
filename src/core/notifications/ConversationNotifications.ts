@@ -68,7 +68,7 @@ export class ConversationNotifications {
 
 /** Observe transitions, not historical messages; unsupported states never complete. */
 export class ConversationActivityObserver {
-  private readonly observed = new Map<string, { accountId: string; token?: string; userId?: string; generating: boolean; candidate?: string; since: number }>();
+  private readonly observed = new Map<string, { accountId: string; token?: string; userId?: string; generating: boolean; candidate?: string; since: number; idleCandidate?: { fingerprint: string; since: number } }>();
   constructor(private readonly notifications: ConversationNotifications, private readonly multiplePages = false) {}
   disconnected(accountId: string, url?: string): void {
     for (const [key, value] of this.observed) if (value.accountId === accountId && (!url || key === `${accountId}:${url}`)) this.observed.delete(key);
@@ -92,14 +92,26 @@ export class ConversationActivityObserver {
     }
     if (page.error || !page.editor) {
       if (page.busy) previous.generating = true;
-      previous.userId = page.user?.id ?? previous.userId; previous.candidate = undefined;
+      previous.userId = page.user?.id ?? previous.userId; previous.candidate = undefined; previous.idleCandidate = undefined;
       this.notifications.running(accountId, url, page.title, !page.error && previous.generating); return;
     }
     const userChanged = !!page.user?.id && page.user.id !== previous.userId;
-    if (page.busy || !ready && (previous.generating || userChanged)) {
-      previous.generating = true; previous.userId = page.user?.id ?? previous.userId; previous.candidate = undefined;
+    if (page.busy) {
+      previous.generating = true; previous.userId = page.user?.id ?? previous.userId;
+      previous.candidate = undefined; previous.idleCandidate = undefined;
       this.notifications.running(accountId, url, page.title, true); return;
     }
+    if (!ready && (previous.generating || userChanged)) {
+      const fingerprint = JSON.stringify([page.user, page.assistant]);
+      if (previous.idleCandidate?.fingerprint !== fingerprint) previous.idleCandidate = { fingerprint, since: now };
+      previous.userId = page.user?.id ?? previous.userId; previous.candidate = undefined;
+      if (now - previous.idleCandidate.since < COMPLETION_STABLE_MS) {
+        previous.generating = true; this.notifications.running(accountId, url, page.title, true); return;
+      }
+      previous.generating = false; previous.idleCandidate = undefined;
+      this.notifications.running(accountId, url, page.title, false); return;
+    }
+    previous.idleCandidate = undefined;
     if (!ready) {
       previous.generating = false; previous.userId = page.user?.id ?? previous.userId; previous.candidate = undefined;
       this.notifications.running(accountId, url, page.title, false); return;

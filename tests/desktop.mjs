@@ -509,8 +509,16 @@ try {
   assert.equal(await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].getVisible()), false);
   await page.screenshot({ path: 'test-results/tasks.png', animations: 'disabled' });
   await page.getByRole('button', { name: /设置与集成/ }).click();
-  assert.equal(await desktop.evaluate(({ globalShortcut }) => globalShortcut.isRegistered('CommandOrControl+Shift+S')), true,
-    'The global boss key is registered with Electron');
+  const bossKeyRegistration = await desktop.evaluate(({ globalShortcut }) => {
+    const accelerator = 'CommandOrControl+Shift+S';
+    if (globalShortcut.isRegistered(accelerator)) return 'registered';
+    // The installed client may already own this OS-wide shortcut while the
+    // fixture runs. Only fail when this process could have registered it.
+    const available = globalShortcut.register(accelerator, () => {});
+    if (available) globalShortcut.unregister(accelerator);
+    return available ? 'missing' : 'occupied';
+  });
+  assert.notEqual(bossKeyRegistration, 'missing', 'The global boss key is registered when the OS shortcut is available');
   const bossKey = page.getByLabel('老板键（全局）', { exact: true });
   assert.equal(await bossKey.inputValue(), process.platform === 'darwin' ? '⌘+Shift+S' : 'Ctrl+Shift+S');
   assert.equal(await bossKey.isDisabled(), true, 'The global boss key is fixed and cannot conflict with local shortcuts');

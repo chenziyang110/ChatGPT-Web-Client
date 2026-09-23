@@ -178,6 +178,20 @@ test('fast reply between polls counts after a known empty page; stable text alon
   assert.equal(notices.list('b')[0].running, true); assert.equal(notices.list('b')[0].unread, false); db.close();
 });
 
+test('a stopped reply without a terminal answer clears running after stability without inventing an unread answer', () => {
+  const db = new Database(':memory:'); const notices = new ConversationNotifications(db, () => {});
+  const observer = new ConversationActivityObserver(notices);
+  const incomplete = { ...finished, assistant: { ...finished.assistant!, terminal: false } };
+  observer.observe('a', generating, 0);
+  observer.observe('a', incomplete, 100);
+  observer.observe('a', incomplete, 6099);
+  assert.equal(notices.list('a')[0].running, true);
+  observer.observe('a', incomplete, 6100);
+  assert.equal(notices.list('a')[0].running, false);
+  assert.equal(notices.list('a')[0].unread, false);
+  db.close();
+});
+
 test('unread receipts survive restart but stale running indicators are cleared; no prompt text is persisted', () => {
   const db = new Database(':memory:'); let notices = new ConversationNotifications(db, () => {});
   notices.complete('a', idle.url, 'Daily', replyToken(finished.user!, finished.assistant!));

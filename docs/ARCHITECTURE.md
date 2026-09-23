@@ -9,7 +9,7 @@ flowchart TD
   IPC --> Core[Workspace service]
   HTTP --> Core
   Core --> Accounts[Accounts and sessions]
-  Core --> Tasks[Per-conversation queues; global limit 2]
+  Core --> Tasks[Per-conversation queues; 2 active browser operations]
   Accounts --> SQL[SQLite metadata]
   Tasks --> SQL
   Tasks --> Browser[Browser runtime]
@@ -21,6 +21,7 @@ flowchart TD
 - `src/core/storage`: Node 24 built-in SQLite, WAL and atomic metadata transactions; no native addon ABI rebuild.
 - `src/core/account`, `session`, `conversation`: persistent accounts, active account, page URLs and window bounds.
 - `src/core/agent`: bounded queue, results, cancellation, crash recovery and token-protected HTTP transport.
+- Conversation locks persist through idle/reply waits, but execution capacity is released. Ready pages reacquire capacity before writing; confirmed replies only poll. This keeps long generations from occupying other accounts' send capacity.
 - `src/core/Workspace.ts`: validated shared dispatcher with serialized mutations.
 - `src/main`: lifecycle, trusted IPC sender checks, partitions, navigation policy and fixed DOM task functions.
 - `src/renderer`: account management, native view visibility, task UI and settings.

@@ -95,6 +95,54 @@ test('pending edits and reorder are versioned, isolated, durable and determine a
   } finally { await gateway.stop(); db.close(); }
 });
 
+test('waiting replies release execution capacity across accounts but keep each conversation serial', async () => {
+  const db = new Database(':memory:'); const replies = new Map<string, ReturnType<typeof gate>>(); const sent: string[] = [];
+  const gateway = new AgentGateway(db, async (_id, input, _signal, context) => {
+    if (input.type !== 'prompt') return;
+    context.intent(); context.submitted(input.prompt); sent.push(input.prompt);
+    if (input.prompt.startsWith('hold')) { const reply = gate(); replies.set(input.prompt, reply); await reply.promise; }
+  }, () => {});
+  try {
+    const first = gateway.createTask('a', prompt('hold-a1'), { conversationId: 'one' });
+    const second = gateway.createTask('a', prompt('hold-a2'), { conversationId: 'two' });
+    await until(() => sent.length === 2);
+    const follow = gateway.createTask('a', prompt('follow-a1'), { conversationId: 'one' });
+    const other = gateway.createTask('b', prompt('hold-b1'), { conversationId: 'one' });
+    const third = gateway.createTask('a', prompt('hold-a3'), { conversationId: 'three' });
+    await until(() => sent.length === 4);
+    assert.equal(gateway.get(first.id).status, 'running'); assert.equal(gateway.get(second.id).status, 'running');
+    assert.equal(gateway.get(other.id).status, 'running'); assert.equal(gateway.get(third.id).status, 'running');
+    assert.equal(gateway.get(follow.id).status, 'pending');
+    replies.get('hold-a1')!.resolve(); await until(() => gateway.get(follow.id).status === 'done');
+    assert.deepEqual(sent.filter(value => value === 'follow-a1'), ['follow-a1']);
+    assert.equal(gateway.get(other.id).status, 'running', 'Finishing A does not interrupt B');
+  } finally { for (const reply of replies.values()) reply.resolve(); await gateway.stop(); db.close(); }
+});
+
+test('idle waits yield capacity and must reacquire it before preparing a send', async () => {
+  const db = new Database(':memory:'); const idle = gate(); const work = gate(); const started: string[] = [];
+  const gateway = new AgentGateway(db, async (_id, input, signal, context) => {
+    if (input.type !== 'prompt') return;
+    if (input.prompt === 'idle') {
+      context.stage('waiting_idle'); context.releaseExecution!(); await idle.promise;
+      await context.acquireExecution!(); context.checkpoint!(); started.push('idle-ready');
+    } else { started.push(input.prompt); await work.promise; }
+    signal.throwIfAborted();
+  }, () => {}, 1);
+  try {
+    const waiting = gateway.createTask('a', prompt('idle'), { conversationId: 'one' });
+    await until(() => gateway.get(waiting.id).phase === 'waiting_idle');
+    const preparing = gateway.createTask('b', prompt('preparing'), { conversationId: 'one' });
+    await until(() => started.includes('preparing'));
+    idle.resolve(); await tick(); assert.equal(started.includes('idle-ready'), false, 'No send work runs without a permit');
+    gateway.pause('a', 'one'); await until(() => !gateway.isRunning('a'));
+    assert.equal(gateway.get(waiting.id).status, 'pending');
+    work.resolve(); await until(() => gateway.get(preparing.id).status === 'done');
+    gateway.resume('a', false, 'one'); await until(() => gateway.get(waiting.id).status === 'done');
+    assert.deepEqual(started, ['preparing', 'idle-ready']);
+  } finally { idle.resolve(); work.resolve(); await gateway.stop(); db.close(); }
+});
+
 test('workspace propagates independent 60-minute budgets and includes new settings in deduplication', async () => {
   const db = new Database(':memory:'); const accounts = new AccountManager(db); const conversations = new ConversationManager(db);
   const gateway = new AgentGateway(db, async () => {}, () => {});

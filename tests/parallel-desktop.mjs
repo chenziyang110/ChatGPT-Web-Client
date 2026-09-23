@@ -17,10 +17,10 @@ try {
  await until(async()=> (await rpc('browser.inspect',{accountId:account.id})).readiness==='ready');
  assert.equal(await page.locator('.conversation-tabs').count(),0,'Single page needs no tab strip');
  const manual=(await rpc('workspace.status')).page;
- const execute=async(url,script)=>desktop.evaluate(async({webContents,session},{url,script,partition})=>{
+ const execute=async(url,script,partition=account.partition)=>desktop.evaluate(async({webContents,session},{url,script,partition})=>{
   const wc=webContents.getAllWebContents().find(wc=>wc.session===session.fromPartition(partition)&&wc.getURL()===url);
   if(!wc)throw new Error('Missing page '+url);return wc.executeJavaScript(script);
- },{url,script,partition:account.partition});
+ },{url,script,partition});
  await execute(manual.url,"history.pushState({},'', '/c/manual'); window.fixtureHold=true; document.querySelector('textarea').value='Original manual reply'; document.querySelector('[data-testid=send-button]').click(); localStorage.setItem('shared-login-check','same-account')");
  const original='https://chatgpt.com/c/manual';
  const a=await rpc('tasks.create',{accountId:account.id,new:true,idempotencyKey:'parallel-a',input:{type:'prompt',prompt:'HOLD:A',submit:true}});
@@ -43,6 +43,25 @@ try {
  assert.equal((await rpc('browser.preview',{accountId:account.id,pageId:manual.id})),null,'Manual page is not locked by another conversation');
  const b2=await rpc('tasks.create',{accountId:account.id,conversation:b.conversationId,input:{type:'prompt',prompt:'HOLD:B',submit:true}});
  await until(async()=>!!(await rpc('tasks.get',{id:b2.id})).submittedAt);
+ // Reproduce the reported UI path: A has two long replies, then switch to B
+ // and submit with Enter from its own queue. Neither A reply is finished first.
+ const otherAccount=await rpc('accounts.create',{name:'Second account'});
+ await until(async()=> (await rpc('browser.inspect',{accountId:otherAccount.id})).readiness==='ready');
+ await page.getByRole('button',{name:'会话队列',exact:true}).click();
+ const queue=page.getByRole('complementary',{name:'会话队列'});
+ await queue.getByLabel('下一条消息',{exact:true}).fill('From second account');
+ await queue.getByLabel('下一条消息',{exact:true}).press('Enter');
+ let other;
+ await until(async()=>{other=(await rpc('tasks.list')).find(task=>task.accountId===otherAccount.id&&task.submittedAt);return !!other;});
+ assert.equal((await rpc('tasks.get',{id:a.id})).status,'running');
+ assert.equal((await rpc('tasks.get',{id:b2.id})).status,'running');
+ assert.equal((await rpc('tasks.get',{id:follow.id})).status,'pending','Same conversation still waits for its own reply');
+ const otherPage=(await rpc('workspace.status')).pages.find(item=>item.accountId===otherAccount.id&&item.conversationId===other.conversationId);
+ assert.equal(await execute(otherPage.url,"localStorage.getItem('shared-login-check')",otherAccount.partition),null,'Account storage stays isolated');
+ assert.equal(await execute(otherPage.url,'window.fixtureSendCount',otherAccount.partition),1);
+ await until(async()=> (await rpc('tasks.get',{id:other.id})).status==='done');
+ assert.equal((await rpc('workspace.status')).activeAccountId,otherAccount.id,'Background work does not switch the selected account');
+ await queue.getByRole('button',{name:'关闭队列面板',exact:true}).click();
  await rpc('queues.takeover',{accountId:account.id,conversation:a.conversationId});
  assert.equal((await rpc('tasks.get',{id:a.id})).status,'uncertain');
  assert.equal((await rpc('tasks.get',{id:b2.id})).status,'running','Taking over A cannot interrupt B');
@@ -51,7 +70,7 @@ try {
  assert.equal(after.pages.find(p=>p.id===bPage.id).locked,true);
  await rpc('browser.select',{accountId:account.id,pageId:manual.id});
  assert.equal((await rpc('workspace.status')).page.url,original);
- await until(async()=>await page.locator('.workspace-status').count()===0);
+ await until(async()=>await page.getByRole('tab').count()===3);
  assert.equal(await page.getByRole('tab').count(),3,'Multiple conversations remain selectable');
  await rpc('browser.select',{accountId:account.id,pageId:bPage.id});
  await page.locator('.preview-canvas img').waitFor();
@@ -66,8 +85,8 @@ try {
  assert.equal(await execute(aPage.url,'window.fixtureSendCount'),2,'A was not replayed');
  assert.equal(await execute(original,'window.fixtureSendCount'),1);
  await rpc('browser.closePage',{accountId:account.id,pageId:bPage.id});
- assert.equal((await rpc('workspace.status')).pages.length,2);
- console.log('Parallel desktop passed: same login, separate pages, original generation preserved, per-conversation FIFO, independent locks/takeover, reply retrieval and notifications.');
+ assert.equal((await rpc('workspace.status')).pages.filter(item=>item.accountId===account.id).length,2);
+ console.log('Parallel desktop passed: two held replies do not block a second account queue, isolated storage, same-login separate pages, original generation preserved, per-conversation FIFO, independent locks/takeover, reply retrieval and notifications.');
 } finally {
  if(desktop)await desktop.close();
  assert.ok(directory.startsWith(path.resolve('.')+path.sep+'.test-parallel-'));

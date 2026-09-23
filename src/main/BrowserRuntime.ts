@@ -499,7 +499,8 @@ export class BrowserRuntime {
     const contents = this.openView(pageId).webContents;
     contents.setBackgroundThrottling(false);
     try {
-      const result = await new ChatGPTAdapter(contents, signal, context, this.conversations).execute(input);
+      const result = await new ChatGPTAdapter(contents, signal, context, this.conversations,
+        () => this.activeId === pageId && this.visible && !this.backgrounded() ? 250 : 2000).execute(input);
       signal.throwIfAborted();
       if (input.type === 'prompt' && input.submit && result && typeof result === 'object' && 'url' in result && 'replyToken' in result && typeof result.url === 'string' && typeof result.replyToken === 'string') {
         this.notifications.complete(id, result.url, this.title(id, result.url, contents.getTitle()), result.replyToken);

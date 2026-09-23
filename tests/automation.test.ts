@@ -62,7 +62,7 @@ test('a legacy conversation error does not keep the entire account paused after 
   } finally { await gateway.stop(); db.close(); }
 });
 
-test('per-account FIFO, global limit and waiting-account fairness', async () => {
+test('per-conversation FIFO, active-operation limit and waiting-account fairness', async () => {
   const db = new Database(':memory:');
   const gates = new Map<string, ReturnType<typeof deferred>>();
   const started: string[] = [];

@@ -63,7 +63,7 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
   const generating = !!running?.sendIntentAt || !!diagnostic?.busy;
   const count = tasks.filter(task => !task.sendIntentAt).length;
   const ready = !!conversation && diagnostic?.readiness === 'ready' && !diagnostic.busy && !diagnostic.draftLength && !tasks.length && !paused;
-  const status = !conversation ? loading ? '页面加载中' : '检查会话' : attention ? '需要处理' : paused ? '已暂停' : running ? phaseLabels[running.phase ?? 'preparing'] : diagnostic?.busy ? '等待当前回复' : waiting.length ? '等待运行名额' : '就绪';
+  const status = !conversation ? loading ? '页面加载中' : '检查会话' : attention ? '需要处理' : paused ? '已暂停' : running ? phaseLabels[running.phase ?? 'preparing'] : diagnostic?.busy ? '等待当前回复' : waiting.length ? '等待发送' : '就绪';
   const elapsed = running?.submittedAt ? Math.max(0, Math.floor((now - running.submittedAt) / 1000)) : undefined;
   const edited = editing && state.tasks.find(task => task.id === editing.id);
   const staleEdit = !!editing && (edited?.status !== 'pending' || edited.updatedAt !== editing.version);

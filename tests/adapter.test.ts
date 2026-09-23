@@ -27,9 +27,21 @@ function adapterFixture(readPage: (attempt: number) => Record<string, unknown>, 
       if (operation.kind === 'check_send') throw new Error('SEND_UNAVAILABLE: prompt remains a draft');
       throw new Error('Unexpected operation');
     } } as unknown as WebContents;
-  const context = { task: () => task, stage: () => {}, intent: () => assert.fail('A draft must not send'), submitted: () => assert.fail('A draft must not submit') } satisfies ExecutionContext;
-  return { adapter: new ChatGPTAdapter(contents, controller.signal, context, {} as ConversationManager), controller, operations, task };
+  const context: ExecutionContext = { task: () => task, stage: () => {}, intent: () => assert.fail('A draft must not send'), submitted: () => assert.fail('A draft must not submit') };
+  return { adapter: new ChatGPTAdapter(contents, controller.signal, context, {} as ConversationManager), controller, operations, task, context };
 }
+
+test('a draft typed while waiting for execution capacity is preserved before any fill', async () => {
+  let humanDraft = '';
+  const fixture = adapterFixture(() => ({ readiness: 'ready', draft: humanDraft }));
+  fixture.context.acquireExecution = async () => { humanDraft = 'Typed while waiting'; };
+  const deadline = setTimeout(() => fixture.controller.abort(new Error('test deadline')), 4000);
+  try {
+    await assert.rejects(fixture.adapter.execute(fixture.task.input), /DRAFT_CONFLICT/);
+    assert.equal(fixture.operations.includes('fill'), false);
+    assert.equal(humanDraft, 'Typed while waiting');
+  } finally { clearTimeout(deadline); }
+});
 
 test('page load completion waits for the delayed composer instead of blocking immediately', async () => {
   const fixture = adapterFixture(attempt => ({ editor: attempt > 3, readiness: attempt > 3 ? 'ready' : 'loading' }));

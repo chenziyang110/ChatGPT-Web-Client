@@ -76,6 +76,72 @@ test('reported ChatGPT reply error finishes the sent item and pauses only its co
   } finally { failure.resolve(); await gateway.stop(); db.close(); }
 });
 
+test('conversation-panel queue advances after a reported reply error without resending', async () => {
+  const db = new Database(':memory:'); const failure = gate(); const sent: string[] = [];
+  const gateway = new AgentGateway(db, async (_id, input, _signal, context) => {
+    if (input.type !== 'prompt') return;
+    context.intent(); context.submitted(input.prompt); sent.push(input.prompt);
+    if (input.prompt === 'first') { await failure.promise; throw new ReportedReplyError('ChatGPT 检测到异常活动，请稍后重试'); }
+  }, () => {});
+  try {
+    const first = gateway.createTask('a', prompt('first'), { conversationId: 'one', background: true });
+    const next = gateway.createTask('a', prompt('next'), { conversationId: 'one', background: true });
+    await until(() => sent.length === 1); failure.resolve();
+    await until(() => gateway.get(next.id).status === 'done');
+    assert.equal(gateway.get(first.id).status, 'failed');
+    assert.equal(gateway.get(first.id).attention, undefined);
+    assert.equal(gateway.queues().find(queue => queue.conversationId === 'one')?.paused, false);
+    assert.deepEqual(sent, ['first', 'next']);
+  } finally { failure.resolve(); await gateway.stop(); db.close(); }
+});
+
+test('conversation-panel queue advances after an unconfirmed send times out, but never replays it', async () => {
+  const db = new Database(':memory:'); const sent: string[] = [];
+  const gateway = new AgentGateway(db, async (_id, input, signal, context) => {
+    if (input.type !== 'prompt') return;
+    context.intent(); sent.push(input.prompt);
+    if (input.prompt === 'first') {
+      context.stage('generating', 25);
+      await new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    }
+  }, () => {});
+  try {
+    const first = gateway.createTask('a', prompt('first'), { conversationId: 'one', background: true });
+    const next = gateway.createTask('a', prompt('next'), { conversationId: 'one', background: true });
+    await until(() => gateway.get(next.id).status === 'done');
+    assert.equal(gateway.get(first.id).status, 'failed');
+    assert.match(gateway.get(first.id).error ?? '', /generating timed out/);
+    assert.equal(gateway.get(first.id).attention, undefined);
+    assert.deepEqual(sent, ['first', 'next']);
+  } finally { await gateway.stop(); db.close(); }
+});
+
+test('older automatic review pause is removed for background conversation queue but explicit pause stays', async () => {
+  const db = new Database(':memory:'); const sent: string[] = [];
+  let gateway = new AgentGateway(db, async (_id, input) => { if (input.type === 'prompt') sent.push(input.prompt); }, () => {});
+  try {
+    gateway.pause('a', 'one');
+    const first = gateway.createTask('a', prompt('first'), { conversationId: 'one', background: true });
+    const next = gateway.createTask('a', prompt('next'), { conversationId: 'one', background: true });
+    db.write('tasks', first.id, { ...first, status: 'uncertain', sendIntentAt: Date.now(), attention: undefined, error: 'generating timed out' });
+    db.write('account_queues', 'a:conversation:one', { accountId: 'a', conversationId: 'one', paused: true, reason: '发送或回复结果不确定，请核对会话', control: 'agent' });
+    gateway = new AgentGateway(db, async (_id, input) => { if (input.type === 'prompt') sent.push(input.prompt); }, () => {});
+    assert.equal(gateway.get(first.id).status, 'failed');
+    assert.equal(gateway.queues().find(queue => queue.conversationId === 'one')?.paused, false);
+    await until(() => gateway.get(next.id).status === 'done');
+    assert.equal(gateway.get(first.id).status, 'failed');
+    assert.equal(gateway.get(first.id).attention, undefined);
+    assert.deepEqual(sent, ['next']);
+
+    gateway.pause('a', 'two');
+    const held = gateway.createTask('a', prompt('held'), { conversationId: 'two', background: true });
+    db.write('tasks', held.id, { ...held, status: 'uncertain', sendIntentAt: Date.now(), error: 'generating timed out' });
+    gateway = new AgentGateway(db, async (_id, input) => { if (input.type === 'prompt') sent.push(input.prompt); }, () => {});
+    assert.equal(gateway.get(held.id).status, 'uncertain');
+    assert.equal(gateway.queues().find(queue => queue.conversationId === 'two')?.paused, true);
+  } finally { await gateway.stop(); db.close(); }
+});
+
 test('failed reasoning finishes the sent item and advances its conversation queue without resending', async () => {
   const db = new Database(':memory:'); const failure = gate(); const sent: string[] = [];
   const gateway = new AgentGateway(db, async (_id, input, _signal, context) => {

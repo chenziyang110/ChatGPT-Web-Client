@@ -163,14 +163,16 @@ export function pageOperation(operation: Operation): unknown {
       return false;
     });
     // A failed reasoning block can replace the answer without a Retry card or
-    // copy action. Match only its own interactive label after the latest user
-    // turn; historical failures and assistant quotes are not current errors.
+    // copy action. ChatGPT renders its label as either a control or plain text.
+    // Only inspect an exact standalone label after the latest user turn; a
+    // completed assistant turn and quoted text are not current failures.
     const finishedAnswer = elements.some((element, index) => element.dataset.messageAuthorRole === 'assistant' &&
       afterLastUser(element) && readMessage(element, index).terminal);
     const thinkingLabel = /^(无法思考|Unable to think)(?:\s*[›>])?$/i;
     const thinkingFailure = !!lastUserElement && visible(editor) && !busy && !finishedAnswer &&
-      [...document.querySelectorAll<HTMLElement>('main button, main [role="button"], main [aria-expanded]')].some(control => {
-        if (!visible(control) || !afterLastUser(control) || control.closest('[data-message-author-role="user"]')) return false;
+      [...document.querySelectorAll<HTMLElement>('main button, main [role="button"], main [aria-expanded], main div, main p, main span')].some(control => {
+        if (!visible(control) || !afterLastUser(control) || control.closest('[data-message-author-role="user"]') ||
+          control.querySelector('[data-message-author-role]')) return false;
         const label = (control.innerText || control.getAttribute('aria-label') || '').trim();
         return thinkingLabel.test(label);
       });

@@ -109,7 +109,7 @@ export class BrowserRuntime {
   }
   private async observe(id: string, view: WebContentsView): Promise<void> {
     const contents = view.webContents;
-    if (this.closing || this.observing.has(id) || contents.isDestroyed() || contents.isLoading()) return;
+    if (this.closing || this.observing.has(id) || !contents || contents.isDestroyed() || contents.isLoading()) return;
     const owner = this.owners.get(id); if (!owner) return;
     if (this.redirectingDuplicates.has(id)) return;
     const url = contents.getURL();
@@ -238,7 +238,9 @@ export class BrowserRuntime {
   }
   private openView(id: string): WebContentsView {
     const existing = this.views.get(id);
-    if (existing && !existing.webContents.isDestroyed()) return existing;
+    const existingContents = existing?.webContents;
+    if (existingContents && !existingContents.isDestroyed()) return existing!;
+    if (existing) this.destroyView(id, false);
     const owner = this.owners.get(id);
     if (!owner) throw new AppError('会话页面不存在', 404);
     const account = this.accounts.get(owner.accountId);
@@ -249,11 +251,11 @@ export class BrowserRuntime {
     this.views.set(id, view);
     bindShortcuts(view.webContents, this.window, this.shortcuts);
     this.secure(view.webContents, id, account.partition);
-    const update = () => { if (!view.webContents.isDestroyed()) { this.layout(); this.changed(); } };
+    const update = () => { if (this.views.get(id) === view && view.webContents && !view.webContents.isDestroyed()) { this.layout(); this.changed(); } };
     view.webContents.on('did-start-loading', () => { owner.hibernationReady = false; this.errors.delete(id); update(); });
-    view.webContents.on('did-stop-loading', () => { owner.title = view.webContents.getTitle() || owner.title; this.saveTabs(owner.accountId); update(); });
+    view.webContents.on('did-stop-loading', () => { owner.title = view.webContents?.getTitle() || owner.title; this.saveTabs(owner.accountId); update(); });
     view.webContents.on('page-title-updated', (_event, title) => { owner.title = title || owner.title; this.saveTabs(owner.accountId); update(); });
-    const save = (url: string) => { if (!this.closing && this.views.has(id) && isChatUrl(url)) this.savePage(id, url); update(); };
+    const save = (url: string) => { if (!this.closing && this.views.get(id) === view && isChatUrl(url)) this.savePage(id, url); update(); };
     view.webContents.on('did-navigate', (_event, url) => save(url));
     view.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => { if (isMainFrame) save(url); });
     view.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
@@ -262,6 +264,22 @@ export class BrowserRuntime {
     view.webContents.on('render-process-gone', (_event, details) => {
       if (this.views.get(id) === view) this.errors.set(id, `Page stopped: ${details.reason}. Reload to continue.`);
       update();
+    });
+    view.webContents.once('destroyed', () => {
+      // Chromium is still dispatching destruction here. Mutating the native
+      // view tree before that dispatch finishes can stall the main process.
+      setImmediate(() => {
+        if (this.closing || this.views.get(id) !== view) return;
+        try {
+          const wasActive = this.activeId === id;
+          this.destroyView(id, false);
+          if (wasActive) setTimeout(() => {
+            try { this.restoreSelectedView(); }
+            catch { this.changed(); }
+          }, 1000);
+        } catch { this.errors.set(id, '网页画面中断，请点击“恢复页面”'); }
+        this.changed();
+      });
     });
     void view.webContents.loadURL(owner.url).catch(() => { /* did-fail-load reports the error to the UI. */ });
     return view;
@@ -293,11 +311,14 @@ export class BrowserRuntime {
     if (pageId && this.owners.get(pageId)?.accountId !== accountId) throw new AppError('会话页面不属于此账号', 404);
     const id = pageId ?? this.pageId(accountId) ?? this.createView(accountId,
       this.restoredTabAccounts.has(accountId) ? HOME_URL : this.sessions.restore(accountId)?.url ?? HOME_URL);
-    const restoreFocus = !!(this.activeId && this.views.get(this.activeId)?.webContents.isFocused());
+    const activeContents = this.activeId ? this.views.get(this.activeId)?.webContents : undefined;
+    const restoreFocus = !!activeContents && !activeContents.isDestroyed() && activeContents.isFocused();
     for (const windows of this.popups.values()) for (const popup of windows) popup.hide();
     if (this.activeId && this.activeId !== id && this.views.has(this.activeId)) {
       const previous = this.owners.get(this.activeId); if (previous) previous.idleSince = Date.now();
-      this.window.contentView.removeChildView(this.views.get(this.activeId)!);
+      const previousView = this.views.get(this.activeId)!;
+      if (previousView.webContents && !previousView.webContents.isDestroyed() && this.window.contentView.children.includes(previousView))
+        this.window.contentView.removeChildView(previousView);
     }
     const view = this.openView(id);
     this.owners.get(id)!.idleSince = Date.now();
@@ -347,14 +368,15 @@ export class BrowserRuntime {
   private backgrounded(): boolean { return !this.visible || !this.window.isVisible() || this.window.isMinimized(); }
   private markViewed(id: string, url?: string): void {
     const view = this.views.get(id); const owner = this.owners.get(id);
-    if (!view || !owner || this.activeId !== id || this.backgrounded() || !this.window.isFocused() || this.isLocked(id) || !view.getVisible()) return;
-    this.notifications.viewed(owner.accountId, url ?? view.webContents.getURL());
+    const contents = view?.webContents;
+    if (!contents || !owner || this.activeId !== id || this.backgrounded() || !this.window.isFocused() || this.isLocked(id) || !view.getVisible()) return;
+    this.notifications.viewed(owner.accountId, url ?? contents.getURL());
   }
   private restoreSelectedView(): void {
     if (this.closing || this.activeId || this.backgrounded()) return;
     const accountId = this.accounts.activeId();
     const id = accountId ? this.selected.get(accountId) : undefined;
-    if (accountId && id && this.owners.has(id) && !this.views.has(id)) this.activate(accountId, id);
+    if (accountId && id && this.owners.has(id) && !this.isLocked(id)) this.activate(accountId, id);
   }
   private updateVisibility(): void {
     if (!this.backgrounded()) this.restoreSelectedView();
@@ -365,7 +387,7 @@ export class BrowserRuntime {
   private layout(): void {
     if (!this.activeId || this.window.isDestroyed()) return;
     const view = this.views.get(this.activeId);
-    if (!view) return;
+    if (!view?.webContents || view.webContents.isDestroyed()) return;
     const [width, height] = this.window.getContentSize();
     const bounds = this.bounds;
     if (!bounds) { view.setVisible(false); return; }
@@ -465,7 +487,7 @@ export class BrowserRuntime {
   async hasBusyPage(): Promise<boolean> {
     for (const view of this.views.values()) {
       const contents = view.webContents;
-      if (contents.isDestroyed() || !isChatUrl(contents.getURL())) continue;
+      if (!contents || contents.isDestroyed() || !isChatUrl(contents.getURL())) continue;
       if (contents.isLoading()) return true;
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -480,7 +502,8 @@ export class BrowserRuntime {
     return false;
   }
   private async waitUntilLoaded(id: string): Promise<void> {
-    const contents = this.views.get(id)!.webContents;
+    const contents = this.views.get(id)?.webContents;
+    if (!contents || contents.isDestroyed()) throw new AppError('会话页面已中断，请重新打开');
     const deadline = Date.now() + 30000;
     while (contents.isLoading()) {
       if (Date.now() >= deadline) throw new AppError('会话加载超时，请检查页面');
@@ -502,6 +525,11 @@ export class BrowserRuntime {
   control(accountId: string, action: string): void {
     const id = this.pageId(accountId); if (!id) return;
     if (this.isLocked(id)) throw new AppError('请先接管当前会话');
+    const selectedContents = this.views.get(id)?.webContents;
+    if (action === 'reload' && (this.activeId !== id || !selectedContents || selectedContents.isDestroyed())) {
+      this.activate(accountId, id);
+      return;
+    }
     const contents = this.openView(id).webContents;
     if (action === 'reload') contents.reload();
     else if (action === 'back' && contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
@@ -533,7 +561,7 @@ export class BrowserRuntime {
     }
     if (owner) this.saveTabs(owner.accountId);
   }
-  private destroyView(id: string): void {
+  private destroyView(id: string, detach = true): void {
     this.previews.delete(id);
     this.previewAwaken.delete(id);
     this.previewStale.delete(id);
@@ -541,24 +569,30 @@ export class BrowserRuntime {
     const owner = this.owners.get(id);
     if (owner?.lastUrl) this.observer.disconnected(owner.accountId, owner.lastUrl);
     if (owner) { owner.lastUrl = undefined; owner.hibernationReady = false; owner.activityKey = undefined; }
-    for (const popup of this.popups.get(id) ?? []) popup.destroy();
+    for (const popup of this.popups.get(id) ?? []) if (!popup.isDestroyed()) popup.destroy();
     this.popups.delete(id);
     const view = this.views.get(id);
     if (view) {
-      if (this.activeId === id) { this.window.contentView.removeChildView(view); this.activeId = null; }
+      const contents = view.webContents;
+      if (this.activeId === id) {
+        if (detach && contents && !contents.isDestroyed() && !this.window.isDestroyed() && this.window.contentView.children.includes(view))
+          this.window.contentView.removeChildView(view);
+        this.activeId = null;
+      }
       this.views.delete(id);
-      if (!view.webContents.isDestroyed()) view.webContents.close({ waitForBeforeUnload: false });
+      if (contents && !contents.isDestroyed()) contents.close({ waitForBeforeUnload: false });
     }
   }
   private hibernateIfIdle(id: string, view: WebContentsView): void {
     const owner = this.owners.get(id);
+    const contents = view.webContents;
     // Keep one warm page per account so switching accounts reattaches the same
     // WebContents without loading ChatGPT again. Other idle tabs may still sleep.
     if (owner && this.selected.get(owner.accountId) === id) return;
     const idleMs = this.backgrounded() ? this.hiddenIdlePageMs : this.idlePageMs;
     if (!owner || this.views.get(id) !== view || this.activeId === id && !this.backgrounded() || this.isLocked(id) || this.redirectingDuplicates.has(id) || this.observing.has(id) ||
       owner.hasDraft || owner.busy || !owner.hibernationReady || Date.now() - owner.idleSince < idleMs ||
-      view.webContents.isDestroyed() || view.webContents.isLoading() || !isChatUrl(view.webContents.getURL())) return;
+      !contents || contents.isDestroyed() || contents.isLoading() || !isChatUrl(contents.getURL())) return;
     this.destroyView(id);
     this.changed();
   }
@@ -574,10 +608,11 @@ export class BrowserRuntime {
     for (const id of this.previewFrames.keys()) if (!this.isLocked(id)) {
       this.previewFrames.delete(id); this.previewStale.delete(id); this.previewAwaken.delete(id);
     }
-    if (this.activeId && this.isLocked(this.activeId) && this.views.get(this.activeId)?.webContents.isFocused()) this.window.webContents.focus();
+    if (this.activeId && this.isLocked(this.activeId) && this.views.get(this.activeId)?.webContents?.isFocused()) this.window.webContents.focus();
     for (const [id, popups] of this.popups) for (const popup of popups) {
       if (this.isLocked(id) || !this.visible || this.activeId !== id) popup.hide(); else popup.show();
     }
+    this.restoreSelectedView();
     this.layout();
   }
   async execute(id: string, input: TaskInput, signal: AbortSignal, context: ExecutionContext): Promise<unknown> {
@@ -606,9 +641,11 @@ export class BrowserRuntime {
     finally {
       if (!contents.isDestroyed()) contents.setBackgroundThrottling(true);
       if (contents.isDestroyed()) {
-        const active = this.activeId === pageId;
-        this.closeView(pageId);
-        if (active && !this.closing) this.activate(id);
+        const current = this.views.get(pageId)?.webContents;
+        if (!current || current === contents || current.isDestroyed()) this.destroyView(pageId, false);
+        // The tab and its conversation queue still belong to the user. The
+        // lock release will reattach the selected page after this task fails.
+        if (!this.closing) { this.restoreSelectedView(); this.changed(); }
       }
     }
   }

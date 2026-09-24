@@ -91,8 +91,10 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
   }
   function reorder(index: number, direction: number) {
     if (!conversation) return;
-    const next = [...waiting]; [next[index], next[index + direction]] = [next[index + direction], next[index]];
-    void run('queues.reorder', { accountId: account.id, conversation: conversation.id, items: next.map(task => ({ id: task.id, updatedAt: task.updatedAt })) });
+    const task = waiting[index]; const neighbor = waiting[index + direction];
+    if (!task || !neighbor) return;
+    void run('queues.move', { accountId: account.id, conversation: conversation.id,
+      id: task.id, expectedUpdatedAt: task.updatedAt, neighborId: neighbor.id, expectedNeighborUpdatedAt: neighbor.updatedAt });
   }
   function saveEdit() {
     if (!conversation || !editing || !editing.text.trim() || staleEdit || pendingAction.current) return;

@@ -266,8 +266,6 @@ export class AgentGateway {
     const hash = options.requestHash ?? requestHash({ input, ...options, idempotencyKey: undefined });
     const duplicate = this.findRequest(accountId, options.idempotencyKey, hash);
     if (duplicate) return duplicate;
-    const tasks = this.listTasks();
-    if (tasks.filter(task => ['pending', 'running', 'blocked', 'waiting_user'].includes(task.status)).length >= 30) throw new AppError('Task queue is full', 429);
     const now = Date.now();
     const task: AgentTask = { id: randomUUID(), accountId, input, ...options, requestHash: hash, status: 'pending', phase: 'queued',
       replyTimeoutMs: duration(options.replyTimeoutMs, 600000), prepareTimeoutMs: duration(options.prepareTimeoutMs, 60000), idleTimeoutMs: duration(options.idleTimeoutMs, 600000),
@@ -278,9 +276,13 @@ export class AgentGateway {
       this.db.set('taskSequence', task.seq);
       this.persist(task);
       const history = this.listTasks();
+      let remaining = history.length;
       for (const old of [...history].reverse()) {
-        if (this.listTasks().length <= 200) break;
-        if (['done', 'failed', 'cancelled'].includes(old.status) && ![...this.running.values()].some(slot => slot.id === old.id)) this.db.remove('tasks', old.id);
+        if (remaining <= 200) break;
+        if (['done', 'failed', 'cancelled'].includes(old.status) && ![...this.running.values()].some(slot => slot.id === old.id)) {
+          this.db.remove('tasks', old.id);
+          remaining--;
+        }
       }
     });
     this.changed(); this.schedule();
@@ -314,15 +316,43 @@ export class AgentGateway {
     return this.cancel(id);
   }
   reorder(accountId: string, conversationId: string, value: unknown): AgentTask[] {
-    if (!Array.isArray(value) || value.length > 30) throw new AppError('items must contain the pending task IDs and versions');
+    if (!Array.isArray(value)) throw new AppError('items must contain the pending task IDs and versions');
     const pending = orderedTasks(this.listTasks().filter(task => task.accountId === accountId && task.conversationId === conversationId && task.status === 'pending'));
     const entries = value.map(item => record(item));
-    if (entries.length !== pending.length || new Set(entries.map(item => item.id)).size !== pending.length || entries.some(item =>
-      !pending.some(task => task.id === item.id && task.updatedAt === item.updatedAt && !task.sendIntentAt && ![...this.running.values()].some(slot => slot.id === task.id)))) throw new AppError('QUEUE_CHANGED: 排队顺序已变化，请刷新后再试', 409);
-    const positions = pending.map(taskOrder);
+    const byId = new Map(pending.map(task => [task.id, task]));
+    if (entries.length !== pending.length || new Set(entries.map(item => item.id)).size !== pending.length || entries.some(item => {
+      const task = byId.get(item.id as string);
+      return !task || task.updatedAt !== item.updatedAt || task.sendIntentAt || [...this.running.values()].some(slot => slot.id === task.id);
+    })) throw new AppError('QUEUE_CHANGED: 排队顺序已变化，请刷新后再试', 409);
+    const orders = pending.map(taskOrder);
+    const positions = new Set(orders).size === orders.length ? orders : pending.map((_, index) => index + 1);
     this.db.transaction(() => entries.forEach((item, index) => this.update(item.id as string, { queueOrder: positions[index] }, false)));
     this.changed(); this.schedule();
     return orderedTasks(this.listTasks().filter(task => task.accountId === accountId && task.conversationId === conversationId && task.status === 'pending'));
+  }
+  moveQueued(accountId: string, conversationId: string, id: string, expectedUpdatedAt: unknown,
+    neighborId: string, expectedNeighborUpdatedAt: unknown): AgentTask {
+    const task = this.pendingTask(accountId, conversationId, id, expectedUpdatedAt);
+    const neighbor = this.pendingTask(accountId, conversationId, neighborId, expectedNeighborUpdatedAt);
+    const pending = orderedTasks(this.listTasks().filter(item => item.accountId === accountId && item.conversationId === conversationId && item.status === 'pending'));
+    const index = pending.findIndex(item => item.id === task.id);
+    const neighborIndex = pending.findIndex(item => item.id === neighbor.id);
+    if (Math.abs(index - neighborIndex) !== 1) throw new AppError('QUEUE_CHANGED: 排队顺序已变化，请刷新后再试', 409);
+    const orders = pending.map(taskOrder);
+    if (new Set(orders).size === orders.length) {
+      this.db.transaction(() => {
+        this.update(task.id, { queueOrder: orders[neighborIndex] }, false);
+        this.update(neighbor.id, { queueOrder: orders[index] }, false);
+      });
+      this.changed(); this.schedule();
+      return this.get(id);
+    }
+    [pending[index], pending[neighborIndex]] = [pending[neighborIndex], pending[index]];
+    this.db.transaction(() => pending.forEach((item, position) => {
+      if (taskOrder(item) !== position + 1) this.update(item.id, { queueOrder: position + 1 }, false);
+    }));
+    this.changed(); this.schedule();
+    return this.get(id);
   }
   cancel(id: string): AgentTask {
     const task = this.get(id);

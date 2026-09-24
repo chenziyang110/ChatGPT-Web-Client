@@ -248,6 +248,12 @@ export class Workspace {
         const conversation = this.conversations.get(account.id, params.conversation);
         result = this.tasks.reorder(account.id, conversation.id, params.items); break;
       }
+      case 'queues.move': {
+        const account = this.accounts.resolve(params.accountId);
+        const conversation = this.conversations.get(account.id, params.conversation);
+        result = this.tasks.moveQueued(account.id, conversation.id, identifier(params.id), params.expectedUpdatedAt,
+          identifier(params.neighborId), params.expectedNeighborUpdatedAt); break;
+      }
       case 'tasks.clear': result = { cleared: true, count: this.tasks.clearFinishedHistory() }; break;
       default: throw new AppError('Unknown method', 404);
     }

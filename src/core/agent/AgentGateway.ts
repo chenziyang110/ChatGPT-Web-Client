@@ -137,6 +137,20 @@ export class AgentGateway {
         { status: 'failed', phase: 'completed', attention: undefined, resolvedAt: Date.now() }, false);
       this.setQueue(queue.accountId, false, undefined, false, queue.conversationId);
     }
+    // Older clients left conversation-panel queues waiting for a choice when
+    // ChatGPT's page could not be operated before send intent. That item was
+    // never sent, so finish it and let the following queued message run.
+    for (const queue of db.records<AccountQueue>('account_queues')) {
+      if (!queue.paused || !queue.conversationId || queue.control === 'human' ||
+        queue.reason !== '任务需要处理，请检查错误后继续') continue;
+      const tasks = this.listTasks().filter(task => task.accountId === queue.accountId && task.conversationId === queue.conversationId);
+      const pageFailures = tasks.filter(task => task.status === 'waiting_user' && !task.sendIntentAt &&
+        advancesAfterInterruption(task) && task.attention?.kind === 'page');
+      for (const task of pageFailures) this.update(task.id, { status: 'failed', phase: 'completed', attention: undefined }, false);
+      if (pageFailures.length && !tasks.some(task => task.status === 'uncertain' && !task.resolvedAt ||
+        task.status === 'waiting_user' && !pageFailures.some(failed => failed.id === task.id)))
+        this.setQueue(queue.accountId, false, undefined, false, queue.conversationId);
+    }
     this.schedule();
   }
   listTasks(): AgentTask[] { return this.db.records<AgentTask>('tasks').reverse(); }
@@ -452,7 +466,12 @@ export class AgentGateway {
           this.update(task.id, { status: 'failed', phase: 'completed', attention: undefined, error: message });
           return;
         }
-        this.update(task.id, { status: uncertain ? 'uncertain' : 'waiting_user', attention: taskAttention(message, uncertain), error: message });
+        const attention = taskAttention(message, uncertain);
+        if (!uncertain && advancesAfterInterruption(current) && attention.kind === 'page') {
+          this.update(task.id, { status: 'failed', phase: 'completed', attention: undefined, error: message });
+          return;
+        }
+        this.update(task.id, { status: uncertain ? 'uncertain' : 'waiting_user', attention, error: message });
         this.setQueue(task.accountId, true, uncertain ? '发送或回复结果不确定，请核对会话' : '任务需要处理，请检查错误后继续', true, task.conversationId);
       }
     } finally {

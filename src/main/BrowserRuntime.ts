@@ -30,6 +30,13 @@ const DEFAULT_PAGE_IDLE_MS = 60_000;
 const DEFAULT_HIDDEN_PAGE_IDLE_MS = 15_000;
 const MONITOR_INTERVAL_MS = 1_500;
 const PREVIEW_TIMEOUT_MS = 5_000;
+const DEFAULT_PAGE_LOAD_TIMEOUT_MS = 20_000;
+const PAGE_LOAD_TIMEOUT_ERROR = '网页加载时间过长，请检查网络或点击“恢复页面”重试';
+
+function pageLoadTimeoutMs(): number {
+  const value = Number(process.env.WORKSPACE_PAGE_LOAD_TIMEOUT_MS);
+  return Number.isSafeInteger(value) && value >= 100 && value <= 60_000 ? value : DEFAULT_PAGE_LOAD_TIMEOUT_MS;
+}
 
 function pageIdleMs(): number {
   const value = Number(process.env.WORKSPACE_PAGE_IDLE_MS);
@@ -44,6 +51,7 @@ function hiddenPageIdleMs(): number {
 export class BrowserRuntime {
   private readonly views = new Map<string, WebContentsView>();
   private readonly errors = new Map<string, string>();
+  private readonly loadTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly popups = new Map<string, Set<BrowserWindow>>();
   private activeId: string | null = null;
   private locks: AgentTask[] = [];
@@ -66,6 +74,7 @@ export class BrowserRuntime {
   private readonly monitor: ReturnType<typeof setInterval>;
   private readonly idlePageMs = pageIdleMs();
   private readonly hiddenIdlePageMs = hiddenPageIdleMs();
+  private readonly loadTimeoutMs = pageLoadTimeoutMs();
   constructor(private readonly window: BrowserWindow, private readonly accounts: AccountManager,
     private readonly sessions: SessionManager, private readonly changed: () => void, private readonly conversations: ConversationManager,
     private readonly shortcuts: ShortcutSettings, private readonly notifications: ConversationNotifications) {
@@ -252,20 +261,42 @@ export class BrowserRuntime {
     bindShortcuts(view.webContents, this.window, this.shortcuts);
     this.secure(view.webContents, id, account.partition);
     const update = () => { if (this.views.get(id) === view && view.webContents && !view.webContents.isDestroyed()) { this.layout(); this.changed(); } };
-    view.webContents.on('did-start-loading', () => { owner.hibernationReady = false; this.errors.delete(id); update(); });
-    view.webContents.on('did-stop-loading', () => { owner.title = view.webContents?.getTitle() || owner.title; this.saveTabs(owner.accountId); update(); });
+    const clearLoadTimer = () => {
+      if (this.views.get(id) !== view) return;
+      const timer = this.loadTimers.get(id);
+      if (timer) clearTimeout(timer);
+      this.loadTimers.delete(id);
+    };
+    view.webContents.on('did-start-loading', () => {
+      if (this.views.get(id) !== view) return;
+      owner.hibernationReady = false; this.errors.delete(id);
+      clearLoadTimer();
+      this.loadTimers.set(id, setTimeout(() => {
+        if (this.views.get(id) !== view || !view.webContents || view.webContents.isDestroyed() || !view.webContents.isLoading()) return;
+        this.errors.set(id, PAGE_LOAD_TIMEOUT_ERROR);
+        update();
+      }, this.loadTimeoutMs));
+      update();
+    });
+    view.webContents.on('did-stop-loading', () => {
+      if (this.views.get(id) !== view) return;
+      clearLoadTimer();
+      if (this.errors.get(id) === PAGE_LOAD_TIMEOUT_ERROR) this.errors.delete(id);
+      owner.title = view.webContents?.getTitle() || owner.title; this.saveTabs(owner.accountId); update();
+    });
     view.webContents.on('page-title-updated', (_event, title) => { owner.title = title || owner.title; this.saveTabs(owner.accountId); update(); });
     const save = (url: string) => { if (!this.closing && this.views.get(id) === view && isChatUrl(url)) this.savePage(id, url); update(); };
     view.webContents.on('did-navigate', (_event, url) => save(url));
     view.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => { if (isMainFrame) save(url); });
     view.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
-      if (isMainFrame && code !== -3) { this.errors.set(id, `${description} (${code})`); update(); }
+      if (this.views.get(id) === view && isMainFrame && code !== -3) { clearLoadTimer(); this.errors.set(id, `${description} (${code})`); update(); }
     });
     view.webContents.on('render-process-gone', (_event, details) => {
       if (this.views.get(id) === view) this.errors.set(id, `Page stopped: ${details.reason}. Reload to continue.`);
       update();
     });
     view.webContents.once('destroyed', () => {
+      clearLoadTimer();
       // Chromium is still dispatching destruction here. Mutating the native
       // view tree before that dispatch finishes can stall the main process.
       setImmediate(() => {
@@ -520,7 +551,6 @@ export class BrowserRuntime {
   async newConversation(accountId: string): Promise<void> {
     const id = this.createView(accountId, HOME_URL);
     this.activate(accountId, id);
-    await this.waitUntilLoaded(id);
   }
   control(accountId: string, action: string): void {
     const id = this.pageId(accountId); if (!id) return;
@@ -531,7 +561,12 @@ export class BrowserRuntime {
       return;
     }
     const contents = this.openView(id).webContents;
-    if (action === 'reload') contents.reload();
+    if (action === 'reload') {
+      if (contents.isLoading() || this.errors.has(id) || !isChatUrl(contents.getURL())) {
+        contents.stop();
+        void contents.loadURL(this.owners.get(id)?.url ?? HOME_URL).catch(() => { /* did-fail-load reports the error. */ });
+      } else contents.reload();
+    }
     else if (action === 'back' && contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
     else if (action === 'forward' && contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward();
     else if (!['back', 'forward'].includes(action)) throw new AppError('Unknown browser action');
@@ -562,6 +597,9 @@ export class BrowserRuntime {
     if (owner) this.saveTabs(owner.accountId);
   }
   private destroyView(id: string, detach = true): void {
+    const loadTimer = this.loadTimers.get(id);
+    if (loadTimer) clearTimeout(loadTimer);
+    this.loadTimers.delete(id);
     this.previews.delete(id);
     this.previewAwaken.delete(id);
     this.previewStale.delete(id);

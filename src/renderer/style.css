@@ -281,6 +281,7 @@ pre { background: #f0f4e9; border: 1px solid #e2e9d7; border-radius: 8px; paddin
 .task-result { max-height: 45vh; }
 .empty-state, .standalone { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 18px; padding: 30px; }
 .empty-state { position: absolute; inset: calc(var(--header-height) + var(--toolbar-height)) 0 0; }
+.browser-slot .browser-recovery { inset: 0; background: #fff; }
 .empty-state p { color: #7b8a72; font-size: 13px; max-width: 90%; overflow-wrap: anywhere; }
 .empty-icon { display: grid; place-items: center; width: 70px; height: 70px; background: #eaf0e0; border-radius: 19px; color: #829969; }
 .standalone { height: 100vh; }

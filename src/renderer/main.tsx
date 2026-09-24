@@ -253,7 +253,14 @@ function App() {
         </div>
       </div>}
       {tab === 'workspace' && active && <div className={`workspace-body ${queueOpen ? 'with-queue' : ''}`}>
-        <div className="browser-slot" ref={browserSlot}>{pageLocked && <AgentPreview key={activePage?.id} bridge={bridge} accountId={active.id} pageId={activePage?.id} />}</div>
+        <div className="browser-slot" ref={browserSlot}>
+          {pageLocked && <AgentPreview key={activePage?.id} bridge={bridge} accountId={active.id} pageId={activePage?.id} />}
+          {activePage && !pageLocked && (!state?.page || state.page.error) && <section className="empty-state browser-recovery">
+            <div className="empty-icon"><Icon name="refresh" size={32} /></div><h2>{state?.page ? '页面暂时无法加载' : '网页画面中断'}</h2>
+            <p>{state?.page?.error ? friendlyError(state.page.error) : '正在恢复当前会话的网页画面。'}</p>
+            <button className="primary" onClick={() => void action('browser.control', { accountId: active.id, action: 'reload' })}>恢复页面</button>
+          </section>}
+        </div>
         {queueOpen && activePage && state && <ConversationQueue key={`${active.id}:${activePage.id}`} account={active} page={activePage} state={state} bridge={bridge}
           drafts={queueDrafts} changeDraft={(key, text) => setQueueDrafts(values => ({ ...values, [key]: text }))}
           clearDraft={(key, text) => setQueueDrafts(values => values[key] === text ? { ...values, [key]: '' } : values)} refresh={refresh} close={closeQueue}
@@ -267,10 +274,6 @@ function App() {
         <button className="primary welcome-cta" disabled={!state} onClick={() => openModal({ kind: 'create' })}><Icon name="plus" size={18} /> 创建第一个账号 <Icon name="arrow" size={17} /></button>
         <span className="welcome-caption">支持添加多个账号，登录状态相互独立。</span></div>
         <div className="feature-row"><div><Icon name="shield" size={21} /><span><strong>独立登录</strong><small>登录与数据互不干扰</small></span></div><div><Icon name="refresh" size={21} /><span><strong>继续上次对话</strong><small>重新打开时恢复上次页面</small></span></div><div><Icon name="terminal" size={21} /><span><strong>本地接口</strong><small>支持 HTTP 和命令行</small></span></div></div>
-      </section>}
-      {tab === 'workspace' && active && !pageLocked && state?.page?.error && <section className="empty-state">
-        <div className="empty-icon"><Icon name="refresh" size={32} /></div><h2>页面暂时无法加载</h2><p>{friendlyError(state.page.error)}</p><p>请检查网络连接，然后重新加载。</p>
-        <button className="primary" onClick={() => void action('browser.control', { accountId: active.id, action: 'reload' })}>重新加载</button>
       </section>}
       {tab === 'tasks' && <TaskCenter state={state} busy={busy} action={action} inspect={task => openModal({ kind: 'task', task })} takeover={takeover} agentPrompt={target => openModal({ kind: 'agent', target })}
         openQueue={(accountId, conversation) => void action('conversations.open', { accountId, conversation }, () => { setTab('workspace'); setQueueOpen(true); })} />}

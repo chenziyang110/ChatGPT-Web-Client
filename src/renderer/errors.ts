@@ -23,7 +23,8 @@ export function friendlyError(value: unknown): string {
     [/DRAFT_CONFLICT|DRAFT_CHANGED/, '网页中有未发送的草稿，请先处理草稿。'],
     [/timed out|timeout|ETIMEDOUT/i, '操作超时，请检查网络后重试。'],
     [/ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|Failed to fetch|fetch failed|ECONNREFUSED/i, '暂时无法连接，请检查网络和客户端是否正常运行。'],
-    [/Runtime is stopping|Object has been destroyed/, '客户端正在关闭，请重新打开后再试。'],
+    [/Runtime is stopping/, '客户端正在关闭，请重新打开后再试。'],
+    [/Object has been destroyed/, '网页画面已中断，请点击“恢复页面”或重新选择会话。'],
   ];
   const match = messages.find(([pattern]) => pattern.test(message));
   if (match) return match[1];

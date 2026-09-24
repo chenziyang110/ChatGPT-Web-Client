@@ -296,6 +296,33 @@ test('pending edits and reorder are versioned, isolated, durable and determine a
   } finally { await gateway.stop(); db.close(); }
 });
 
+test('large local queues have no 30-item cap and move adjacent items without sending the whole queue', async () => {
+  const db = new Database(':memory:');
+  let gateway = new AgentGateway(db, async () => {}, () => {});
+  try {
+    gateway.pause('a', 'one'); gateway.pause('b', 'two');
+    const firstQueue = Array.from({ length: 205 }, (_, index) =>
+      gateway.createTask('a', prompt(`a-${index}`), { conversationId: 'one', background: true }));
+    const secondQueue = Array.from({ length: 35 }, (_, index) =>
+      gateway.createTask('b', prompt(`b-${index}`), { conversationId: 'two', background: true }));
+    assert.equal(gateway.listTasks().filter(task => task.status === 'pending').length, 240);
+    assert.equal(gateway.get(firstQueue[0].id).status, 'pending', 'History cleanup must preserve old pending items');
+    const last = firstQueue.at(-1)!; const neighbor = firstQueue.at(-2)!;
+    gateway.moveQueued('a', 'one', last.id, last.updatedAt, neighbor.id, neighbor.updatedAt);
+    assert.deepEqual(orderedTasks(gateway.listTasks().filter(task => task.accountId === 'a')).slice(-2).map(task => task.id),
+      [last.id, neighbor.id]);
+    assert.throws(() => gateway.moveQueued('a', 'one', last.id, last.updatedAt, neighbor.id, neighbor.updatedAt), /QUEUE_CHANGED/);
+    assert.throws(() => gateway.moveQueued('a', 'one', firstQueue[0].id, firstQueue[0].updatedAt,
+      secondQueue[0].id, secondQueue[0].updatedAt), /不属于/);
+    const reversed = orderedTasks(gateway.listTasks().filter(task => task.accountId === 'a')).reverse();
+    gateway.reorder('a', 'one', reversed.map(task => ({ id: task.id, updatedAt: task.updatedAt })));
+    await gateway.stop();
+    gateway = new AgentGateway(db, async () => {}, () => {});
+    assert.equal(orderedTasks(gateway.listTasks().filter(task => task.accountId === 'a'))[0].id, reversed[0].id);
+    assert.equal(gateway.get(secondQueue[0].id).status, 'pending');
+  } finally { await gateway.stop(); db.close(); }
+});
+
 test('waiting replies release execution capacity across accounts but keep each conversation serial', async () => {
   const db = new Database(':memory:'); const replies = new Map<string, ReturnType<typeof gate>>(); const sent: string[] = [];
   const gateway = new AgentGateway(db, async (_id, input, _signal, context) => {

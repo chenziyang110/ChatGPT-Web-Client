@@ -125,6 +125,8 @@ test('older automatic review pause is removed for background conversation queue 
     const next = gateway.createTask('a', prompt('next'), { conversationId: 'one', background: true });
     db.write('tasks', first.id, { ...first, status: 'uncertain', sendIntentAt: Date.now(), attention: undefined, error: 'generating timed out' });
     db.write('account_queues', 'a:conversation:one', { accountId: 'a', conversationId: 'one', paused: true, reason: '发送或回复结果不确定，请核对会话', control: 'agent' });
+    await gateway.stop();
+    assert.equal(db.read<{ reason?: string }>('account_queues', 'a:conversation:one')?.reason, '发送或回复结果不确定，请核对会话');
     gateway = new AgentGateway(db, async (_id, input) => { if (input.type === 'prompt') sent.push(input.prompt); }, () => {});
     assert.equal(gateway.get(first.id).status, 'failed');
     assert.equal(gateway.queues().find(queue => queue.conversationId === 'one')?.paused, false);
@@ -136,8 +138,41 @@ test('older automatic review pause is removed for background conversation queue 
     gateway.pause('a', 'two');
     const held = gateway.createTask('a', prompt('held'), { conversationId: 'two', background: true });
     db.write('tasks', held.id, { ...held, status: 'uncertain', sendIntentAt: Date.now(), error: 'generating timed out' });
+    await gateway.stop();
     gateway = new AgentGateway(db, async (_id, input) => { if (input.type === 'prompt') sent.push(input.prompt); }, () => {});
     assert.equal(gateway.get(held.id).status, 'uncertain');
+    assert.equal(gateway.queues().find(queue => queue.conversationId === 'two')?.paused, true);
+  } finally { await gateway.stop(); db.close(); }
+});
+
+test('upgrading an older client restores a sent queue after shutdown replaced its review reason', async () => {
+  const db = new Database(':memory:'); const sent: string[] = [];
+  let gateway = new AgentGateway(db, async (_id, input) => { if (input.type === 'prompt') sent.push(input.prompt); }, () => {});
+  try {
+    gateway.pause('a', 'one');
+    const first = gateway.createTask('a', prompt('first'), { conversationId: 'one', background: true });
+    const next = gateway.createTask('a', prompt('next'), { conversationId: 'one', background: true });
+    db.write('tasks', first.id, { ...first, status: 'uncertain', sendIntentAt: Date.now(), error: 'generating timed out' });
+    // v1.4.7 overwrote the automatic review reason when pending items were
+    // persisted during the in-app update shutdown.
+    db.write('account_queues', 'a:conversation:one', { accountId: 'a', conversationId: 'one', paused: true,
+      reason: '应用关闭，队列已暂停', control: 'agent' });
+    await gateway.stop();
+    gateway = new AgentGateway(db, async (_id, input) => { if (input.type === 'prompt') sent.push(input.prompt); }, () => {});
+    await until(() => gateway.get(next.id).status === 'done');
+    assert.equal(gateway.get(first.id).status, 'failed');
+    assert.equal(gateway.queues().find(queue => queue.conversationId === 'one')?.paused, false);
+    assert.deepEqual(sent, ['next']);
+
+    gateway.pause('a', 'two');
+    const cancelled = gateway.createTask('a', prompt('cancelled'), { conversationId: 'two', background: true });
+    db.write('tasks', cancelled.id, { ...cancelled, status: 'uncertain', sendIntentAt: Date.now(),
+      error: 'Local waiting cancelled; the page may still be generating. This message will not be resent.' });
+    db.write('account_queues', 'a:conversation:two', { accountId: 'a', conversationId: 'two', paused: true,
+      reason: '应用关闭，队列已暂停', control: 'agent' });
+    await gateway.stop();
+    gateway = new AgentGateway(db, async (_id, input) => { if (input.type === 'prompt') sent.push(input.prompt); }, () => {});
+    assert.equal(gateway.get(cancelled.id).status, 'uncertain');
     assert.equal(gateway.queues().find(queue => queue.conversationId === 'two')?.paused, true);
   } finally { await gateway.stop(); db.close(); }
 });

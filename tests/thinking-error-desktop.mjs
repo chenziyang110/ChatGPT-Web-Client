@@ -40,7 +40,7 @@ try {
   const afterManual = await rpc('tasks.create', { accountId: account.id, conversation: manualPage.conversationId,
     input: { type: 'prompt', prompt: 'After manual failure', submit: true }, background: true });
   await until(async () => (await rpc('tasks.get', { id: afterManual.id })).phase === 'waiting_idle');
-  await script(account, manualPage.url, 'window.fixtureHold = false; window.fixtureFailThinking()');
+  await script(account, manualPage.url, 'window.fixtureHold = false; window.fixtureFailThinking(true)');
   await until(async () => (await rpc('tasks.get', { id: afterManual.id })).status === 'done');
   assert.equal(await script(account, manualPage.url, 'window.fixtureSendCount'), 2);
   assert.equal((await rpc('queues.status')).find(item => item.conversationId === manualPage.conversationId)?.paused, false);

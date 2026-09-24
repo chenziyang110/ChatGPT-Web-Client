@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-web-client",
-  "version": "1.4.12",
+  "version": "1.4.13",
   "description": "Local-first desktop AI workspace with isolated accounts and an agent gateway",
   "private": true,
   "type": "module",

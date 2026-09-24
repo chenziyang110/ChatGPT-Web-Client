@@ -135,6 +135,12 @@ try {
   });
   assert.match((await execute({ kind: 'inspect' })).error, /无法思考/);
   await page.evaluate(() => {
+    [...document.querySelectorAll('main > button[aria-expanded]')].at(-1).remove();
+    const label = document.createElement('div'); label.innerHTML = '<span>无法思考</span><div>来源</div>';
+    document.querySelector('main').append(label);
+  });
+  assert.equal((await execute({ kind: 'inspect' })).failure, 'thinking', 'A plain failed reasoning label ends the turn');
+  await page.evaluate(() => {
     const stop = document.createElement('button'); stop.dataset.testid = 'stop-button'; document.querySelector('main').append(stop);
   });
   assert.equal((await execute({ kind: 'inspect' })).error, undefined, 'A visible stop control means the reply is still active');

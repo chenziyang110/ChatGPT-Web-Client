@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Database } from '../src/core/storage/Database';
 import { AgentGateway, QueuePausedError, ReportedReplyError } from '../src/core/agent/AgentGateway';
+import { taskAttention } from '../src/core/agent/TaskAttention';
 import { AccountManager } from '../src/core/account/AccountManager';
 import { ConversationManager } from '../src/core/conversation/ConversationManager';
 import { Workspace } from '../src/core/Workspace';
@@ -113,6 +114,60 @@ test('conversation-panel queue advances after an unconfirmed send times out, but
     assert.match(gateway.get(first.id).error ?? '', /generating timed out/);
     assert.equal(gateway.get(first.id).attention, undefined);
     assert.deepEqual(sent, ['first', 'next']);
+  } finally { await gateway.stop(); db.close(); }
+});
+
+test('an unsent page-operation failure ends only that queued item and sends the next', async () => {
+  const db = new Database(':memory:'); const sent: string[] = [];
+  const gateway = new AgentGateway(db, async (_id, input, _signal, context) => {
+    if (input.type !== 'prompt') return;
+    if (input.prompt === 'broken' || input.prompt === 'agent broken') throw new Error('PAGE_SCRIPT_FAILED [stage=focus_editor; error=TypeError]');
+    if (input.prompt === 'draft') throw new Error('DRAFT_CONFLICT: existing draft');
+    context.intent(); context.submitted(input.prompt); sent.push(input.prompt);
+  }, () => {});
+  try {
+    const broken = gateway.createTask('a', prompt('broken'), { conversationId: 'one', background: true });
+    const next = gateway.createTask('a', prompt('next'), { conversationId: 'one', background: true });
+    const agent = gateway.createTask('a', prompt('agent broken'), { conversationId: 'two' });
+    const draft = gateway.createTask('a', prompt('draft'), { conversationId: 'three', background: true });
+    await until(() => gateway.get(next.id).status === 'done' && gateway.get(agent.id).status === 'waiting_user' &&
+      gateway.get(draft.id).status === 'waiting_user');
+    assert.equal(gateway.get(broken.id).status, 'failed');
+    assert.equal(gateway.get(broken.id).phase, 'completed');
+    assert.equal(gateway.get(broken.id).sendIntentAt, undefined);
+    assert.equal(gateway.get(broken.id).attention, undefined);
+    assert.deepEqual(sent, ['next']);
+    assert.equal(gateway.queues().find(queue => queue.conversationId === 'one')?.paused, false);
+    assert.equal(gateway.queues().find(queue => queue.conversationId === 'two')?.paused, true);
+    assert.equal(gateway.queues().find(queue => queue.conversationId === 'three')?.paused, true);
+  } finally { await gateway.stop(); db.close(); }
+});
+
+test('upgrading releases an older auto-blocked page failure without undoing human takeover', async () => {
+  const db = new Database(':memory:'); const sent: string[] = [];
+  let gateway = new AgentGateway(db, async (_id, input) => { if (input.type === 'prompt') sent.push(input.prompt); }, () => {});
+  try {
+    gateway.pause('a', 'one');
+    const broken = gateway.createTask('a', prompt('broken'), { conversationId: 'one', background: true });
+    const next = gateway.createTask('a', prompt('next'), { conversationId: 'one', background: true });
+    gateway.pause('a', 'two');
+    const human = gateway.createTask('a', prompt('human'), { conversationId: 'two', background: true });
+    await gateway.stop();
+    const error = 'PAGE_SCRIPT_FAILED [stage=focus_editor; error=TypeError]';
+    db.write('tasks', broken.id, { ...broken, status: 'waiting_user', attention: taskAttention(error), error });
+    db.write('account_queues', 'a:conversation:one', { accountId: 'a', conversationId: 'one', paused: true,
+      reason: '任务需要处理，请检查错误后继续', control: 'agent' });
+    db.write('tasks', human.id, { ...human, status: 'waiting_user', attention: taskAttention(error), error });
+    db.write('account_queues', 'a:conversation:two', { accountId: 'a', conversationId: 'two', paused: true,
+      reason: '任务需要处理，请检查错误后继续', control: 'human' });
+    gateway = new AgentGateway(db, async (_id, input) => { if (input.type === 'prompt') sent.push(input.prompt); }, () => {});
+    await until(() => gateway.get(next.id).status === 'done');
+    assert.equal(gateway.get(broken.id).status, 'failed');
+    assert.equal(gateway.get(broken.id).attention, undefined);
+    assert.deepEqual(sent, ['next']);
+    assert.equal(gateway.queues().find(queue => queue.conversationId === 'one')?.paused, false);
+    assert.equal(gateway.get(human.id).status, 'waiting_user');
+    assert.equal(gateway.queues().find(queue => queue.conversationId === 'two')?.paused, true);
   } finally { await gateway.stop(); db.close(); }
 });
 

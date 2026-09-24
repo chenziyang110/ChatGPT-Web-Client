@@ -39,6 +39,7 @@ try {
   const original = (await rpc('workspace.status')).pages.find(item => item.conversationId === first.conversationId);
   assert.ok(original?.url.includes('/c/'));
   await rpc('browser.newConversation', { accountId: account.id });
+  await until(async () => (await rpc('browser.inspect', { accountId: account.id })).readiness === 'ready');
   const fresh = (await rpc('workspace.status')).page;
   assert.notEqual(fresh.id, original.id);
   assert.equal(fresh.url, 'https://chatgpt.com/');

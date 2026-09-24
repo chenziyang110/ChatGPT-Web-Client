@@ -59,7 +59,7 @@ try {
   assert.match(failed.error, /无法思考/);
   assert.equal(await script(account, queuedPage.url, 'window.fixtureSendCount'), 2, 'The failed turn is not resent');
   assert.equal((await rpc('queues.status')).find(item => item.conversationId === first.conversationId)?.paused, false);
-  console.log('Thinking failure desktop passed: manual and queued failures finish, later messages send once, and other reply errors still pause.');
+  console.log('Thinking failure desktop passed: manual and queued failures finish and later messages send once.');
 } finally {
   await desktop?.close();
   const target = path.resolve(directory);

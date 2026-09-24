@@ -120,14 +120,18 @@ export class AgentGateway {
       }
       this.setQueue(queue.accountId, false, undefined, false);
     }
-    // Upgrade queues stranded by older releases' automatic review gate. Only
-    // clear that exact error pause, never an explicit pause or human takeover.
+    // Older clients replaced an automatic review pause with the generic
+    // shutdown reason while installing an update. Recover the sent background
+    // item as well, but leave unsent and human-controlled queues paused.
     for (const queue of db.records<AccountQueue>('account_queues')) {
       if (!queue.paused || !queue.conversationId || queue.control === 'human' ||
-        !['发送或回复结果不确定，请核对会话', 'ChatGPT 回复报错，请核对后恢复后续发送'].includes(queue.reason ?? '')) continue;
+        !['发送或回复结果不确定，请核对会话', 'ChatGPT 回复报错，请核对后恢复后续发送',
+          '应用关闭，队列已暂停', '应用重启后已暂停，请核对会话再继续'].includes(queue.reason ?? '')) continue;
       const tasks = this.listTasks().filter(task => task.accountId === queue.accountId && task.conversationId === queue.conversationId);
       const interrupted = tasks.filter(task => advancesAfterInterruption(task) && task.sendIntentAt &&
-        (task.status === 'uncertain' && !task.resolvedAt || task.status === 'failed' && task.phase === 'completed'));
+        (task.status === 'uncertain' && !task.resolvedAt && !['Human takeover',
+          'Local waiting cancelled; the page may still be generating. This message will not be resent.'].includes(task.error ?? '') ||
+          task.status === 'failed' && task.phase === 'completed'));
       if (!interrupted.length || tasks.some(task => task.status === 'waiting_user')) continue;
       for (const task of interrupted) if (task.status === 'uncertain') this.update(task.id,
         { status: 'failed', phase: 'completed', attention: undefined, resolvedAt: Date.now() }, false);
@@ -461,7 +465,9 @@ export class AgentGateway {
   async stop(): Promise<void> {
     this.stopped = true;
     for (const waiter of [...this.waiters]) waiter();
-    for (const task of this.listTasks()) if (['pending', 'running'].includes(task.status)) this.setQueue(task.accountId, true, '应用关闭，队列已暂停', false, task.conversationId);
+    for (const task of this.listTasks()) if (['pending', 'running'].includes(task.status) &&
+      !this.db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.paused)
+      this.setQueue(task.accountId, true, '应用关闭，队列已暂停', false, task.conversationId);
     for (const active of this.running.values()) active.controller.abort(new Error('Application is stopping'));
     await Promise.all([...this.running.values()].map(slot => slot.promise));
   }

@@ -381,7 +381,7 @@ export class ChatGPTAdapter {
       const target = conversation?.url ?? task.sendReceipt.url;
       if (replyPageUrl(this.contents.getURL(), true) === HOME_URL && target !== HOME_URL) await this.navigate(target);
       return this.awaitReply({ url: task.sendReceipt.url, title: '', readiness: 'ready', editor: true, draft: '', busy: false,
-        messages: task.sendReceipt.users }, input.prompt, task.sendReceipt.url, conversation);
+        messages: [...task.sendReceipt.users, ...(task.sendReceipt.anchor ? [task.sendReceipt.anchor] : [])] }, input.prompt, task.sendReceipt.url, conversation);
     }
     const initial = input.type !== 'snapshot' ? await this.idle() : undefined;
     let conversation = task.conversationId ? this.conversations.get(task.accountId, task.conversationId) : undefined;
@@ -433,7 +433,10 @@ export class ChatGPTAdapter {
         }
       }
       this.context.checkpoint?.();
-      this.context.intent({ url: baseline.url, users: baseline.messages.filter(message => message.role === 'user').slice(-5) });
+      const users = baseline.messages.filter(message => message.role === 'user').slice(-5);
+      const tail = baseline.messages.at(-1);
+      this.context.intent({ url: baseline.url, users, anchor: !users.length && tail?.role === 'assistant'
+        ? { id: tail.id, role: tail.role, text: '', terminal: tail.terminal } : undefined });
       if (conversation?.binding === 'new') this.conversations.markSending(task.accountId, conversation.id);
       await this.evaluate({ ...guard, kind: 'send', value });
     } catch (error) {
@@ -544,14 +547,13 @@ export class ChatGPTAdapter {
       // can advance after an acknowledged send and a stable idle page without
       // claiming that an uncorrelated visible answer belongs to that send.
       // Keep strict turn matching for foreground/API answer retrieval.
-      const virtualizedCompletion = !!task.background && acknowledged && userIndex < 0 &&
-        !page.messages.some(message => message.role === 'user') && last?.role === 'assistant' && !!last.terminal;
+      const unmountedSubmission = !!task.background && acknowledged && userIndex < 0;
       const stopped = acknowledged && !!boundUrl && page.editor && page.readiness === 'ready' && !page.busy && !page.draft.trim() &&
-        (userIndex >= 0 || virtualizedCompletion);
+        (userIndex >= 0 || unmountedSubmission);
       if (!stopped || fingerprint !== previous) since = Date.now();
       if (stopped && Date.now() - since >= COMPLETION_STABLE_MS) {
         if (finished) return { submitted: true, response: last!.text.slice(0, 64000), url: boundUrl, conversationId: conversation?.id, replyToken: replyToken(ownUser!, last!) };
-        if (virtualizedCompletion) return { submitted: true, responseUnavailable: true, completionReason: 'idle_after_submitted_turn_unmounted', url: boundUrl, conversationId: conversation?.id };
+        if (unmountedSubmission && last?.role === 'assistant' && last.terminal) return { submitted: true, responseUnavailable: true, completionReason: 'idle_after_submitted_turn_unmounted', url: boundUrl, conversationId: conversation?.id };
         throw new ReportedReplyError('ChatGPT 已停止回复，本轮未提供完整可确认的答复', true);
       }
       previous = fingerprint;

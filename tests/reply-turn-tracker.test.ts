@@ -7,6 +7,18 @@ const answer: ConversationMessage = { id: 'reply', role: 'assistant', text: 'Ans
 const history = [user('old-1'), user('old-2'), user('old-3')];
 const own = user('submitted', 'Question');
 
+test('sending after a virtualized answer tolerates remounted history without acknowledging an older identical prompt', () => {
+  const tracker = new ReplyTurnTracker([answer], 'Question');
+  const older = user('older-identical', 'Question');
+  assert.equal(tracker.read([older, answer]), undefined);
+  assert.equal(tracker.read([older, answer, own]), own);
+  assert.equal(tracker.read([own]), own);
+  assert.equal(tracker.read([older, answer, own]), own);
+  assert.throws(() => tracker.read([older, answer, user('another', 'Question')]), /identity changed/);
+  assert.throws(() => new ReplyTurnTracker([answer], 'Question').read([older, answer, own, user('extra', 'Question')]), /additional user turn/);
+  assert.equal(new ReplyTurnTracker([answer], 'Question', own.id).read([older, answer, own]), own);
+});
+
 test('restores a persisted stable submission after all older DOM history unmounts', () => {
   assert.equal(new ReplyTurnTracker(history, 'Question', own.id).read([own, answer]), own);
   assert.throws(() => new ReplyTurnTracker(history, 'Question', own.id).read([user('different', 'Question'), answer]), /CONVERSATION_CHANGED/);

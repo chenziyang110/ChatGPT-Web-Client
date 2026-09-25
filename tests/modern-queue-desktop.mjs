@@ -36,23 +36,25 @@ try {
   const ignoredNext=await add(other.id,ignored.id,'after-ignored');
   const long=await rpc('conversations.register',{accountId:other.id,url:'https://chatgpt.com/c/long'});
   const longTask=await add(other.id,long.id,'virtualized-long-reply');
+  const unmountedStop=await add(other.id,long.id,'virtualized-stopped');
   const longNext=await add(other.id,long.id,'after-long-reply');
   await until(async()=> (await rpc('tasks.get',{id:last.id})).status==='done' && (await rpc('tasks.get',{id:retryNext.id})).status==='done' && (await rpc('tasks.get',{id:ignoredNext.id})).status==='done' && (await rpc('tasks.get',{id:longNext.id})).status==='done');
   const completedLong=await rpc('tasks.get',{id:longTask.id});
   assert.equal(completedLong.status,'done');assert.equal(completedLong.result.responseUnavailable,true);
   assert.equal(completedLong.result.response,undefined);assert.equal(completedLong.attention,undefined);
+  assert.equal((await rpc('tasks.get',{id:unmountedStop.id})).sendReceipt.anchor.role,'assistant');
   for(const t of [first,last,retryTask,retryNext,ignoredTask,ignoredNext])assert.equal((await rpc('tasks.get',{id:t.id})).status,'done');
-  for(const t of [fail,interruption,stop]) {const v=await rpc('tasks.get',{id:t.id});assert.equal(v.status,'failed');assert.equal(v.attention,undefined);assert.ok(v.submittedAt);}
+  for(const t of [fail,interruption,stop,unmountedStop]) {const v=await rpc('tasks.get',{id:t.id});assert.equal(v.status,'failed');assert.equal(v.attention,undefined);assert.ok(v.submittedAt);}
   assert.equal((await rpc('tasks.get',{id:retryTask.id})).retryCount,1);
   const bound=await rpc('conversations.get',{accountId:account.id,conversation:conv.id});assert.equal(bound.url,'https://chatgpt.com/c/modern-bound');
   const contents=await desktop.evaluate(async({webContents})=>Promise.all(webContents.getAllWebContents().filter(w=>w.getURL().startsWith('https://chatgpt.com/c/')).map(async w=>({url:w.getURL(),...await w.executeJavaScript('({sent:window.sent,clicks:window.clicks})')}))));
   assert.deepEqual(contents.find(p=>p.url===bound.url).sent,['first','无法思考','interrupted','stopped','last']);
   assert.deepEqual(contents.find(p=>p.url.endsWith('/retry')).sent,['retry-head','retry-next']);
   const ignoredPage=contents.find(p=>p.url.endsWith('/ignored'));assert.deepEqual(ignoredPage.sent,['ignored-click','after-ignored']);assert.equal(ignoredPage.clicks,3);
-  const longPage=contents.find(p=>p.url.endsWith('/long'));assert.deepEqual(longPage.sent,['virtualized-long-reply','after-long-reply']);assert.equal(longPage.clicks,2);
+  const longPage=contents.find(p=>p.url.endsWith('/long'));assert.deepEqual(longPage.sent,['virtualized-long-reply','virtualized-stopped','after-long-reply']);assert.equal(longPage.clicks,3);
   assert.ok((await rpc('queues.status')).every(q=>!q.paused));
   passed = true;
-  console.log('Modern DOM queue: new-chat binding, delayed send button, ignored click recovery without duplicate, transient fill retry/FIFO, 3 terminal failures advancing, and independent accounts passed.');
+  console.log('Modern DOM queue: new-chat binding, delayed send button, ignored click recovery without duplicate, transient fill retry/FIFO, 3 terminal failures advancing, virtualized submitted turn completing without replay, and independent accounts passed.');
 } finally {
   if (!passed && rpc) console.error(JSON.stringify(await rpc('workspace.status').then(s=>s.tasks.map(t=>({prompt:t.input.prompt,status:t.status,phase:t.phase,error:t.error,retry:t.retryCount}))),null,2));
   await desktop?.close();

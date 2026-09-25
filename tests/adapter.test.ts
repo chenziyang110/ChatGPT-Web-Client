@@ -158,3 +158,55 @@ test('recovered send receipt reads the original reply without filling or clickin
     assert.equal(result.response,'Original reply');assert.ok(operations.length>1);
   } finally {db.close()}
 });
+
+test('queue recovers an acknowledged long reply whose submitted user was virtualized away', async () => {
+  const db = new Database(':memory:'); const conversations = new Conversations(db);
+  const url = 'https://chatgpt.com/c/virtualized'; const conversation = conversations.register('account', url);
+  const controller = new AbortController();
+  const task: AgentTask = { id: 'virtualized', accountId: 'account', conversationId: conversation.id, background: true,
+    input: { type: 'prompt', prompt: 'Long question', submit: true }, status: 'running', createdAt: 1, updatedAt: 1,
+    sendIntentAt: 1, submittedAt: 2, submittedMessageId: 'sent-user', sendReceipt: { url, users: [] } };
+  const contents = { isLoading: () => false, getURL: () => url, isDestroyed: () => false,
+    executeJavaScript: async (script: string) => {
+      const operation = JSON.parse(script.slice(script.lastIndexOf(')(') + 2, -1));
+      assert.equal(operation.kind, 'inspect', 'an acknowledged prompt must never be filled or sent again');
+      return pageResult({ url, title: 'Long reply', readiness: 'ready', editor: true, draft: '', busy: false,
+        messages: [{ id: 'visible-answer', role: 'assistant', text: 'Visible answer', terminal: true }] });
+    } } as unknown as WebContents;
+  const context: ExecutionContext = { task: () => task, stage: () => {}, intent: () => assert.fail('resend'), submitted: () => assert.fail('already acknowledged') };
+  const timer = setTimeout(() => controller.abort(new Error('virtualized reply remained stuck')), 15000);
+  try {
+    const result = await new ChatGPTAdapter(contents, controller.signal, context, conversations).execute(task.input) as Record<string, unknown>;
+    assert.equal(result.submitted, true); assert.equal(result.responseUnavailable, true);
+    assert.equal(result.url, url); assert.equal(result.response, undefined); assert.equal(result.replyToken, undefined);
+  } finally { clearTimeout(timer); db.close(); }
+});
+
+test('missing submitted DOM is not completion during generation, loading, draft input, or an unacknowledged send', async () => {
+  await Promise.all([
+    { busy: true }, { readiness: 'loading' }, { editor: false }, { draft: 'New unsent draft' },
+    { unacknowledged: true }, { changedTarget: true }, { additionalUser: true },
+  ].map(async variant => {
+    const db = new Database(':memory:'); const conversations = new Conversations(db);
+    const url = 'https://chatgpt.com/c/virtualized'; const conversation = conversations.register('account', url);
+    const controller = new AbortController();
+    const task: AgentTask = { id: 'virtualized', accountId: 'account', conversationId: conversation.id, background: true,
+      input: { type: 'prompt', prompt: 'Long question', submit: true }, status: 'running', createdAt: 1, updatedAt: 1,
+      sendIntentAt: 1, submittedAt: variant.unacknowledged ? undefined : 2, submittedMessageId: 'sent-user', sendReceipt: { url, users: [] } };
+    const contents = { isLoading: () => false, getURL: () => url, isDestroyed: () => false,
+      executeJavaScript: async (script: string) => {
+        const operation = JSON.parse(script.slice(script.lastIndexOf(')(') + 2, -1));
+        assert.equal(operation.kind, 'inspect');
+        return pageResult({ url: variant.changedTarget ? 'https://chatgpt.com/c/other' : url,
+          title: 'Long reply', readiness: 'ready', editor: true, draft: '', busy: false, ...variant,
+          messages: [...(variant.additionalUser ? [{ id: 'another-user', role: 'user', text: 'Another prompt', terminal: false }] : []),
+            { id: 'visible-answer', role: 'assistant', text: 'Visible answer', terminal: true }] });
+      } } as unknown as WebContents;
+    const context: ExecutionContext = { task: () => task, stage: () => {}, intent: () => assert.fail('resend'), submitted: () => assert.fail('missing user') };
+    const timer = setTimeout(() => controller.abort(new Error('expected still waiting')), 7000);
+    try {
+      await assert.rejects(new ChatGPTAdapter(contents, controller.signal, context, conversations).execute(task.input),
+        variant.changedTarget ? /TARGET_CHANGED/ : variant.additionalUser ? /CONVERSATION_CHANGED/ : /expected still waiting/);
+    } finally { clearTimeout(timer); db.close(); }
+  }));
+});

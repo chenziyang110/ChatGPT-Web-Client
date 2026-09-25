@@ -26,6 +26,8 @@ export interface AgentTask {
   conversationId?: string; targetUrl?: string; phase?: TaskPhase; seq?: number; queueOrder?: number; background?: boolean;
   idempotencyKey?: string; requestHash?: string; sendIntentAt?: number; submittedAt?: number; resolvedAt?: number;
   submittedMessageId?: string;
+  retryCount?: number; nextAttemptAt?: number;
+  sendReceipt?: { url: string; users: Array<{ id: string; role: string; text: string; terminal: boolean }> };
   progress?: { response: string; url?: string };
   replyTimeoutMs?: number; prepareTimeoutMs?: number; idleTimeoutMs?: number;
   createdAt: number; updatedAt: number; result?: unknown; error?: string;

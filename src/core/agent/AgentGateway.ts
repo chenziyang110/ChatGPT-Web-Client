@@ -13,9 +13,9 @@ export class ReportedReplyError extends Error {
 }
 export interface ExecutionContext {
   task(): AgentTask;
-  precedingReplyError?: { messageId?: string; error: string; continueAfterInterruption?: boolean };
+  precedingReplyError?: { messageId?: string; prompt?: string; error: string; continueAfterInterruption?: boolean };
   stage(phase: TaskPhase, timeoutMs?: number): void;
-  intent(): void;
+  intent(receipt?: AgentTask['sendReceipt']): void;
   submitted(messageId?: string): void;
   progress?(response: string, url?: string): void;
   checkpoint?(): void;
@@ -61,6 +61,7 @@ export class AgentGateway {
   private readonly executionWaiters = new Map<string, () => void>();
   private stopped = false;
   private scheduled = false;
+  private retryTimer?: ReturnType<typeof setTimeout>;
   private readonly dispatched = new Map<string, number>();
   private dispatchSequence = 0;
   private readonly waiters = new Set<(id?: string) => void>();
@@ -134,21 +135,31 @@ export class AgentGateway {
           task.status === 'failed' && task.phase === 'completed'));
       if (!interrupted.length || tasks.some(task => task.status === 'waiting_user')) continue;
       for (const task of interrupted) if (task.status === 'uncertain') this.update(task.id,
-        { status: 'failed', phase: 'completed', attention: undefined, resolvedAt: Date.now() }, false);
+        task.sendReceipt ? { status: 'pending', phase: 'generating', attention: undefined, nextAttemptAt: undefined }
+          : { status: 'failed', phase: 'completed', attention: undefined, resolvedAt: Date.now() }, false);
       this.setQueue(queue.accountId, false, undefined, false, queue.conversationId);
     }
-    // Older clients left conversation-panel queues waiting for a choice when
-    // ChatGPT's page could not be operated before send intent. That item was
-    // never sent, so finish it and let the following queued message run.
+    // Resume the SAME unsent item after older clients automatically paused it.
+    // A page operation failure is not a completed conversation turn.
     for (const queue of db.records<AccountQueue>('account_queues')) {
       if (!queue.paused || !queue.conversationId || queue.control === 'human' ||
         queue.reason !== '任务需要处理，请检查错误后继续') continue;
       const tasks = this.listTasks().filter(task => task.accountId === queue.accountId && task.conversationId === queue.conversationId);
       const pageFailures = tasks.filter(task => task.status === 'waiting_user' && !task.sendIntentAt &&
         advancesAfterInterruption(task) && task.attention?.kind === 'page');
-      for (const task of pageFailures) this.update(task.id, { status: 'failed', phase: 'completed', attention: undefined }, false);
+      for (const task of pageFailures) this.update(task.id, { status: 'pending', phase: 'queued', attention: undefined, nextAttemptAt: undefined }, false);
       if (pageFailures.length && !tasks.some(task => task.status === 'uncertain' && !task.resolvedAt ||
         task.status === 'waiting_user' && !pageFailures.some(failed => failed.id === task.id)))
+        this.setQueue(queue.accountId, false, undefined, false, queue.conversationId);
+    }
+    // An automatic shutdown pause must not strand an entirely unsent queue.
+    // Explicit user pauses, takeover and non-queue agent operations stay paused.
+    for (const queue of db.records<AccountQueue>('account_queues')) {
+      if (!queue.paused || !queue.conversationId || queue.control === 'human' ||
+        !['应用关闭，队列已暂停', '应用重启后已暂停，请核对会话再继续'].includes(queue.reason ?? '')) continue;
+      const active = this.listTasks().filter(task => task.accountId === queue.accountId && task.conversationId === queue.conversationId &&
+        (['pending', 'waiting_user'].includes(task.status) || task.status === 'uncertain' && !task.resolvedAt));
+      if (active.length && active.every(task => task.status === 'pending' && !task.sendIntentAt && advancesAfterInterruption(task)))
         this.setQueue(queue.accountId, false, undefined, false, queue.conversationId);
     }
     this.schedule();
@@ -363,7 +374,9 @@ export class AgentGateway {
       this.setQueue(task.accountId, true, '消息可能已发送，请核对后继续', true, task.conversationId);
       return this.update(id, { status: 'uncertain', attention: taskAttention('Cancelled after send', true), error: 'Local waiting cancelled; the page may still be generating. This message will not be resent.' });
     }
-    return this.update(id, { status: 'cancelled', attention: undefined, error: 'Cancelled before send intent' });
+    const cancelled = this.update(id, { status: 'cancelled', attention: undefined, error: 'Cancelled before send intent' });
+    this.schedule();
+    return cancelled;
   }
   hasActiveTasks(accountId: string): boolean {
     return this.isRunning(accountId) || this.listTasks().some(task => task.accountId === accountId && (['pending', 'running', 'blocked', 'waiting_user'].includes(task.status) || (task.status === 'uncertain' && !task.resolvedAt)));
@@ -412,14 +425,22 @@ export class AgentGateway {
     });
   }
   private pump(): void {
+    clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
     while (!this.stopped && this.executing.size < this.concurrency) {
       // Resume ready pages before opening more pages. Cancelled or paused
       // waiters are removed by their abort listener before capacity is reused.
       const ready = this.executionWaiters.entries().next().value;
       if (ready) { this.executionWaiters.delete(ready[0]); ready[1](); continue; }
       const tasks = this.listTasks();
-      const pending = orderedTasks(tasks).filter(task => task.status === 'pending' && !this.running.has(queueKey(task.accountId, task.conversationId)) && !this.db.read<AccountQueue>('account_queues', task.accountId)?.paused && !this.db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.paused &&
+      const heads = orderedTasks(tasks).filter(task => task.status === 'pending').filter((task, index, all) =>
+        all.findIndex(other => queueKey(other.accountId, other.conversationId) === queueKey(task.accountId, task.conversationId)) === index);
+      const eligible = heads.filter(task => !this.running.has(queueKey(task.accountId, task.conversationId)) && !this.db.read<AccountQueue>('account_queues', task.accountId)?.paused && !this.db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.paused &&
         !tasks.some(other => queueKey(other.accountId, other.conversationId) === queueKey(task.accountId, task.conversationId) && (other.status === 'waiting_user' || other.status === 'uncertain' && !other.resolvedAt)));
+      const pending = eligible.filter(task => !task.nextAttemptAt || task.nextAttemptAt <= Date.now());
+      const nextRetry = Math.min(...eligible.filter(task => task.nextAttemptAt && task.nextAttemptAt > Date.now()).map(task => task.nextAttemptAt!));
+      clearTimeout(this.retryTimer);
+      if (Number.isFinite(nextRetry)) this.retryTimer = setTimeout(() => this.schedule(), Math.max(1, nextRetry - Date.now()));
       const accounts = [...new Set(pending.map(task => task.accountId))];
       if (!accounts.length) return;
       const nextAccount = accounts.sort((a, b) => (this.dispatched.get(a) ?? 0) - (this.dispatched.get(b) ?? 0))[0];
@@ -442,6 +463,7 @@ export class AgentGateway {
     const precedingReplyError = predecessor?.status === 'failed' && predecessor.phase === 'completed' && predecessor.sendIntentAt && predecessor.error &&
       (predecessor.submittedMessageId || advancesAfterInterruption(predecessor))
       ? { messageId: predecessor.submittedMessageId, error: predecessor.error,
+        prompt: predecessor.input.type === 'prompt' ? predecessor.input.prompt : undefined,
         continueAfterInterruption: advancesAfterInterruption(predecessor) } : undefined;
     const stage = (phase: TaskPhase, timeoutMs?: number) => {
       controller.signal.throwIfAborted();
@@ -459,7 +481,7 @@ export class AgentGateway {
       precedingReplyError,
       releaseExecution: () => this.releaseExecution(task.id),
       acquireExecution: () => this.acquireExecution(task.id, controller.signal),
-      intent: () => { checkpoint(); this.update(task.id, { phase: 'send_intent', sendIntentAt: Date.now() }); },
+      intent: receipt => { checkpoint(); this.update(task.id, { phase: 'send_intent', sendIntentAt: Date.now(), sendReceipt: receipt }); },
       submitted: messageId => {
         controller.signal.throwIfAborted();
         this.update(task.id, { phase: 'submitted', submittedAt: Date.now(), submittedMessageId: messageId });
@@ -472,7 +494,7 @@ export class AgentGateway {
         if (current?.response !== progress.response || current?.url !== url) this.update(task.id, { progress });
       }
     };
-    this.update(task.id, { status: 'running', error: undefined });
+    this.update(task.id, { status: 'running', error: undefined, nextAttemptAt: undefined });
     try {
       stage('preparing', task.prepareTimeoutMs);
       const result = await this.execute(task.accountId, task.input, controller.signal, context);
@@ -492,13 +514,22 @@ export class AgentGateway {
         }
         const uncertain = !!current.sendIntentAt;
         const message = error instanceof Error ? error.message : String(error);
+        if (uncertain && current.sendReceipt && advancesAfterInterruption(current)) {
+          const retryCount = (current.retryCount ?? 0) + 1;
+          this.update(task.id, { status: 'pending', phase: 'generating', attention: undefined, error: message,
+            retryCount, nextAttemptAt: Date.now() + Math.min(60000, 2000 * 2 ** Math.min(retryCount - 1, 5)) });
+          return;
+        }
         if (uncertain && advancesAfterInterruption(current)) {
           this.update(task.id, { status: 'failed', phase: 'completed', attention: undefined, error: message });
           return;
         }
         const attention = taskAttention(message, uncertain);
-        if (!uncertain && advancesAfterInterruption(current) && attention.kind === 'page') {
-          this.update(task.id, { status: 'failed', phase: 'completed', attention: undefined, error: message });
+        if (!uncertain && advancesAfterInterruption(current)) {
+          const retryCount = (current.retryCount ?? 0) + 1;
+          const delay = Math.min(60000, 2000 * 2 ** Math.min(retryCount - 1, 5));
+          this.update(task.id, { status: 'pending', phase: 'queued', attention: undefined, error: message,
+            retryCount, nextAttemptAt: Date.now() + delay });
           return;
         }
         this.update(task.id, { status: uncertain ? 'uncertain' : 'waiting_user', attention, error: message });
@@ -513,6 +544,7 @@ export class AgentGateway {
   }
   async stop(): Promise<void> {
     this.stopped = true;
+    clearTimeout(this.retryTimer);
     for (const waiter of [...this.waiters]) waiter();
     for (const task of this.listTasks()) if (['pending', 'running'].includes(task.status) &&
       !this.db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.paused)

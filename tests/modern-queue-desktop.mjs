@@ -1,0 +1,54 @@
+import { _electron as electron } from 'playwright';
+import assert from 'node:assert/strict';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import path from 'node:path';
+import { modernFixture } from './modern-chatgpt-fixture.mjs';
+
+const root = path.resolve('.');
+const directory = await mkdtemp(path.join(root, '.test-modern-queue-'));
+const bootstrap = path.join(directory, 'fixture.cjs');
+await writeFile(bootstrap, `const {app,Notification}=require('electron');
+Notification.isSupported=()=>false;
+app.on('browser-window-created',(_,win)=>{win.on('show',()=>win.hide())});
+app.on('session-created',s=>s.protocol.handle('https',()=>new Response(${JSON.stringify(modernFixture)},{headers:{'Content-Type':'text/html'}})));
+require(${JSON.stringify(path.join(root,'dist-electron/main.cjs'))});`);
+const env={...process.env,WORKSPACE_USER_DATA:directory,WORKSPACE_HIDDEN_PAGE_IDLE_MS:'3600000',WORKSPACE_PAGE_IDLE_MS:'3600000'};delete env.ELECTRON_RUN_AS_NODE;delete env.WORKSPACE_DEV_URL;
+let desktop, rpc, passed = false;
+try {
+  desktop=await electron.launch({args:['--no-sandbox',bootstrap],env});
+  const ui=await desktop.firstWindow();await ui.waitForFunction(()=>!!window.workspace);
+  rpc=(method,params={})=>ui.evaluate(({method,params})=>window.workspace.call(method,params),{method,params});
+  const account=await rpc('accounts.create',{name:'Modern fixture'});
+  const other=await rpc('accounts.create',{name:'Other isolated account'});
+  const conv=await rpc('conversations.create',{accountId:account.id});
+  const add=(accountId,conversation,prompt)=>rpc('tasks.create',{accountId,conversation,background:true,input:{type:'prompt',prompt,submit:true}});
+  const until=async(check)=>{const end=Date.now()+120000;while(!await check()){assert.ok(Date.now()<end,'Modern queue timed out');await new Promise(r=>setTimeout(r,100))}};
+  const first=await add(account.id,conv.id,'first');
+  const fail=await add(account.id,conv.id,'无法思考');
+  const interruption=await add(account.id,conv.id,'interrupted');
+  const stop=await add(account.id,conv.id,'stopped');
+  const last=await add(account.id,conv.id,'last');
+  const retry=await rpc('conversations.register',{accountId:other.id,url:'https://chatgpt.com/c/retry'});
+  const retryTask=await add(other.id,retry.id,'retry-head');
+  const retryNext=await add(other.id,retry.id,'retry-next');
+  const ignored=await rpc('conversations.register',{accountId:other.id,url:'https://chatgpt.com/c/ignored'});
+  const ignoredTask=await add(other.id,ignored.id,'ignored-click');
+  const ignoredNext=await add(other.id,ignored.id,'after-ignored');
+  await until(async()=> (await rpc('tasks.get',{id:last.id})).status==='done' && (await rpc('tasks.get',{id:retryNext.id})).status==='done' && (await rpc('tasks.get',{id:ignoredNext.id})).status==='done');
+  for(const t of [first,last,retryTask,retryNext,ignoredTask,ignoredNext])assert.equal((await rpc('tasks.get',{id:t.id})).status,'done');
+  for(const t of [fail,interruption,stop]) {const v=await rpc('tasks.get',{id:t.id});assert.equal(v.status,'failed');assert.equal(v.attention,undefined);assert.ok(v.submittedAt);}
+  assert.equal((await rpc('tasks.get',{id:retryTask.id})).retryCount,1);
+  const bound=await rpc('conversations.get',{accountId:account.id,conversation:conv.id});assert.equal(bound.url,'https://chatgpt.com/c/modern-bound');
+  const contents=await desktop.evaluate(async({webContents})=>Promise.all(webContents.getAllWebContents().filter(w=>w.getURL().startsWith('https://chatgpt.com/c/')).map(async w=>({url:w.getURL(),...await w.executeJavaScript('({sent:window.sent,clicks:window.clicks})')}))));
+  assert.deepEqual(contents.find(p=>p.url===bound.url).sent,['first','无法思考','interrupted','stopped','last']);
+  assert.deepEqual(contents.find(p=>p.url.endsWith('/retry')).sent,['retry-head','retry-next']);
+  const ignoredPage=contents.find(p=>p.url.endsWith('/ignored'));assert.deepEqual(ignoredPage.sent,['ignored-click','after-ignored']);assert.equal(ignoredPage.clicks,3);
+  assert.ok((await rpc('queues.status')).every(q=>!q.paused));
+  passed = true;
+  console.log('Modern DOM queue: new-chat binding, delayed send button, ignored click recovery without duplicate, transient fill retry/FIFO, 3 terminal failures advancing, and independent accounts passed.');
+} finally {
+  if (!passed && rpc) console.error(JSON.stringify(await rpc('workspace.status').then(s=>s.tasks.map(t=>({prompt:t.input.prompt,status:t.status,phase:t.phase,error:t.error,retry:t.retryCount}))),null,2));
+  await desktop?.close();
+  if(path.dirname(directory)!==root||!path.basename(directory).startsWith('.test-modern-queue-'))throw Error('Unsafe cleanup');
+  await rm(directory,{recursive:true,force:true});
+}

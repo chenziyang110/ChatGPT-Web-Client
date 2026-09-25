@@ -7,6 +7,13 @@ const answer: ConversationMessage = { id: 'reply', role: 'assistant', text: 'Ans
 const history = [user('old-1'), user('old-2'), user('old-3')];
 const own = user('submitted', 'Question');
 
+test('restores a persisted stable submission after all older DOM history unmounts', () => {
+  assert.equal(new ReplyTurnTracker(history, 'Question', own.id).read([own, answer]), own);
+  assert.throws(() => new ReplyTurnTracker(history, 'Question', own.id).read([user('different', 'Question'), answer]), /CONVERSATION_CHANGED/);
+  assert.throws(() => new ReplyTurnTracker(history, 'Question', own.id).read([user(own.id, 'Edited'), answer]), /does not match/);
+  assert.throws(() => new ReplyTurnTracker(history, 'Question', 'position:3').read([own, answer]), /anchor is missing/);
+});
+
 test('matches a sent turn after the old DOM prefix unmounts before acknowledgement', () => {
   const tracker = new ReplyTurnTracker(history, 'Question');
   assert.equal(tracker.read([...history.slice(1), own, answer]), own);

@@ -24,6 +24,10 @@ const reply=document.createElement('div'),replyId=crypto.randomUUID();reply.data
 const heading=document.createElement('h4');heading.dataset.conversationRole='assistant';heading.textContent='ChatGPT 说：';reply.append(heading);
 const body=document.createElement('div');body.dataset.chatgptSelectionMessageId=replyId;body.textContent='Reply: '+text;reply.append(body);turn.append(reply);
 const actions=document.createElement('div');actions.className='turn-action-controls';actions.innerHTML='<button aria-label="复制">Copy</button>';turn.append(actions);
+if(text==='virtualized-long-reply'){
+  // Real ChatGPT observed after a long answer: only its assistant unit remains.
+  turns.querySelectorAll('[data-chatgpt-search-unit-key$=":user"]').forEach(node=>node.remove());
+}
 },1000);
 };
 </script></body></html>`;

@@ -34,7 +34,13 @@ try {
   const ignored=await rpc('conversations.register',{accountId:other.id,url:'https://chatgpt.com/c/ignored'});
   const ignoredTask=await add(other.id,ignored.id,'ignored-click');
   const ignoredNext=await add(other.id,ignored.id,'after-ignored');
-  await until(async()=> (await rpc('tasks.get',{id:last.id})).status==='done' && (await rpc('tasks.get',{id:retryNext.id})).status==='done' && (await rpc('tasks.get',{id:ignoredNext.id})).status==='done');
+  const long=await rpc('conversations.register',{accountId:other.id,url:'https://chatgpt.com/c/long'});
+  const longTask=await add(other.id,long.id,'virtualized-long-reply');
+  const longNext=await add(other.id,long.id,'after-long-reply');
+  await until(async()=> (await rpc('tasks.get',{id:last.id})).status==='done' && (await rpc('tasks.get',{id:retryNext.id})).status==='done' && (await rpc('tasks.get',{id:ignoredNext.id})).status==='done' && (await rpc('tasks.get',{id:longNext.id})).status==='done');
+  const completedLong=await rpc('tasks.get',{id:longTask.id});
+  assert.equal(completedLong.status,'done');assert.equal(completedLong.result.responseUnavailable,true);
+  assert.equal(completedLong.result.response,undefined);assert.equal(completedLong.attention,undefined);
   for(const t of [first,last,retryTask,retryNext,ignoredTask,ignoredNext])assert.equal((await rpc('tasks.get',{id:t.id})).status,'done');
   for(const t of [fail,interruption,stop]) {const v=await rpc('tasks.get',{id:t.id});assert.equal(v.status,'failed');assert.equal(v.attention,undefined);assert.ok(v.submittedAt);}
   assert.equal((await rpc('tasks.get',{id:retryTask.id})).retryCount,1);
@@ -43,6 +49,7 @@ try {
   assert.deepEqual(contents.find(p=>p.url===bound.url).sent,['first','无法思考','interrupted','stopped','last']);
   assert.deepEqual(contents.find(p=>p.url.endsWith('/retry')).sent,['retry-head','retry-next']);
   const ignoredPage=contents.find(p=>p.url.endsWith('/ignored'));assert.deepEqual(ignoredPage.sent,['ignored-click','after-ignored']);assert.equal(ignoredPage.clicks,3);
+  const longPage=contents.find(p=>p.url.endsWith('/long'));assert.deepEqual(longPage.sent,['virtualized-long-reply','after-long-reply']);assert.equal(longPage.clicks,2);
   assert.ok((await rpc('queues.status')).every(q=>!q.paused));
   passed = true;
   console.log('Modern DOM queue: new-chat binding, delayed send button, ignored click recovery without duplicate, transient fill retry/FIFO, 3 terminal failures advancing, and independent accounts passed.');

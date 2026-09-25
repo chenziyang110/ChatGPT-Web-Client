@@ -74,19 +74,20 @@ try {
   assert.equal(await script(account, stoppedPage.url, 'window.fixtureSendCount'), 2);
   assert.equal((await rpc('queues.status')).find(item => item.conversationId === stopped.conversationId)?.paused, false);
 
-  // A local reply timeout is not proof the website has stopped. Queue the next
-  // item, then send it only after the website's stop control disappears.
+  // A local deadline resumes observation of the same sent turn. The next item
+  // must remain pending until the website's stop control disappears.
   const timedOut = await rpc('tasks.create', { accountId: account.id, new: true,
     input: { type: 'prompt', prompt: 'HOLD:timeout', submit: true }, background: true, replyTimeoutMs: 1000 });
   const afterTimeout = await rpc('tasks.create', { accountId: account.id, conversation: timedOut.conversationId,
     input: { type: 'prompt', prompt: 'After timeout', submit: true }, background: true });
   await until(async () => !!(await rpc('tasks.get', { id: timedOut.id })).submittedAt);
   const timeoutPage = (await rpc('workspace.status')).pages.find(item => item.conversationId === timedOut.conversationId);
-  await until(async () => (await rpc('tasks.get', { id: timedOut.id })).status === 'failed');
-  await until(async () => (await rpc('tasks.get', { id: afterTimeout.id })).phase === 'waiting_idle');
+  await until(async () => (await rpc('tasks.get', { id: timedOut.id })).retryCount >= 1);
+  assert.equal((await rpc('tasks.get', { id: afterTimeout.id })).status, 'pending');
   assert.equal(await script(account, timeoutPage.url, 'window.fixtureSendCount'), 1);
   await script(account, timeoutPage.url, 'window.fixtureStopEmpty()');
   await until(async () => (await rpc('tasks.get', { id: afterTimeout.id })).status === 'done');
+  assert.equal((await rpc('tasks.get', { id: timedOut.id })).status, 'failed');
   assert.equal(await script(account, timeoutPage.url, 'window.fixtureSendCount'), 2);
   assert.equal((await rpc('queues.status')).find(item => item.conversationId === timedOut.conversationId)?.paused, false);
   console.log('Stopped reply desktop passed: interrupted and silent stopped turns release manual and queued conversation work.');

@@ -63,7 +63,12 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
   const generating = !!running?.sendIntentAt || !!diagnostic?.busy;
   const count = tasks.filter(task => !task.sendIntentAt).length;
   const ready = !!conversation && diagnostic?.readiness === 'ready' && !diagnostic.busy && !diagnostic.draftLength && !tasks.length && !paused;
-  const status = !conversation ? loading ? '页面加载中' : '检查会话' : attention ? '需要处理' : paused ? '已暂停' : running ? phaseLabels[running.phase ?? 'preparing'] : diagnostic?.busy ? '等待当前回复' : waiting.length ? '等待发送' : '就绪';
+  const retry = waiting.find(task => task.nextAttemptAt);
+  const retryLabel = retry ? /LOGIN_REQUIRED/.test(retry.error ?? '') ? '等待登录，完成后自动继续'
+    : /VERIFICATION_REQUIRED/.test(retry.error ?? '') ? '等待网页验证，完成后自动继续'
+    : /DRAFT_CONFLICT|DRAFT_CHANGED/.test(retry.error ?? '') ? '等待网页草稿处理，随后自动继续'
+    : `${Math.max(0, Math.ceil((retry.nextAttemptAt! - now) / 1000))} 秒后自动重试` : undefined;
+  const status = !conversation ? loading ? '页面加载中' : '检查会话' : attention ? '需要处理' : paused ? '已暂停' : running ? phaseLabels[running.phase ?? 'preparing'] : retryLabel ?? (diagnostic?.busy ? '等待当前回复' : waiting.length ? '等待发送' : '就绪');
   const elapsed = running?.submittedAt ? Math.max(0, Math.floor((now - running.submittedAt) / 1000)) : undefined;
   const edited = editing && state.tasks.find(task => task.id === editing.id);
   const staleEdit = !!editing && (edited?.status !== 'pending' || edited.updatedAt !== editing.version);

@@ -10,8 +10,11 @@ const changed = (detail: string): never => { throw new Error(`CONVERSATION_CHANG
 export class ReplyTurnTracker {
   private readonly history: ConversationMessage[];
   private ownId?: string;
-  constructor(messages: ConversationMessage[], private readonly prompt: string) {
+  constructor(messages: ConversationMessage[], private readonly prompt: string, submittedId?: string) {
     this.history = messages.filter(message => message.role === 'user').map(message => ({ ...message }));
+    // After a restart the site may virtualize every pre-send turn. A persisted
+    // stable receipt still identifies our own turn without matching by text.
+    if (submittedId && !submittedId.startsWith('position:')) this.ownId = submittedId;
   }
   private same(actual: ConversationMessage, expected: ConversationMessage): void {
     if (actual.id !== expected.id) changed('prior user identity or order changed');

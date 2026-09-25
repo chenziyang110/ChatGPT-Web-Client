@@ -33,6 +33,8 @@ v1.0.0 起，安装版启动 10 秒后及每 6 小时请求本仓库 GitHub Late
 
 macOS 的 ad-hoc 签名不足以支持当前 Squirrel.Mac 更新部署，保留官方安装包入口；Linux tar.gz 和开发态同样手动安装。v1.3.1 及更早版本需手动覆盖安装 v1.4.0 一次，不能回溯添加旧版没有的更新功能。
 
+v1.4.15 起，会话面板队列保存发送记录。重启后已发送任务自动恢复读取原回复，未发送任务继续排队；用户主动暂停和接管保持不变。此恢复策略不自动重新提交已经发送的消息。旧版本缺少发送记录的任务按既有迁移规则处理。
+
 安装前退出应用并保留数据目录。macOS 使用 ad-hoc 签名，Developer ID 签名及公证尚未配置；详见 [macOS 安装与签名](MACOS.md)。x64 / ARM64 是不同安装包，暂不生成 macOS Universal 包；不支持 32 位 x86 / ARMv7。
 
 参考：[electron-builder 跨平台构建](https://www.electron.build/v26/docs/features/multi-platform-build/)。

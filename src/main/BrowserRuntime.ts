@@ -627,6 +627,7 @@ export class BrowserRuntime {
     // Keep one warm page per account so switching accounts reattaches the same
     // WebContents without loading ChatGPT again. Other idle tabs may still sleep.
     if (owner && this.selected.get(owner.accountId) === id) return;
+    if (owner?.conversationId && this.conversations.get(owner.accountId, owner.conversationId).binding === 'uncertain') return;
     const idleMs = this.backgrounded() ? this.hiddenIdlePageMs : this.idlePageMs;
     if (!owner || this.views.get(id) !== view || this.activeId === id && !this.backgrounded() || this.isLocked(id) || this.redirectingDuplicates.has(id) || this.observing.has(id) ||
       owner.hasDraft || owner.busy || !owner.hibernationReady || Date.now() - owner.idleSince < idleMs ||
@@ -668,6 +669,16 @@ export class BrowserRuntime {
     const contents = this.openView(pageId).webContents;
     contents.setBackgroundThrottling(false);
     try {
+      // Retry the fixed conversation, never another selected tab. Reload only
+      // a stalled, empty, idle page; preserve human drafts and active replies.
+      if (task.retryCount && !task.sendIntentAt && conversation?.binding !== 'uncertain' && !contents.isLoading()) {
+        let safeToReload = false;
+        try {
+          const page = pageOperationResult<Page>(await contents.executeJavaScript(pageOperationScript({ kind: 'inspect' })));
+          safeToReload = !page.busy && !page.draft.trim() && page.readiness !== 'login_required' && page.readiness !== 'verification_required';
+        } catch { safeToReload = contents.isCrashed(); }
+        if (safeToReload) await contents.loadURL(conversation?.url ?? task.targetUrl ?? HOME_URL);
+      }
       const result = await new ChatGPTAdapter(contents, signal, context, this.conversations,
         () => this.activeId === pageId && this.visible && !this.backgrounded() ? 250 : 2000).execute(input);
       signal.throwIfAborted();

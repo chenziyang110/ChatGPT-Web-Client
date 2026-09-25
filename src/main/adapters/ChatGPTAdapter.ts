@@ -1,9 +1,9 @@
 import type { WebContents } from 'electron';
 import type { ExecutionContext } from '../../core/agent/AgentGateway';
-import { QueuePausedError, ReportedReplyError } from '../../core/agent/AgentGateway';
+import { ReportedReplyError } from '../../core/agent/AgentGateway';
 import { ConversationManager, conversationUrl } from '../../core/conversation/ConversationManager';
 import { HOME_URL, isChatUrl } from '../../core/validation';
-import type { BrowserReadiness, TaskInput } from '../../shared/types';
+import type { BrowserReadiness, Conversation, TaskInput } from '../../shared/types';
 import { COMPLETION_STABLE_MS, replyToken } from '../../core/notifications/ConversationNotifications';
 import { ReplyTurnTracker, type ConversationMessage } from './ReplyTurnTracker';
 
@@ -35,7 +35,7 @@ export function replyPageUrl(value: string, allowOptimistic = false): string | u
   if (url.pathname === '/') return HOME_URL;
   let pathname: string;
   try { pathname = decodeURI(url.pathname).replace(/%3A/ig, ':'); } catch { return; }
-  if (allowOptimistic && /^\/c\/WEB:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\/?$/.test(pathname)) return `${url.origin}${pathname.replace(/\/$/, '')}`;
+  if (allowOptimistic && /^\/c\/(?:WEB|local-chatgpt):[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\/?$/.test(pathname)) return `${url.origin}${pathname.replace(/\/$/, '')}`;
   const match = /^\/c\/([a-zA-Z0-9_-]{1,128})\/?$/.exec(url.pathname);
   return match ? `${HOME_URL}c/${match[1]}` : undefined;
 }
@@ -52,15 +52,30 @@ export function pageOperation(operation: Operation): unknown {
   let stage = 'inspect';
   try {
     if (location.origin !== 'https://chatgpt.com') throw new Error('LOGIN_REQUIRED: sign in to ChatGPT');
-    const visible = (element: Element | null): element is HTMLElement => !!element?.getClientRects().length;
+    const visible = (element: Element | null | undefined): element is HTMLElement => !!element?.getClientRects().length;
+    // Both schemas are observed on live ChatGPT accounts. Do not use generated
+    // CSS classes, translated placeholder text, or an arbitrary page textbox.
+    const editorSelector = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"][role="textbox"]';
+    const editor = [...document.querySelectorAll<HTMLElement>(editorSelector)].find(visible) ?? null;
+    const composer = editor?.closest('[data-chatgpt-composer]');
+    const composerButtons = [...(composer ?? document).querySelectorAll<HTMLButtonElement>('button')].filter(visible);
+    const actionLabel = (button: HTMLElement) => (button.getAttribute('aria-label') ?? '').trim();
+    const sendButton = () => [...document.querySelectorAll<HTMLButtonElement>('[data-testid="send-button"]')].find(visible) ??
+      (composer ? composerButtons.find(button => button.type === 'submit' && /^(发送|发送消息|Send|Send message|Send prompt)$/i.test(actionLabel(button))) : undefined);
+    const messageSelector = '[data-message-author-role], [data-chatgpt-search-unit-key]';
+    const roleOf = (element: HTMLElement) => element.dataset.messageAuthorRole ??
+      element.getAttribute('data-chatgpt-search-unit-key')?.match(/:(user|assistant)$/)?.[1] ?? '';
+    const elements = [...document.querySelectorAll<HTMLElement>(messageSelector)].filter(element =>
+      ['user', 'assistant'].includes(roleOf(element)) && !element.parentElement?.closest(messageSelector));
+    const turnOf = (element: Element) => element.closest('article, [data-testid^="conversation-turn-"], [data-turn-key]') ?? element;
     if (operation.kind === 'follow_latest') {
       stage = 'follow_latest';
       if (operation.url !== location.href) throw new Error('TARGET_CHANGED: page changed before action');
-      const latest = [...document.querySelectorAll('[data-message-author-role]')].filter(visible).at(-1);
+      const latest = elements.filter(visible).at(-1);
       if (!latest) return { scrolled: false };
       // Start outside the turn: code blocks and other nested reply widgets may
       // scroll independently. Never target the sidebar or focus the composer.
-      const turn = latest.closest('article, [data-testid^="conversation-turn-"]') ?? latest;
+      const turn = turnOf(latest);
       for (let parent = turn.parentElement; parent; parent = parent.parentElement) {
         if (parent.clientHeight <= 0 || parent.scrollHeight <= parent.clientHeight) continue;
         if (parent !== document.scrollingElement && !/^(auto|scroll|overlay)$/.test(getComputedStyle(parent).overflowY)) continue;
@@ -70,7 +85,6 @@ export function pageOperation(operation: Operation): unknown {
       }
       return { scrolled: false };
     }
-    const editor = document.querySelector<HTMLElement>('#prompt-textarea');
     const readEditor = (element: HTMLElement | null): string => {
       if (!element) return '';
       if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) return element.value;
@@ -96,15 +110,16 @@ export function pageOperation(operation: Operation): unknown {
     const verification = !visible(editor) && (!!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, input[id^="cf-chl-widget-"], iframe[src*="challenges.cloudflare.com"]') || /^(请稍候|Just a moment)/i.test(document.title.trim()));
     const login = [...document.querySelectorAll('[data-testid="login-button"], a[href="/auth/login"], a[href^="https://auth.openai.com/"]')].some(visible);
     const readiness: BrowserReadiness = verification ? 'verification_required' : login ? 'login_required' : visible(editor) ? 'ready' : 'loading';
-    const elements = [...document.querySelectorAll<HTMLElement>('[data-message-author-role]')];
-    const lastUserElement = elements.filter(element => element.dataset.messageAuthorRole === 'user' && visible(element)).at(-1);
+    const lastUserElement = elements.filter(element => roleOf(element) === 'user' && visible(element)).at(-1);
     const afterLastUser = (element: Element) => !lastUserElement || !!(lastUserElement.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING);
-    const currentAssistant = elements.filter(element => element.dataset.messageAuthorRole === 'assistant' && visible(element) && afterLastUser(element)).at(-1);
-    const currentTurn = currentAssistant?.closest('article, [data-testid^="conversation-turn-"]') ?? currentAssistant;
-    const terminalAction = (turn: Element | null | undefined) => !!turn && [...turn.querySelectorAll('[data-testid="copy-turn-action-button"]')].some(visible);
+    const currentAssistant = elements.filter(element => roleOf(element) === 'assistant' && visible(element) && afterLastUser(element)).at(-1);
+    const currentTurn = currentAssistant ? turnOf(currentAssistant) : lastUserElement ? turnOf(lastUserElement) : undefined;
+    const terminalAction = (turn: Element | null | undefined) => !!turn && [...turn.querySelectorAll<HTMLElement>('[data-testid="copy-turn-action-button"], .turn-action-controls button')]
+      .some(button => visible(button) && (button.getAttribute('data-testid') === 'copy-turn-action-button' || /^(复制|Copy|Copy response)$/i.test(actionLabel(button))));
     // Sidebar loaders and completed image widgets can retain aria-busy. They
     // are not evidence that the current reply is still streaming.
-    const stopVisible = [...document.querySelectorAll('[data-testid="stop-button"]')].some(visible);
+    const stopVisible = [...document.querySelectorAll('[data-testid="stop-button"]')].some(visible) ||
+      !!composer && composerButtons.some(button => /^(停止|停止生成|停止回复|Stop|Stop generating|Stop response)$/i.test(actionLabel(button)));
     const streamingVisible = !terminalAction(currentTurn) &&
       [...document.querySelectorAll('main [data-is-streaming="true"]')].some(element => visible(element) && afterLastUser(element));
     const ariaBusyVisible = !!currentTurn && !terminalAction(currentTurn) &&
@@ -119,35 +134,37 @@ export function pageOperation(operation: Operation): unknown {
       });
     const busy = stopVisible || !interrupted && (streamingVisible || ariaBusyVisible);
     if (operation.kind === 'diagnose') {
-      const send = document.querySelector<HTMLButtonElement>('[data-testid="send-button"]');
+      const send = sendButton();
       const messages = elements;
       const last = messages.at(-1);
-      const turn = last?.closest('article, [data-testid^="conversation-turn-"]') ?? last;
+      const turn = last && turnOf(last);
       return { url: location.href, title: document.title.slice(0, 120), readiness,
         editor: visible(editor), draftLength: draft.length, busy, documentReady: document.readyState,
         dom: { editorTag: editor?.tagName.toLowerCase() ?? null, contentEditable: !!editor?.isContentEditable,
-          visibleEditorCount: [...document.querySelectorAll('#prompt-textarea')].filter(visible).length,
+          visibleEditorCount: [...document.querySelectorAll(editorSelector)].filter(visible).length,
           draftLineLengths: draft.split('\n').slice(0, 20).map(line => line.length),
           editorBlocks: [...(editor?.children ?? [])].slice(0, 20).map(child => ({ tag: child.tagName.toLowerCase(),
             textLength: child.textContent.length, lineBreaks: child.querySelectorAll('br').length })),
           sendVisible: visible(send), sendEnabled: visible(send) && !send.disabled && send.getAttribute('aria-disabled') !== 'true',
           stopVisible, streamingVisible, ariaBusyVisible,
-          messageCount: messages.length, lastRole: last?.dataset.messageAuthorRole ?? null,
-          lastTurnTerminal: !!turn && [...turn.querySelectorAll('[data-testid="copy-turn-action-button"]')].some(visible) }
+          messageCount: messages.length, lastRole: last ? roleOf(last) : null,
+          lastTurnTerminal: !!last && roleOf(last) === 'assistant' && terminalAction(turn) }
       };
     }
     const readMessage = (element: HTMLElement, index: number) => {
-      const turn = element.closest('article, [data-testid^="conversation-turn-"]') ?? element;
-      const body = element.dataset.messageAuthorRole === 'user'
-        ? element.querySelector<HTMLElement>('[data-testid="collapsible-user-message-content"]') ?? element : element;
-      const hasContent = element.dataset.messageAuthorRole === 'assistant' &&
+      const turn = turnOf(element);
+      const role = roleOf(element);
+      const body = role === 'user'
+        ? element.querySelector<HTMLElement>('[data-testid="collapsible-user-message-content"], [data-user-message-bubble]') ?? element
+        : element.querySelector<HTMLElement>('[data-chatgpt-selection-message-id]') ?? element;
+      const hasContent = role === 'assistant' &&
         [...turn.querySelectorAll('img, video, canvas')].some(media => {
           if (!visible(media)) return false;
           if (media instanceof HTMLImageElement && (!media.complete || media.naturalWidth < 32)) return false;
           const bounds = media.getBoundingClientRect(); return bounds.width >= 32 && bounds.height >= 32;
         });
-      return { id: element.dataset.messageId ?? `position:${index}`, role: element.dataset.messageAuthorRole ?? '',
-        text: body.innerText.trim(), terminal: terminalAction(turn), hasContent };
+      return { id: element.dataset.messageId ?? element.getAttribute('data-chatgpt-search-message-ids')?.trim().split(/\s+/)[0] ?? `position:${index}`, role,
+        text: body.innerText.trim(), terminal: role === 'assistant' && terminalAction(turn), hasContent };
     };
     const markedError = [...document.querySelectorAll<HTMLElement>('[data-testid="conversation-error"], [data-testid="error-message"]')]
       .find(element => visible(element) && afterLastUser(element));
@@ -166,13 +183,13 @@ export function pageOperation(operation: Operation): unknown {
     // copy action. ChatGPT renders its label as either a control or plain text.
     // Only inspect an exact standalone label after the latest user turn; a
     // completed assistant turn and quoted text are not current failures.
-    const finishedAnswer = elements.some((element, index) => element.dataset.messageAuthorRole === 'assistant' &&
+    const finishedAnswer = elements.some((element, index) => roleOf(element) === 'assistant' &&
       afterLastUser(element) && readMessage(element, index).terminal);
     const thinkingLabel = /^(无法思考|Unable to think)(?:\s*[›>])?$/i;
     const thinkingFailure = !!lastUserElement && visible(editor) && !busy && !finishedAnswer &&
       [...document.querySelectorAll<HTMLElement>('main button, main [role="button"], main [aria-expanded], main div, main p, main span')].some(control => {
-        if (!visible(control) || !afterLastUser(control) || control.closest('[data-message-author-role="user"]') ||
-          control.querySelector('[data-message-author-role]')) return false;
+        if (!visible(control) || !afterLastUser(control) || control.closest('[data-message-author-role="user"], [data-user-message-bubble]') ||
+          control.querySelector(messageSelector)) return false;
         const label = (control.innerText || control.getAttribute('aria-label') || '').trim();
         return thinkingLabel.test(label);
       });
@@ -183,14 +200,14 @@ export function pageOperation(operation: Operation): unknown {
     if (operation.kind === 'activity') {
       let user: Message | undefined; let assistant: Message | undefined;
       for (let index = elements.length - 1; index >= 0 && (!user || !assistant); index--) {
-        const role = elements[index].dataset.messageAuthorRole;
+        const role = roleOf(elements[index]);
         if (role === 'user' && !user) user = readMessage(elements[index], index);
         else if (role === 'assistant' && !assistant) assistant = readMessage(elements[index], index);
       }
       return { url: location.href, title: document.title.slice(0, 120), editor: visible(editor), busy,
         hasDraft: !!draft.trim(), error, user: user && { id: user.id, text: user.text.slice(0, 32000) },
         assistant: assistant && { ...assistant, text: assistant.text.slice(0, 64000) },
-        lastRole: elements.at(-1)?.dataset.messageAuthorRole };
+        lastRole: elements.length ? roleOf(elements.at(-1)!) : undefined };
     }
     const messages = elements.map(readMessage);
     const page: Page = { url: location.href, title: document.title.slice(0, 120), readiness, editor: visible(editor), draft, busy, messages, error, failure };
@@ -204,14 +221,14 @@ export function pageOperation(operation: Operation): unknown {
       stage = 'verify_send';
       // Textareas and contenteditable normalize Windows file line endings to LF.
       if (draft.replace(/\r\n?/g, '\n').trim() !== operation.value?.replace(/\r\n?/g, '\n').trim()) throw new Error('DRAFT_CHANGED: prompt was edited');
-      const button = document.querySelector<HTMLButtonElement>('[data-testid="send-button"]');
+      const button = sendButton();
       if (!visible(button) || button.disabled || button.getAttribute('aria-disabled') === 'true') throw new Error('SEND_UNAVAILABLE: prompt remains a draft');
       if (operation.kind === 'check_send') return { ready: true };
       stage = 'click_send';
       button.click(); return { clicked: true };
     }
     stage = 'find_editor';
-    const element = document.querySelector<HTMLElement>(operation.selector ?? '#prompt-textarea');
+    const element = operation.selector ? document.querySelector<HTMLElement>(operation.selector) : editor;
     if (!visible(element) || element.matches(':disabled, [aria-disabled="true"]')) throw new Error('Element unavailable');
     if (element instanceof HTMLInputElement && element.type === 'password') throw new Error('Password fields cannot be automated');
     if (operation.kind === 'click') { element.click(); return { clicked: true }; }
@@ -301,7 +318,7 @@ export class ChatGPTAdapter {
       if (now - lastSample > Math.max(2000, interval * 2 + 500)) since = now;
       lastSample = now;
       const previousFailure = failedTail(page);
-      const terminalFailure = !!page.failure;
+      const terminalFailure = !!page.failure || !!this.context.task().background && !!page.error && !page.busy;
       if (page.error && !terminalFailure && !(previousFailure && (priorError?.continueAfterInterruption || page.error === priorError?.error))) throw new Error(page.error);
       if (!page.editor || page.readiness === 'login_required' || page.readiness === 'verification_required') {
         if (Date.now() - composerMissingSince >= composerBudget) {
@@ -326,7 +343,7 @@ export class ChatGPTAdapter {
         // Another operation may have held capacity while this page changed.
         // Recheck after acquisition before using the baseline for a write.
         const confirmed = await this.inspect();
-        if (confirmed.editor && confirmed.readiness === 'ready' && (!confirmed.error || confirmed.failure ||
+        if (confirmed.editor && confirmed.readiness === 'ready' && (!confirmed.error || confirmed.failure || this.context.task().background && !confirmed.busy ||
           (failedTail(confirmed) && (priorError?.continueAfterInterruption || confirmed.error === priorError?.error))) &&
           !confirmed.busy && !confirmed.draft.trim() && JSON.stringify([confirmed.url, confirmed.messages, confirmed.error]) === fingerprint) return confirmed;
         this.context.releaseExecution?.();
@@ -359,9 +376,26 @@ export class ChatGPTAdapter {
     const task = this.context.task();
     await this.loaded();
     if (!isChatUrl(this.contents.getURL())) throw new Error('LOGIN_REQUIRED: sign in to ChatGPT first');
+    if (input.type === 'prompt' && input.submit && task.background && task.sendIntentAt && task.sendReceipt) {
+      const conversation = task.conversationId ? this.conversations.get(task.accountId, task.conversationId) : undefined;
+      const target = conversation?.url ?? task.sendReceipt.url;
+      if (replyPageUrl(this.contents.getURL(), true) === HOME_URL && target !== HOME_URL) await this.navigate(target);
+      return this.awaitReply({ url: task.sendReceipt.url, title: '', readiness: 'ready', editor: true, draft: '', busy: false,
+        messages: task.sendReceipt.users }, input.prompt, task.sendReceipt.url, conversation);
+    }
     const initial = input.type !== 'snapshot' ? await this.idle() : undefined;
-    const conversation = task.conversationId ? this.conversations.get(task.accountId, task.conversationId) : undefined;
-    if (conversation?.binding === 'uncertain') throw new Error('NEW_CHAT_UNRESOLVED: inspect the page and register its actual conversation URL; this new conversation will not be created again');
+    let conversation = task.conversationId ? this.conversations.get(task.accountId, task.conversationId) : undefined;
+    if (conversation?.binding === 'uncertain') {
+      const prior = this.context.precedingReplyError;
+      const page = initial ?? await this.inspect();
+      const users = page.messages.filter(message => message.role === 'user');
+      const actual = replyPageUrl(page.url);
+      if (actual && actual !== HOME_URL && users.length === 1 && prior?.prompt && users[0].text === prior.prompt.trim() &&
+        (!prior.messageId || prior.messageId === users[0].id)) {
+        this.conversations.bind(task.accountId, conversation.id, actual);
+        conversation = this.conversations.get(task.accountId, conversation.id);
+      } else throw new Error('NEW_CHAT_UNRESOLVED: 正在等待首次发送的原会话恢复，消息保留在队首');
+    }
     const target = conversation?.url ?? (conversation ? HOME_URL : task.targetUrl);
     if (!target) throw new Error('TARGET_REQUIRED: choose a conversation');
     if (input.type === 'snapshot' && this.contents.getURL() !== target) await this.idle();
@@ -388,21 +422,43 @@ export class ChatGPTAdapter {
       if (input.type !== 'prompt' || !input.submit) return result;
       await this.delay();
       this.context.checkpoint?.();
-      await this.evaluate({ ...guard, kind: 'check_send', value });
+      // React replaces the voice button asynchronously after editor input.
+      // Wait for an actual enabled Send action instead of assuming 250 ms.
+      const sendReadyDeadline = Date.now() + Math.min(10000, task.prepareTimeoutMs ?? 10000);
+      while (true) {
+        try { await this.evaluate({ ...guard, kind: 'check_send', value }); break; }
+        catch (error) {
+          if (!(error instanceof Error) || !error.message.startsWith('SEND_UNAVAILABLE') || Date.now() >= sendReadyDeadline) throw error;
+          await this.delay(); this.context.checkpoint?.();
+        }
+      }
       this.context.checkpoint?.();
-      this.context.intent();
+      this.context.intent({ url: baseline.url, users: baseline.messages.filter(message => message.role === 'user').slice(-5) });
       if (conversation?.binding === 'new') this.conversations.markSending(task.accountId, conversation.id);
       await this.evaluate({ ...guard, kind: 'send', value });
     } catch (error) {
-      if (error instanceof QueuePausedError && prepared && !this.context.task().sendIntentAt) {
-        await this.evaluate({ ...guard, kind: 'clear', value });
-        await this.delay();
-        if ((await this.inspect()).draft.trim()) throw new Error('DRAFT_CONFLICT: 无法确认已清理本次自动填写的草稿，请接管检查');
+      if (prepared && !this.context.task().sendIntentAt) {
+        // The task signal may already be aborted. Cleanup still uses the same
+        // URL/history/text guard; never erase a draft someone changed.
+        const cleanup = this.contents.executeJavaScript(pageOperationScript({ ...guard, kind: 'clear', value }), true);
+        this.pending.add(cleanup);
+        void cleanup.then(() => this.pending.delete(cleanup), () => this.pending.delete(cleanup));
+        let timer: ReturnType<typeof setTimeout>;
+        await Promise.race([cleanup.catch(() => undefined), new Promise<void>(resolve => { timer = setTimeout(resolve, 2000); })]);
+        clearTimeout(timer!);
       }
       throw error;
     }
-    this.context.stage('generating', task.replyTimeoutMs);
-    const turns = new ReplyTurnTracker(baseline.messages, value);
+    return this.awaitReply(baseline, value, target, conversation);
+  }
+  private async awaitReply(baseline: Page, value: string, target: string, conversation?: Conversation): Promise<unknown> {
+    const task = this.context.task();
+    const guard = { url: target, anchor: this.anchor(baseline) };
+    // A short caller deadline must not restart observation before the stable
+    // completion window can ever elapse on a recovered turn.
+    this.context.stage('generating', task.retryCount ? Math.max(30000, task.replyTimeoutMs ?? 0) : task.replyTimeoutMs);
+    this.context.releaseExecution?.();
+    const turns = new ReplyTurnTracker(baseline.messages, value, task.submittedMessageId);
     let acknowledged = false; let boundUrl = conversation?.url;
     let observedConversationUrl = boundUrl;
     let optimisticUrl: string | undefined;
@@ -410,15 +466,27 @@ export class ChatGPTAdapter {
     let failureFingerprint = ''; let failureSince = Date.now();
     let lastSample = Date.now();
     let nextPollMs = 250;
+    let lastSendAttempt = Date.now(); let sendRetries = 0; let readFailures = 0;
     while (true) {
       const interval = nextPollMs;
       await this.delay(interval);
-      const page = await this.inspect();
+      let page: Page;
+      try { page = await this.inspect(); readFailures = 0; }
+      catch (error) {
+        this.signal.throwIfAborted();
+        if (!task.background || this.contents.isDestroyed()) throw error;
+        if (++readFailures >= 3) {
+          // Recover observation of the same remote turn. Never fill/resend here.
+          await this.track(this.contents.loadURL(boundUrl ?? observedConversationUrl ?? target));
+          readFailures = 0;
+        }
+        nextPollMs = 2000; continue;
+      }
       const now = Date.now();
       if (now - lastSample > Math.max(2000, interval * 2 + 500)) { since = now; failureSince = now; }
       lastSample = now;
-      const replyUrl = replyPageUrl(page.url, !boundUrl && conversation?.binding === 'new');
-      const optimistic = replyUrl?.includes('/c/WEB:');
+      const replyUrl = replyPageUrl(page.url, !boundUrl && !!conversation);
+      const optimistic = !!replyUrl && /\/c\/(WEB|local-chatgpt):/.test(replyUrl);
       if (!replyUrl || (observedConversationUrl && replyUrl !== observedConversationUrl)) throw changedReplyTarget(observedConversationUrl ?? HOME_URL, page.url);
       if (optimistic) {
         if (optimisticUrl && replyUrl !== optimisticUrl) throw changedReplyTarget(optimisticUrl, page.url);
@@ -426,6 +494,22 @@ export class ChatGPTAdapter {
       } else if (replyUrl !== HOME_URL) observedConversationUrl ??= replyUrl;
       const ownUser = turns.read(page.messages);
       if (ownUser && !acknowledged) { this.context.submitted(ownUser.id); acknowledged = true; }
+      // A click can be ignored while ChatGPT hydrates or reconnects. Retry only
+      // when the unchanged prompt is still a draft AND the recorded pre-send user
+      // history is unchanged. A missing acknowledgement alone is never proof.
+      if (!acknowledged && !page.busy && page.readiness === 'ready' &&
+        page.messages.filter(message => message.role === 'user').at(-1)?.id === baseline.messages.filter(message => message.role === 'user').at(-1)?.id &&
+        page.url === guard.url && page.draft.replace(/\r\n?/g, '\n').trim() === value.replace(/\r\n?/g, '\n').trim() &&
+        Date.now() - lastSendAttempt >= Math.min(30000, 3000 * 2 ** Math.min(sendRetries, 4))) {
+        try {
+          await this.context.acquireExecution?.();
+          await this.evaluate({ ...guard, anchor: this.anchor(page), kind: 'check_send', value });
+          await this.evaluate({ ...guard, anchor: this.anchor(page), kind: 'send', value });
+        } catch (error) {
+          if (!(error instanceof Error) || !error.message.startsWith('SEND_UNAVAILABLE')) throw error;
+        } finally { this.context.releaseExecution?.(); }
+        lastSendAttempt = Date.now(); sendRetries++;
+      }
       nextPollMs = acknowledged && page.busy ? this.pollingInterval() : 250;
       if (acknowledged && !boundUrl && !optimistic && replyUrl !== HOME_URL && conversation) {
         boundUrl = conversationUrl(replyUrl).url;
@@ -436,7 +520,8 @@ export class ChatGPTAdapter {
         // the actual conversation are confirmed. Earlier failures stay in the
         // uncertain path so the prompt is never replayed by mistake.
         if (acknowledged && boundUrl) {
-          if (page.failure) {
+          if (page.busy) continue;
+          {
             const fingerprint = JSON.stringify([replyUrl, page.messages, page.error]);
             if (fingerprint !== failureFingerprint) { failureFingerprint = fingerprint; failureSince = now; }
             if (now - failureSince < COMPLETION_STABLE_MS) continue;

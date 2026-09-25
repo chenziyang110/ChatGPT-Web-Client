@@ -24,6 +24,7 @@ function adapterFixture(readPage: (attempt: number) => Record<string, unknown>, 
       const operation = JSON.parse(script.slice(script.lastIndexOf(')(') + 2, -1)); operations.push(operation.kind);
       if (operation.kind === 'inspect') return pageResult({ url, title: 'ChatGPT', editor: true, draft: '', busy: false, messages: [], ...readPage(++attempts) });
       if (operation.kind === 'fill') return pageResult({ prepared: true });
+      if (operation.kind === 'clear') return pageResult({ cleared: true });
       if (operation.kind === 'check_send') throw new Error('SEND_UNAVAILABLE: prompt remains a draft');
       throw new Error('Unexpected operation');
     } } as unknown as WebContents;
@@ -108,7 +109,7 @@ function submittedFixture(routes: string[]) {
 }
 
 test('a first send tolerates model parameters and trailing slash while binding and returning the same reply once', async () => {
-  const f = submittedFixture(['https://chatgpt.com/?model=pro', 'https://chatgpt.com/c/WEB:11111111-1111-4111-8111-111111111111', 'https://chatgpt.com/c/new-reply/?model=pro#reply', 'https://chatgpt.com/c/new-reply']);
+  const f = submittedFixture(['https://chatgpt.com/?model=pro', 'https://chatgpt.com/c/local-chatgpt%3A11111111-1111-4111-8111-111111111111', 'https://chatgpt.com/c/new-reply/?model=pro#reply', 'https://chatgpt.com/c/new-reply']);
   const timer = setTimeout(() => f.controller.abort(new Error('test deadline')), 10000);
   try {
     const result = await f.adapter.execute(f.task.input) as { response: string; url: string };
@@ -133,4 +134,27 @@ test('reply normalization still rejects another conversation, temporary chats an
     }); assert.equal(f.sent(), 1); }
     finally { f.db.close(); }
   }));
+});
+
+
+test('recovered send receipt reads the original reply without filling or clicking Send again', async () => {
+  const db = new Database(':memory:'); const conversations = new Conversations(db);
+  const url = 'https://chatgpt.com/c/recovered'; const conversation = conversations.register('account',url);
+  const controller = new AbortController(); const operations:string[]=[];
+  const task:AgentTask={ id:'recovery', accountId:'account', conversationId:conversation.id, background:true,
+    input:{type:'prompt',prompt:'Original question',submit:true}, status:'running', createdAt:1, updatedAt:1,
+    sendIntentAt:1, submittedMessageId:'original-user',
+    sendReceipt:{url,users:[{id:'unmounted-history',role:'user',text:'Earlier question',terminal:false}]}, replyTimeoutMs:15000 };
+  const contents={isLoading:()=>false,getURL:()=>url,isDestroyed:()=>false,executeJavaScript:async(script:string)=>{
+    const operation=JSON.parse(script.slice(script.lastIndexOf(')(')+2,-1));operations.push(operation.kind);
+    assert.equal(operation.kind,'inspect');return pageResult({url,title:'Recovered',readiness:'ready',editor:true,draft:'',busy:false,messages:[
+      {id:'original-user',role:'user',text:'Original question',terminal:false},
+      {id:'reply',role:'assistant',text:'Original reply',terminal:true}
+    ]});
+  }} as unknown as WebContents;
+  const context:ExecutionContext={task:()=>task,stage:()=>{},intent:()=>assert.fail('must not resend'),submitted:id=>assert.equal(id,'original-user')};
+  try {
+    const result=await new ChatGPTAdapter(contents,controller.signal,context,conversations).execute(task.input) as {response:string};
+    assert.equal(result.response,'Original reply');assert.ok(operations.length>1);
+  } finally {db.close()}
 });

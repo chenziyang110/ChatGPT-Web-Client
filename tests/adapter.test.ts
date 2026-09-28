@@ -192,7 +192,7 @@ test('missing submitted DOM is not completion during generation, loading, draft 
     const controller = new AbortController();
     const task: AgentTask = { id: 'virtualized', accountId: 'account', conversationId: conversation.id, background: true,
       input: { type: 'prompt', prompt: 'Long question', submit: true }, status: 'running', createdAt: 1, updatedAt: 1,
-      sendIntentAt: 1, submittedAt: variant.unacknowledged ? undefined : 2, submittedMessageId: 'sent-user', sendReceipt: { url, users: [] } };
+      sendIntentAt: variant.unacknowledged ? Date.now() : 1, submittedAt: variant.unacknowledged ? undefined : 2, submittedMessageId: 'sent-user', sendReceipt: { url, users: [] } };
     const contents = { isLoading: () => false, getURL: () => url, isDestroyed: () => false,
       executeJavaScript: async (script: string) => {
         const operation = JSON.parse(script.slice(script.lastIndexOf(')(') + 2, -1));
@@ -209,6 +209,25 @@ test('missing submitted DOM is not completion during generation, loading, draft 
         variant.changedTarget ? /TARGET_CHANGED/ : variant.additionalUser ? /CONVERSATION_CHANGED/ : /expected still waiting/);
     } finally { clearTimeout(timer); db.close(); }
   }));
+});
+
+test('old unconfirmed queue receipt with missing anchors ends as interruption after stable idle without replay', async () => {
+  const db = new Database(':memory:'); const conversations = new Conversations(db);
+  const url = 'https://chatgpt.com/c/old-receipt'; const conversation = conversations.register('account', url);
+  const task: AgentTask = { id:'old', accountId:'account', conversationId:conversation.id, background:true,
+    input:{type:'prompt',prompt:'Original',submit:true},status:'running',createdAt:1,updatedAt:1,sendIntentAt:1,
+    sendReceipt:{url,users:[{id:'unmounted-anchor',role:'user',text:'Before',terminal:false}]} };
+  const contents = {isLoading:()=>false,getURL:()=>url,isDestroyed:()=>false,executeJavaScript:async(script:string)=>{
+    const operation=JSON.parse(script.slice(script.lastIndexOf(')(')+2,-1));assert.equal(operation.kind,'inspect');
+    return pageResult({url,title:'Restored',readiness:'ready',editor:true,draft:'',busy:false,messages:[
+      {id:'unmatched',role:'user',text:'Original',terminal:false},{id:'reply',role:'assistant',text:'Visible reply',terminal:true}]});
+  }} as unknown as WebContents;
+  const context:ExecutionContext={task:()=>task,stage:()=>{},intent:()=>assert.fail('resend'),submitted:()=>assert.fail('unconfirmed')};
+  try {
+    await assert.rejects(new ChatGPTAdapter(contents,new AbortController().signal,context,conversations).execute(task.input),
+      (error:unknown)=>{assert.ok(error instanceof Error && 'submissionUnconfirmed' in error && error.submissionUnconfirmed===true);return true});
+    assert.equal(task.submittedAt,undefined);
+  }finally{db.close()}
 });
 
 test('receipt recovery reports unavailable pages promptly without replaying or consuming the queued send', async () => {

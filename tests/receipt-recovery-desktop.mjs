@@ -15,10 +15,11 @@ function render(){turns.replaceChildren();for(const [i,text] of history.entries(
  const user=document.createElement('div');user.dataset.messageAuthorRole='user';user.dataset.messageId='u'+i;user.textContent=text;turns.append(user);
  const article=document.createElement('article');article.innerHTML='<div data-message-author-role="assistant" data-message-id="a'+i+'">Reply '+i+'</div><button data-testid="copy-turn-action-button">Copy</button>';turns.append(article);
 }}
-render();window.loads=Number(sessionStorage.getItem(key+'loads')||0)+1;sessionStorage.setItem(key+'loads',window.loads);
+render();if(location.pathname.endsWith('/draft')&&!history.length)editor.value='matching draft';
+window.loads=Number(sessionStorage.getItem(key+'loads')||0)+1;sessionStorage.setItem(key+'loads',window.loads);
 document.querySelector('[data-testid="send-button"]').onclick=()=>{
  const value=editor.value;if(!value)return;history.push(value);sessionStorage.setItem(key,JSON.stringify(history));editor.value='';render();
- if(history.length===1)setTimeout(()=>document.querySelector('main').replaceChildren(),1200);
+ if(history.length===1&&!location.pathname.endsWith('/draft'))setTimeout(()=>document.querySelector('main').replaceChildren(),1200);
 };
 </script>`;
 const bootstrap = path.join(directory, 'main.cjs');
@@ -37,7 +38,14 @@ try {
   const add = prompt => rpc('tasks.create',{accountId:account.id,conversation:conversation.id,background:true,prepareTimeoutMs:3000,
     input:{type:'prompt',prompt,submit:true}});
   const head = await add('first'); const next = await add('next');
+  const draftConversation=await rpc('conversations.register',{accountId:account.id,url:'https://chatgpt.com/c/draft'});
+  const draftTask=await rpc('tasks.create',{accountId:account.id,conversation:draftConversation.id,background:true,input:{type:'prompt',prompt:'matching draft',submit:true}});
   const deadline = Date.now()+60000;
+  while((await rpc('tasks.get',{id:draftTask.id})).status!=='done'){
+    assert.ok(Date.now()<deadline,'Matching draft was not sent');await new Promise(resolve=>setTimeout(resolve,100));
+  }
+  const draftPage=desktop.windows().find(p=>p.url().endsWith('/draft'));
+  assert.deepEqual(await draftPage.evaluate(()=>JSON.parse(sessionStorage.getItem(location.pathname))),['matching draft']);
   while((await rpc('tasks.get',{id:next.id})).status!=='done'){
     assert.ok(Date.now()<deadline,'Queue did not recover a blank page after sending');
     await new Promise(resolve=>setTimeout(resolve,200));
@@ -47,6 +55,7 @@ try {
   const page = desktop.windows().find(p=>p.url().endsWith('/receipt-recovery'));
   assert.deepEqual(await page.evaluate(()=>JSON.parse(sessionStorage.getItem(location.pathname))),['first','next']);
   assert.equal(await page.evaluate(()=>window.loads),2,'Recovery must reload once and preserve the receipt');
+  assert.equal((await rpc('tasks.get',{id:draftTask.id})).status,'done');
   console.log('Receipt recovery passed: blank post-send page reloads, original reply completes, FIFO continues without duplicate sends.');
 } finally {
   await desktop?.close();

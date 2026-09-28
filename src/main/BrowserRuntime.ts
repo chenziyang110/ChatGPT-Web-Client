@@ -452,7 +452,7 @@ export class BrowserRuntime {
     const id = pageId ?? this.pageId(accountId);
     if (id && this.owners.get(id)?.accountId !== accountId) throw new AppError('会话页面不属于此账号', 404);
     const contents = id ? this.openView(id).webContents : undefined;
-    const base = { accountId, url: this.url(accountId) ?? HOME_URL, title: '', editor: false, draftLength: 0, busy: false };
+    const base = { accountId, url: (id ? this.owners.get(id)?.url : this.url(accountId)) ?? HOME_URL, title: '', editor: false, draftLength: 0, busy: false };
     if (!contents || contents.isDestroyed()) return { ...base, readiness: 'not_open', suggestion: '请先在客户端打开此账号，再检查页面；队列未改变' };
     if (contents.isLoading()) return { ...base, readiness: 'loading', suggestion: '页面正在加载，请稍后再次诊断' };
     if (!isChatUrl(contents.getURL())) return { ...base, readiness: 'login_required', suggestion: '请在此账号页面完成登录' };

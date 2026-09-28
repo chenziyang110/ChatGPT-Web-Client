@@ -97,9 +97,12 @@ export function pageOperation(operation: Operation): unknown {
         node instanceof HTMLParagraphElement || (node.nodeType === Node.TEXT_NODE && !node.textContent?.trim()))) {
         return children.filter((node): node is HTMLParagraphElement => node instanceof HTMLParagraphElement).map(paragraph => {
           if (paragraph.childNodes.length === 1 && paragraph.firstChild instanceof HTMLBRElement) return '';
-          const value = paragraph.innerText;
-          return paragraph.lastChild instanceof HTMLBRElement && paragraph.lastChild.classList.contains('ProseMirror-trailingBreak')
-            ? value.replace(/\n$/, '') : value;
+          // Link/mention wrappers can have block or inline-flex layout. Their
+          // visual line breaks are not editor input; only explicit BRs are.
+          const text = (node: Node): string => node.nodeType === Node.TEXT_NODE ? node.textContent ?? ''
+            : node instanceof HTMLBRElement ? node.classList.contains('ProseMirror-trailingBreak') ? '' : '\n'
+            : [...node.childNodes].map(text).join('');
+          return text(paragraph);
         }).join('\n');
       }
       return element.innerText;
@@ -298,6 +301,13 @@ export class ChatGPTAdapter {
     this.context.releaseExecution?.();
     const priorError = this.context.precedingReplyError;
     const conversationId = this.context.task().conversationId;
+    const usableDraft = (page: Page): boolean => {
+      if (!page.draft.trim()) return true;
+      const task = this.context.task();
+      const url = conversationId ? this.conversations.get(task.accountId, conversationId).url : undefined;
+      return !!task.background && task.input.type === 'prompt' && task.input.submit && !!url && replyPageUrl(page.url) === url &&
+        page.draft.replace(/\r\n?/g, '\n').trim() === task.input.prompt.replace(/\r\n?/g, '\n').trim();
+    };
     const failedTail = (page: Page): boolean => {
       if (!priorError || !conversationId) return false;
       const target = this.conversations.get(this.context.task().accountId, conversationId);
@@ -333,12 +343,12 @@ export class ChatGPTAdapter {
       }
       if (waitingForPage) { this.context.stage('waiting_idle'); waitingForPage = false; }
       composerMissingSince = Date.now();
-      if (page.draft.trim()) throw new Error('DRAFT_CONFLICT: clear or send the existing draft first');
+      if (!usableDraft(page)) throw new Error('DRAFT_CONFLICT: clear or send the existing draft first');
       const last = page.messages.at(-1);
       // A usable composer with no active generation is an idle conversation,
       // even when ChatGPT never produced a copyable assistant turn.
       const ready = !page.busy;
-      const fingerprint = JSON.stringify([page.url, page.messages, page.error]);
+      const fingerprint = JSON.stringify([page.url, page.messages, page.error, page.draft]);
       if (!ready || previous !== fingerprint) since = Date.now();
       if (ready && Date.now() - since >= (last ? COMPLETION_STABLE_MS : 1000)) {
         await this.context.acquireExecution?.();
@@ -348,7 +358,7 @@ export class ChatGPTAdapter {
         const confirmed = await this.inspect();
         if (confirmed.editor && confirmed.readiness === 'ready' && (!confirmed.error || confirmed.failure || this.context.task().background && !confirmed.busy ||
           (failedTail(confirmed) && (priorError?.continueAfterInterruption || confirmed.error === priorError?.error))) &&
-          !confirmed.busy && !confirmed.draft.trim() && JSON.stringify([confirmed.url, confirmed.messages, confirmed.error]) === fingerprint) return confirmed;
+          !confirmed.busy && usableDraft(confirmed) && JSON.stringify([confirmed.url, confirmed.messages, confirmed.error, confirmed.draft]) === fingerprint) return confirmed;
         this.context.releaseExecution?.();
         previous = ''; since = Date.now(); interval = 250;
         continue;
@@ -420,8 +430,11 @@ export class ChatGPTAdapter {
     let prepared = false;
     try {
       this.context.checkpoint?.();
-      const result = await this.evaluate({ ...guard, kind: 'fill', selector: input.type === 'fill' ? input.selector : undefined, value });
-      prepared = true;
+      // A matching draft is already the explicitly queued payload. Submit it
+      // in place instead of clearing/refilling it, or retrying a conflict forever.
+      const reuseDraft = task.background && input.type === 'prompt' && input.submit && !!baseline.draft.trim();
+      const result = reuseDraft ? { prepared: true } : await this.evaluate({ ...guard, kind: 'fill', selector: input.type === 'fill' ? input.selector : undefined, value });
+      prepared = !reuseDraft;
       if (input.type !== 'prompt' || !input.submit) return result;
       await this.delay();
       this.context.checkpoint?.();
@@ -518,7 +531,14 @@ export class ChatGPTAdapter {
       }
       if (waitingForPage) { this.context.stage(acknowledged ? 'submitted' : 'generating'); waitingForPage = false; }
       unavailableSince = now;
-      const ownUser = turns.read(page.messages);
+      let ownUser: Message | undefined;
+      try { ownUser = turns.read(page.messages); }
+      catch (error) {
+        // Old queue receipts can lose every history anchor after a reload.
+        // Do not restart this same failed comparison forever. Observe the
+        // conversation stopping below; never claim a matched answer or resend.
+        if (!task.background || acknowledged || !boundUrl || !(error instanceof Error) || !error.message.startsWith('CONVERSATION_CHANGED:')) throw error;
+      }
       if (ownUser && !acknowledged) { this.context.submitted(ownUser.id); acknowledged = true; }
       // A click can be ignored while ChatGPT hydrates or reconnects. Retry only
       // when the unchanged prompt is still a draft AND the recorded pre-send user
@@ -554,7 +574,7 @@ export class ChatGPTAdapter {
           }
           throw new ReportedReplyError(page.error, !!page.failure);
         }
-        throw new Error(page.error);
+        if (!task.background || !boundUrl) throw new Error(page.error);
       }
       failureFingerprint = '';
       const last = page.messages.at(-1);
@@ -570,10 +590,13 @@ export class ChatGPTAdapter {
       // claiming that an uncorrelated visible answer belongs to that send.
       // Keep strict turn matching for foreground/API answer retrieval.
       const unmountedSubmission = !!task.background && acknowledged && userIndex < 0;
-      const stopped = acknowledged && !!boundUrl && page.editor && page.readiness === 'ready' && !page.busy && !page.draft.trim() &&
-        (userIndex >= 0 || unmountedSubmission);
+      const unconfirmedSubmission = !!task.background && !acknowledged && !!task.sendIntentAt && !!task.sendReceipt &&
+        now - task.sendIntentAt >= 30000 && (page.messages.length > 0 || !!page.error);
+      const stopped = !!boundUrl && page.editor && page.readiness === 'ready' && !page.busy && !page.draft.trim() &&
+        (acknowledged && (userIndex >= 0 || unmountedSubmission) || unconfirmedSubmission);
       if (!stopped || fingerprint !== previous) since = Date.now();
       if (stopped && Date.now() - since >= COMPLETION_STABLE_MS) {
+        if (unconfirmedSubmission) throw new ReportedReplyError('网页已停止，旧发送记录无法确认；结束本轮并继续下一条', true, true);
         if (finished) return { submitted: true, response: last!.text.slice(0, 64000), url: boundUrl, conversationId: conversation?.id, replyToken: replyToken(ownUser!, last!) };
         if (unmountedSubmission && last?.role === 'assistant' && last.terminal) return { submitted: true, responseUnavailable: true, completionReason: 'idle_after_submitted_turn_unmounted', url: boundUrl, conversationId: conversation?.id };
         throw new ReportedReplyError('ChatGPT 已停止回复，本轮未提供完整可确认的答复', true);

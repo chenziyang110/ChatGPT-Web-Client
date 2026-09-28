@@ -77,6 +77,11 @@ try {
   assert.equal((await execute({ kind: 'inspect' })).draft, prompt);
   assert.deepEqual(await execute({ ...guard, kind: 'check_send', value: prompt }), { ready: true });
   await page.evaluate(() => {
+    document.querySelector('#prompt-textarea').innerHTML = '<p>[<span style="display:block">https://example.com</span>] next</p>';
+  });
+  assert.equal((await execute({ kind: 'inspect' })).draft, '[https://example.com] next');
+  assert.deepEqual(await execute({ ...guard, kind: 'check_send', value: '[https://example.com] next' }), { ready: true });
+  await page.evaluate(() => {
     document.querySelector('#prompt-textarea').innerHTML = '<p>中文测试第一行</p><p><br class="ProseMirror-trailingBreak"></p><p>第二行<br>软换行<br class="ProseMirror-trailingBreak"></p>';
   });
   assert.equal((await execute({ kind: 'inspect' })).draft, '中文测试第一行\n\n第二行\n软换行');

@@ -160,6 +160,10 @@ export function pageOperation(operation: Operation): unknown {
       const body = role === 'user'
         ? element.querySelector<HTMLElement>('[data-testid="collapsible-user-message-content"], [data-user-message-bubble]') ?? element
         : element.querySelector<HTMLElement>('[data-chatgpt-selection-message-id]') ?? element;
+      const userText = (node: Node): string => node.nodeType === Node.TEXT_NODE ? node.textContent ?? ''
+        : node instanceof HTMLBRElement ? '\n'
+        : [...node.childNodes].map(child => child instanceof HTMLParagraphElement
+          ? `${userText(child)}\n` : userText(child)).join('');
       const hasContent = role === 'assistant' &&
         [...turn.querySelectorAll('img, video, canvas')].some(media => {
           if (!visible(media)) return false;
@@ -167,7 +171,7 @@ export function pageOperation(operation: Operation): unknown {
           const bounds = media.getBoundingClientRect(); return bounds.width >= 32 && bounds.height >= 32;
         });
       return { id: element.dataset.messageId ?? element.getAttribute('data-chatgpt-search-message-ids')?.trim().split(/\s+/)[0] ?? `position:${index}`, role,
-        text: body.innerText.trim(), terminal: role === 'assistant' && terminalAction(turn), hasContent };
+        text: (role === 'user' ? userText(body) : body.innerText).trim(), terminal: role === 'assistant' && terminalAction(turn), hasContent };
     };
     const markedError = [...document.querySelectorAll<HTMLElement>('[data-testid="conversation-error"], [data-testid="error-message"]')]
       .find(element => visible(element) && afterLastUser(element));
@@ -294,6 +298,11 @@ export class ChatGPTAdapter {
     return pageOperationResult<T>(await this.track(this.contents.executeJavaScript(pageOperationScript(operation), true)));
   }
   private inspect(): Promise<Page> { return this.evaluate<Page>({ kind: 'inspect' }); }
+  private async clearConfirmedDraft(page: Page, value: string): Promise<void> {
+    await this.context.acquireExecution?.();
+    try { await this.evaluate({ kind: 'clear', url: page.url, anchor: this.anchor(page), value }); }
+    finally { this.context.releaseExecution?.(); }
+  }
   private anchor(page: Page): string { return JSON.stringify(page.messages.filter(message => message.role === 'user').map(message => [message.id, message.text])); }
   private async loaded(): Promise<void> { while (this.contents.isLoading()) await this.delay(); }
   private async idle(): Promise<Page> {
@@ -477,7 +486,7 @@ export class ChatGPTAdapter {
     // completion window can ever elapse on a recovered turn.
     this.context.stage('generating', task.retryCount ? Math.max(30000, task.replyTimeoutMs ?? 0) : task.replyTimeoutMs);
     this.context.releaseExecution?.();
-    const turns = new ReplyTurnTracker(baseline.messages, value, task.submittedMessageId);
+    let turns = new ReplyTurnTracker(baseline.messages, value, task.submittedMessageId);
     let acknowledged = !!task.background && !!task.submittedAt && !!task.submittedMessageId && !task.submittedMessageId.startsWith('position:');
     let boundUrl = conversation?.url;
     let observedConversationUrl = boundUrl;
@@ -538,6 +547,19 @@ export class ChatGPTAdapter {
         // Do not restart this same failed comparison forever. Observe the
         // conversation stopping below; never claim a matched answer or resend.
         if (!task.background || acknowledged || !boundUrl || !(error instanceof Error) || !error.message.startsWith('CONVERSATION_CHANGED:')) throw error;
+        // Older persisted receipts may contain layout-generated whitespace.
+        // A new stable ID immediately after the recorded last user, with the
+        // exact queued text, still proves this submission without reusing an
+        // older identical prompt or weakening foreground answer matching.
+        const users = page.messages.filter(message => message.role === 'user');
+        const previousId = baseline.messages.filter(message => message.role === 'user').at(-1)?.id;
+        const candidate = users.at(-1);
+        if (users.length >= 2 && previousId && users.at(-2)?.id === previousId && candidate &&
+          !candidate.id.startsWith('position:') && !baseline.messages.some(message => message.id === candidate.id) &&
+          candidate.text.replace(/\r\n?/g, '\n') === value.replace(/\r\n?/g, '\n').trim()) {
+          ownUser = candidate;
+          turns = new ReplyTurnTracker(page.messages.slice(0, page.messages.indexOf(candidate)), value, candidate.id);
+        }
       }
       if (ownUser && !acknowledged) { this.context.submitted(ownUser.id); acknowledged = true; }
       // A click can be ignored while ChatGPT hydrates or reconnects. Retry only
@@ -561,6 +583,8 @@ export class ChatGPTAdapter {
         boundUrl = conversationUrl(replyUrl).url;
         this.conversations.bind(task.accountId, conversation.id, boundUrl);
       }
+      const retainedOwnDraft = !!task.background && acknowledged && !!ownUser && !!page.draft.trim() &&
+        page.draft.replace(/\r\n?/g, '\n').trim() === value.replace(/\r\n?/g, '\n').trim();
       if (page.error) {
         // A visible reply error is terminal only after the sent user turn and
         // the actual conversation are confirmed. Earlier failures stay in the
@@ -568,10 +592,11 @@ export class ChatGPTAdapter {
         if (acknowledged && boundUrl) {
           if (page.busy) continue;
           {
-            const fingerprint = JSON.stringify([replyUrl, page.messages, page.error]);
+            const fingerprint = JSON.stringify([replyUrl, page.messages, page.error, page.draft]);
             if (fingerprint !== failureFingerprint) { failureFingerprint = fingerprint; failureSince = now; }
             if (now - failureSince < COMPLETION_STABLE_MS) continue;
           }
+          if (retainedOwnDraft) await this.clearConfirmedDraft(page, value);
           throw new ReportedReplyError(page.error, !!page.failure);
         }
         if (!task.background || !boundUrl) throw new Error(page.error);
@@ -584,7 +609,7 @@ export class ChatGPTAdapter {
       }
       const finished = acknowledged && !!boundUrl && page.editor && !page.busy && !page.draft.trim() && userIndex >= 0 &&
         page.messages.length > userIndex + 1 && last?.role === 'assistant' && last.terminal && (!!last.text || !!last.hasContent);
-      const fingerprint = JSON.stringify([replyUrl, page.messages]);
+      const fingerprint = JSON.stringify([replyUrl, page.messages, page.draft]);
       // Long ChatGPT replies can unmount even the submitted user turn. A queue
       // can advance after an acknowledged send and a stable idle page without
       // claiming that an uncorrelated visible answer belongs to that send.
@@ -592,10 +617,14 @@ export class ChatGPTAdapter {
       const unmountedSubmission = !!task.background && acknowledged && userIndex < 0;
       const unconfirmedSubmission = !!task.background && !acknowledged && !!task.sendIntentAt && !!task.sendReceipt &&
         now - task.sendIntentAt >= 30000 && (page.messages.length > 0 || !!page.error);
-      const stopped = !!boundUrl && page.editor && page.readiness === 'ready' && !page.busy && !page.draft.trim() &&
+      const stopped = !!boundUrl && page.editor && page.readiness === 'ready' && !page.busy && (!page.draft.trim() || retainedOwnDraft) &&
         (acknowledged && (userIndex >= 0 || unmountedSubmission) || unconfirmedSubmission);
       if (!stopped || fingerprint !== previous) since = Date.now();
       if (stopped && Date.now() - since >= COMPLETION_STABLE_MS) {
+        if (retainedOwnDraft) {
+          await this.clearConfirmedDraft(page, value);
+          previous = ''; since = Date.now(); continue;
+        }
         if (unconfirmedSubmission) throw new ReportedReplyError('网页已停止，旧发送记录无法确认；结束本轮并继续下一条', true, true);
         if (finished) return { submitted: true, response: last!.text.slice(0, 64000), url: boundUrl, conversationId: conversation?.id, replyToken: replyToken(ownUser!, last!) };
         if (unmountedSubmission && last?.role === 'assistant' && last.terminal) return { submitted: true, responseUnavailable: true, completionReason: 'idle_after_submitted_turn_unmounted', url: boundUrl, conversationId: conversation?.id };

@@ -27,6 +27,7 @@ try {
   const fail=await add(account.id,conv.id,'无法思考');
   const interruption=await add(account.id,conv.id,'interrupted');
   const stop=await add(account.id,conv.id,'stopped');
+  const retained=await add(account.id,conv.id,'retained-draft');
   const last=await add(account.id,conv.id,'last');
   const retry=await rpc('conversations.register',{accountId:other.id,url:'https://chatgpt.com/c/retry'});
   const retryTask=await add(other.id,retry.id,'retry-head');
@@ -43,12 +44,12 @@ try {
   assert.equal(completedLong.status,'done');assert.equal(completedLong.result.responseUnavailable,true);
   assert.equal(completedLong.result.response,undefined);assert.equal(completedLong.attention,undefined);
   assert.equal((await rpc('tasks.get',{id:unmountedStop.id})).sendReceipt.anchor.role,'assistant');
-  for(const t of [first,last,retryTask,retryNext,ignoredTask,ignoredNext])assert.equal((await rpc('tasks.get',{id:t.id})).status,'done');
+  for(const t of [first,last,retained,retryTask,retryNext,ignoredTask,ignoredNext])assert.equal((await rpc('tasks.get',{id:t.id})).status,'done');
   for(const t of [fail,interruption,stop,unmountedStop]) {const v=await rpc('tasks.get',{id:t.id});assert.equal(v.status,'failed');assert.equal(v.attention,undefined);assert.ok(v.submittedAt);}
   assert.equal((await rpc('tasks.get',{id:retryTask.id})).retryCount,1);
   const bound=await rpc('conversations.get',{accountId:account.id,conversation:conv.id});assert.equal(bound.url,'https://chatgpt.com/c/modern-bound');
   const contents=await desktop.evaluate(async({webContents})=>Promise.all(webContents.getAllWebContents().filter(w=>w.getURL().startsWith('https://chatgpt.com/c/')).map(async w=>({url:w.getURL(),...await w.executeJavaScript('({sent:window.sent,clicks:window.clicks})')}))));
-  assert.deepEqual(contents.find(p=>p.url===bound.url).sent,['first','无法思考','interrupted','stopped','last']);
+  assert.deepEqual(contents.find(p=>p.url===bound.url).sent,['first','无法思考','interrupted','stopped','retained-draft','last']);
   assert.deepEqual(contents.find(p=>p.url.endsWith('/retry')).sent,['retry-head','retry-next']);
   const ignoredPage=contents.find(p=>p.url.endsWith('/ignored'));assert.deepEqual(ignoredPage.sent,['ignored-click','after-ignored']);assert.equal(ignoredPage.clicks,3);
   const longPage=contents.find(p=>p.url.endsWith('/long'));assert.deepEqual(longPage.sent,['virtualized-long-reply','virtualized-stopped','after-long-reply']);assert.equal(longPage.clicks,3);

@@ -14,7 +14,7 @@ if(location.pathname.includes('retry')&&!sessionStorage.getItem('fill-recovered'
 form.onsubmit=e=>{e.preventDefault();window.clicks++;const text=editor.innerText.trim();if(!text||busy)return;
 if(text==='ignored-click'&&window.clicks===1)return;
 for(const item of unmounted)item.parent.prepend(item.node);unmounted=[];
-busy=true;window.sent.push(text);editor.textContent='';control();
+busy=true;window.sent.push(text);editor.textContent=text==='retained-draft'?text:'';control();
 const id=crypto.randomUUID(),turn=document.createElement('div');turn.dataset.turnKey=id;
 const user=document.createElement('div');user.dataset.chatgptSearchUnitKey='turn:'+id+':0:user';user.dataset.chatgptSearchMessageIds=id;
 const bubble=document.createElement('div');bubble.dataset.userMessageBubble='true';bubble.textContent=text;user.append(bubble);turn.append(user);turns.append(turn);

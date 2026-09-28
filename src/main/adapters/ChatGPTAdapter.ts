@@ -486,7 +486,7 @@ export class ChatGPTAdapter {
     // completion window can ever elapse on a recovered turn.
     this.context.stage('generating', task.retryCount ? Math.max(30000, task.replyTimeoutMs ?? 0) : task.replyTimeoutMs);
     this.context.releaseExecution?.();
-    let turns = new ReplyTurnTracker(baseline.messages, value, task.submittedMessageId);
+    let turns = new ReplyTurnTracker(baseline.messages, value, task.submittedMessageId, !!task.background);
     let acknowledged = !!task.background && !!task.submittedAt && !!task.submittedMessageId && !task.submittedMessageId.startsWith('position:');
     let boundUrl = conversation?.url;
     let observedConversationUrl = boundUrl;
@@ -558,7 +558,7 @@ export class ChatGPTAdapter {
           !candidate.id.startsWith('position:') && !baseline.messages.some(message => message.id === candidate.id) &&
           candidate.text.replace(/\r\n?/g, '\n') === value.replace(/\r\n?/g, '\n').trim()) {
           ownUser = candidate;
-          turns = new ReplyTurnTracker(page.messages.slice(0, page.messages.indexOf(candidate)), value, candidate.id);
+          turns = new ReplyTurnTracker(page.messages.slice(0, page.messages.indexOf(candidate)), value, candidate.id, true);
         }
       }
       if (ownUser && !acknowledged) { this.context.submitted(ownUser.id); acknowledged = true; }

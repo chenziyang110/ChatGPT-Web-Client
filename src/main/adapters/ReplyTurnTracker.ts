@@ -11,7 +11,8 @@ export class ReplyTurnTracker {
   private readonly history: ConversationMessage[];
   private ownId?: string;
   private readonly assistantAnchor?: ConversationMessage;
-  constructor(messages: ConversationMessage[], private readonly prompt: string, submittedId?: string) {
+  constructor(messages: ConversationMessage[], private readonly prompt: string, submittedId?: string,
+    private readonly renderedContent = false) {
     this.history = messages.filter(message => message.role === 'user').map(message => ({ ...message }));
     const tail = messages.at(-1);
     if (!this.history.length && tail?.role === 'assistant' && stableId(tail)) this.assistantAnchor = { ...tail };
@@ -21,7 +22,7 @@ export class ReplyTurnTracker {
   }
   private same(actual: ConversationMessage, expected: ConversationMessage): void {
     if (actual.id !== expected.id) changed('prior user identity or order changed');
-    if (actual.text !== expected.text) changed('prior user content changed');
+    if (!(this.renderedContent && stableId(actual) && stableId(expected)) && actual.text !== expected.text) changed('prior user content changed');
   }
   private historyBeforeOwn(visible: ConversationMessage[]): void {
     if (visible.length === this.history.length && visible.every((message, index) => message.id === this.history[index].id)) {
@@ -86,7 +87,10 @@ export class ReplyTurnTracker {
       own = candidate;
     }
     if (own) {
-      if (own.text.replace(/\r\n?/g, '\n') !== this.prompt.replace(/\r\n?/g, '\n').trim()) changed('submitted turn does not match');
+      // The website may render Markdown links differently from composer source.
+      // Background queues already verify the exact draft before clicking; stable
+      // history/turn identities remain mandatory. API answer retrieval is strict.
+      if ((!this.renderedContent || !stableId(own)) && own.text.replace(/\r\n?/g, '\n') !== this.prompt.replace(/\r\n?/g, '\n').trim()) changed('submitted turn does not match');
       this.ownId = own.id;
     }
     return own;

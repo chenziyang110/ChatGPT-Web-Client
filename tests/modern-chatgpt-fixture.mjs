@@ -17,7 +17,7 @@ for(const item of unmounted)item.parent.prepend(item.node);unmounted=[];
 busy=true;window.sent.push(text);editor.textContent=text==='retained-draft'?text:'';control();
 const id=crypto.randomUUID(),turn=document.createElement('div');turn.dataset.turnKey=id;
 const user=document.createElement('div');user.dataset.chatgptSearchUnitKey='turn:'+id+':0:user';user.dataset.chatgptSearchMessageIds=id;
-const bubble=document.createElement('div');bubble.dataset.userMessageBubble='true';bubble.textContent=text;user.append(bubble);turn.append(user);turns.append(turn);
+const bubble=document.createElement('div');bubble.dataset.userMessageBubble='true';bubble.textContent=text==='[Link](https://example.com)'?'Link':text;user.append(bubble);turn.append(user);turns.append(turn);
 if(location.pathname==='/'){history.replaceState({},'', '/c/local-chatgpt%3A11111111-1111-4111-8111-111111111111');setTimeout(()=>history.replaceState({},'', '/c/modern-bound'),800);}
 setTimeout(()=>{busy=false;control();if(text==='无法思考'||text==='interrupted'){const p=document.createElement('div');p.textContent=text==='interrupted'?'连接已中断。正在等待完整回复':'无法思考';turn.append(p);return;}
 if(text==='stopped')return;

@@ -7,6 +7,20 @@ const answer: ConversationMessage = { id: 'reply', role: 'assistant', text: 'Ans
 const history = [user('old-1'), user('old-2'), user('old-3')];
 const own = user('submitted', 'Question');
 
+test('queue tracking uses stable turn boundaries when Markdown rendering changes source text', () => {
+  const original = user('anchor', '[old](https://example.com/old)');
+  const rendered = user('anchor', 'old');
+  const sent = user('new', 'new link');
+  const tracker = new ReplyTurnTracker([original], '[new link](https://example.com/new)', undefined, true);
+  assert.equal(tracker.read([rendered, sent]), sent);
+  assert.equal(tracker.read([sent]), sent);
+  assert.equal(new ReplyTurnTracker([original], 'source', 'new', true).read([rendered, sent]), sent);
+  assert.throws(() => new ReplyTurnTracker([original], 'source').read([rendered, sent]), /content changed/);
+  assert.throws(() => new ReplyTurnTracker([original], 'source', undefined, true).read([sent]), /anchor is missing/);
+  assert.throws(() => tracker.read([sent, user('extra', 'new link')]), /additional user turn/);
+  assert.throws(() => new ReplyTurnTracker([], 'source', undefined, true).read([user('position:0', 'different')]), /does not match/);
+});
+
 test('sending after a virtualized answer tolerates remounted history without acknowledging an older identical prompt', () => {
   const tracker = new ReplyTurnTracker([answer], 'Question');
   const older = user('older-identical', 'Question');

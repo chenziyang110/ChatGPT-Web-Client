@@ -210,3 +210,24 @@ test('missing submitted DOM is not completion during generation, loading, draft 
     } finally { clearTimeout(timer); db.close(); }
   }));
 });
+
+test('receipt recovery reports unavailable pages promptly without replaying or consuming the queued send', async () => {
+  for (const readiness of ['loading', 'login_required', 'verification_required']) {
+    const db = new Database(':memory:'); const conversations = new Conversations(db);
+    const url = 'https://chatgpt.com/c/unavailable'; const conversation = conversations.register('account', url);
+    const task: AgentTask = { id: 'unavailable', accountId: 'account', conversationId: conversation.id, background: true,
+      input: { type: 'prompt', prompt: 'Question', submit: true }, status: 'running', createdAt: 1, updatedAt: 1,
+      prepareTimeoutMs: 1, sendIntentAt: 1, submittedAt: 2, submittedMessageId: 'sent', sendReceipt: { url, users: [] } };
+    const contents = { isLoading: () => false, getURL: () => url, isDestroyed: () => false,
+      executeJavaScript: async (script: string) => {
+        const operation = JSON.parse(script.slice(script.lastIndexOf(')(') + 2, -1));
+        assert.equal(operation.kind, 'inspect');
+        return pageResult({ url, title: 'Loading', readiness, editor: false, draft: '', busy: false, messages: [] });
+      } } as unknown as WebContents;
+    const context: ExecutionContext = { task: () => task, stage: () => {}, intent: () => assert.fail('resend'), submitted: () => assert.fail('already acknowledged') };
+    try {
+      await assert.rejects(new ChatGPTAdapter(contents, new AbortController().signal, context, conversations).execute(task.input),
+        readiness === 'loading' ? /COMPOSER_NOT_READY/ : readiness === 'login_required' ? /LOGIN_REQUIRED/ : /VERIFICATION_REQUIRED/);
+    } finally { db.close(); }
+  }
+});

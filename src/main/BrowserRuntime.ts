@@ -671,11 +671,12 @@ export class BrowserRuntime {
     try {
       // Retry the fixed conversation, never another selected tab. Reload only
       // a stalled, empty, idle page; preserve human drafts and active replies.
-      if (task.retryCount && !task.sendIntentAt && conversation?.binding !== 'uncertain' && !contents.isLoading()) {
+      if (task.retryCount && conversation?.binding !== 'uncertain' && !contents.isLoading()) {
         let safeToReload = false;
         try {
           const page = pageOperationResult<Page>(await contents.executeJavaScript(pageOperationScript({ kind: 'inspect' })));
-          safeToReload = !page.busy && !page.draft.trim() && page.readiness !== 'login_required' && page.readiness !== 'verification_required';
+          safeToReload = !page.busy && !page.draft.trim() && page.readiness !== 'login_required' && page.readiness !== 'verification_required' &&
+            (!task.sendIntentAt || page.readiness === 'loading');
         } catch { safeToReload = contents.isCrashed(); }
         if (safeToReload) await contents.loadURL(conversation?.url ?? task.targetUrl ?? HOME_URL);
       }

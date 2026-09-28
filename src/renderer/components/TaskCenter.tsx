@@ -7,7 +7,7 @@ import { canClearTask } from '../../shared/taskHistory';
 import { QueueOverview } from './QueueOverview';
 import { LONG_REPLY_TIMEOUT_MS } from '../../shared/conversationQueue';
 export const statusLabels = { pending: '等待中', running: '运行中', done: '已完成', failed: '失败', cancelled: '已取消', blocked: '需要处理', waiting_user: '等待你的选择', uncertain: '待核对' };
-export const phaseLabels = { queued: '已排队', preparing: '准备页面', waiting_idle: '等待上一轮结束', preparing_prompt: '填写提示词', send_intent: '正在发送', submitted: '已发送，等待回复', generating: '等待回复', completed: '已完成' };
+export const phaseLabels = { queued: '已排队', preparing: '准备页面', waiting_page: '等待会话页面恢复', waiting_idle: '等待上一轮结束', preparing_prompt: '填写提示词', send_intent: '正在发送', submitted: '已发送，等待回复', generating: '等待回复', completed: '已完成' };
 const taskLabels = { prompt: '提示词', snapshot: '页面快照', navigate: '页面导航', fill: '填写内容', click: '点击元素' };
 type Action = (method: string, params?: Record<string, unknown>, after?: () => void) => Promise<void>;
 export function TaskCenter({ state, busy, action, inspect, takeover, agentPrompt, openQueue }: {

@@ -10,6 +10,7 @@ const changed = (detail: string): never => { throw new Error(`CONVERSATION_CHANG
 export class ReplyTurnTracker {
   private readonly history: ConversationMessage[];
   private ownId?: string;
+  private readonly restoredSubmission: boolean;
   private readonly assistantAnchor?: ConversationMessage;
   constructor(messages: ConversationMessage[], private readonly prompt: string, submittedId?: string,
     private readonly renderedContent = false) {
@@ -19,6 +20,7 @@ export class ReplyTurnTracker {
     // After a restart the site may virtualize every pre-send turn. A persisted
     // stable receipt still identifies our own turn without matching by text.
     if (submittedId && !submittedId.startsWith('position:')) this.ownId = submittedId;
+    this.restoredSubmission = this.renderedContent && !!this.ownId;
   }
   private same(actual: ConversationMessage, expected: ConversationMessage): void {
     if (actual.id !== expected.id) changed('prior user identity or order changed');
@@ -52,6 +54,16 @@ export class ReplyTurnTracker {
   read(messages: ConversationMessage[]): ConversationMessage | undefined {
     const users = messages.filter(message => message.role === 'user');
     if (new Set(users.map(message => message.id)).size !== users.length) changed('duplicate user message identities');
+    // A persisted send acknowledgement already establishes the turn boundary.
+    // Reloading can mount history that was never in the pre-send DOM (including
+    // an empty new-chat receipt). Do not require that old DOM window again.
+    if (this.restoredSubmission) {
+      const index = users.findIndex(message => message.id === this.ownId);
+      if (index >= 0) {
+        if (index !== users.length - 1) changed('additional user turn appeared');
+        return users[index];
+      }
+    }
     let own: ConversationMessage | undefined;
     const anchorIndex = this.assistantAnchor ? messages.findIndex(message => message.id === this.assistantAnchor!.id && message.role === 'assistant') : -1;
     if (anchorIndex >= 0) {

@@ -40,6 +40,19 @@ test('restores a persisted stable submission after all older DOM history unmount
   assert.throws(() => new ReplyTurnTracker(history, 'Question', 'position:3').read([own, answer]), /anchor is missing/);
 });
 
+test('restored queue acknowledgement survives history mounted outside its original DOM window', () => {
+  for (const baseline of [[], history, [answer]]) {
+    const tracker = new ReplyTurnTracker(baseline, 'Question', own.id, true);
+    const remounted = [user('previously-unmounted'), own, answer];
+    assert.equal(tracker.read(remounted), own);
+    assert.equal(tracker.read([own, answer]), own);
+    assert.throws(() => tracker.read([...remounted, user('external')]), /additional user turn/);
+    assert.throws(() => tracker.read([own, own]), /duplicate/);
+  }
+  assert.throws(() => new ReplyTurnTracker([], 'Question', own.id).read([user('old'), own]), /anchor is missing/);
+  assert.throws(() => new ReplyTurnTracker([], 'Question', undefined, true).read([user('old'), own]), /additional user/);
+});
+
 test('matches a sent turn after the old DOM prefix unmounts before acknowledgement', () => {
   const tracker = new ReplyTurnTracker(history, 'Question');
   assert.equal(tracker.read([...history.slice(1), own, answer]), own);

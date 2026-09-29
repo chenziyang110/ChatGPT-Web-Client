@@ -488,6 +488,7 @@ export class ChatGPTAdapter {
     this.context.releaseExecution?.();
     let turns = new ReplyTurnTracker(baseline.messages, value, task.submittedMessageId, !!task.background);
     let acknowledged = !!task.background && !!task.submittedAt && !!task.submittedMessageId && !task.submittedMessageId.startsWith('position:');
+    let correlationLost = false;
     let boundUrl = conversation?.url;
     let observedConversationUrl = boundUrl;
     let optimisticUrl: string | undefined;
@@ -541,12 +542,16 @@ export class ChatGPTAdapter {
       if (waitingForPage) { this.context.stage(acknowledged ? 'submitted' : 'generating'); waitingForPage = false; }
       unavailableSince = now;
       let ownUser: Message | undefined;
-      try { ownUser = turns.read(page.messages); }
+      try { if (!correlationLost) ownUser = turns.read(page.messages); }
       catch (error) {
         // Old queue receipts can lose every history anchor after a reload.
         // Do not restart this same failed comparison forever. Observe the
         // conversation stopping below; never claim a matched answer or resend.
-        if (!task.background || acknowledged || !boundUrl || !(error instanceof Error) || !error.message.startsWith('CONVERSATION_CHANGED:')) throw error;
+        if (!task.background || !boundUrl || !(error instanceof Error) || !error.message.startsWith('CONVERSATION_CHANGED:')) throw error;
+        // An acknowledged queue turn can be followed by external messages while
+        // the app is closed. Observe this fixed conversation until it stops;
+        // never retry the obsolete history comparison, resend, or claim its answer.
+        if (acknowledged) correlationLost = true;
         // Older persisted receipts may contain layout-generated whitespace.
         // A new stable ID immediately after the recorded last user, with the
         // exact queued text, still proves this submission without reusing an
@@ -554,7 +559,7 @@ export class ChatGPTAdapter {
         const users = page.messages.filter(message => message.role === 'user');
         const previousId = baseline.messages.filter(message => message.role === 'user').at(-1)?.id;
         const candidate = users.at(-1);
-        if (users.length >= 2 && previousId && users.at(-2)?.id === previousId && candidate &&
+        if (!acknowledged && users.length >= 2 && previousId && users.at(-2)?.id === previousId && candidate &&
           !candidate.id.startsWith('position:') && !baseline.messages.some(message => message.id === candidate.id) &&
           candidate.text.replace(/\r\n?/g, '\n') === value.replace(/\r\n?/g, '\n').trim()) {
           ownUser = candidate;
@@ -627,7 +632,8 @@ export class ChatGPTAdapter {
         }
         if (unconfirmedSubmission) throw new ReportedReplyError('网页已停止，旧发送记录无法确认；结束本轮并继续下一条', true, true);
         if (finished) return { submitted: true, response: last!.text.slice(0, 64000), url: boundUrl, conversationId: conversation?.id, replyToken: replyToken(ownUser!, last!) };
-        if (unmountedSubmission && last?.role === 'assistant' && last.terminal) return { submitted: true, responseUnavailable: true, completionReason: 'idle_after_submitted_turn_unmounted', url: boundUrl, conversationId: conversation?.id };
+        if (unmountedSubmission && last?.role === 'assistant' && last.terminal) return { submitted: true, responseUnavailable: true,
+          completionReason: correlationLost ? 'idle_after_reply_correlation_lost' : 'idle_after_submitted_turn_unmounted', url: boundUrl, conversationId: conversation?.id };
         throw new ReportedReplyError('ChatGPT 已停止回复，本轮未提供完整可确认的答复', true);
       }
       previous = fingerprint;

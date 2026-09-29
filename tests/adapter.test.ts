@@ -185,7 +185,7 @@ test('queue recovers an acknowledged long reply whose submitted user was virtual
 test('missing submitted DOM is not completion during generation, loading, draft input, or an unacknowledged send', async () => {
   await Promise.all([
     { busy: true }, { readiness: 'loading' }, { editor: false }, { draft: 'New unsent draft' },
-    { unacknowledged: true }, { changedTarget: true }, { additionalUser: true },
+    { unacknowledged: true }, { changedTarget: true },
   ].map(async variant => {
     const db = new Database(':memory:'); const conversations = new Conversations(db);
     const url = 'https://chatgpt.com/c/virtualized'; const conversation = conversations.register('account', url);
@@ -199,14 +199,14 @@ test('missing submitted DOM is not completion during generation, loading, draft 
         assert.equal(operation.kind, 'inspect');
         return pageResult({ url: variant.changedTarget ? 'https://chatgpt.com/c/other' : url,
           title: 'Long reply', readiness: 'ready', editor: true, draft: '', busy: false, ...variant,
-          messages: [...(variant.additionalUser ? [{ id: 'another-user', role: 'user', text: 'Another prompt', terminal: false }] : []),
+          messages: [
             { id: 'visible-answer', role: 'assistant', text: 'Visible answer', terminal: true }] });
       } } as unknown as WebContents;
     const context: ExecutionContext = { task: () => task, stage: () => {}, intent: () => assert.fail('resend'), submitted: () => assert.fail('missing user') };
     const timer = setTimeout(() => controller.abort(new Error('expected still waiting')), 7000);
     try {
       await assert.rejects(new ChatGPTAdapter(contents, controller.signal, context, conversations).execute(task.input),
-        variant.changedTarget ? /TARGET_CHANGED/ : variant.additionalUser ? /CONVERSATION_CHANGED/ : /expected still waiting/);
+        variant.changedTarget ? /TARGET_CHANGED/ : /expected still waiting/);
     } finally { clearTimeout(timer); db.close(); }
   }));
 });

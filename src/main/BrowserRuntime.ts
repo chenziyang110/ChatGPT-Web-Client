@@ -369,14 +369,17 @@ export class BrowserRuntime {
     const contents = this.openView(pageId).webContents;
     if (contents.isLoading()) throw new AppError('页面正在加载，请稍后打开队列', 409);
     const url = contents.getURL();
+    const home = replyPageUrl(url) === HOME_URL;
     if (owner.conversationId) {
       const existing = this.conversations.get(accountId, owner.conversationId);
-      if (this.isLocked(pageId) || existing.url === url || existing.binding !== 'bound' && url === HOME_URL) return existing;
+      if (this.isLocked(pageId) || existing.url === url || existing.binding !== 'bound' && home) return existing;
     }
     let conversation: Conversation;
-    if (url === HOME_URL) {
+    if (home) {
       const page = pageOperationResult<Page>(await contents.executeJavaScript(pageOperationScript({ kind: 'inspect' })));
-      if (contents.isDestroyed() || contents.getURL() !== url || this.owners.get(pageId) !== owner || page.busy || page.messages.length || !page.editor) throw new AppError('请等待网页生成会话地址后再打开队列', 409);
+      if (contents.isDestroyed() || contents.getURL() !== url || this.owners.get(pageId) !== owner) throw new AppError('页面正在切换，队列将自动重试', 409);
+      if (!page.editor) throw new AppError('网页输入框正在加载，队列将自动重试', 409);
+      if (page.busy || page.messages.length) throw new AppError('等待网页生成会话地址，队列将自动继续', 409);
       conversation = this.conversations.create(accountId);
     } else conversation = this.conversations.register(accountId, url);
     owner.conversationId = conversation.id;

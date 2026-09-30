@@ -68,6 +68,30 @@ try {
   assert.equal(await page.evaluate(() => window.fixtureSends), 0);
   assert.deepEqual(await execute({ ...guard, kind: 'send', value: prompt }), { clicked: true });
   assert.equal(await page.evaluate(() => window.fixtureSends), 1);
+  // Live Work homepage observed 2026-09-30 has no data-chatgpt-composer.
+  // Its marked form/editor are distinct from unrelated editable widgets.
+  await page.evaluate(() => {
+    document.body.innerHTML = `<main><form id="unrelated"><div contenteditable="true" role="textbox">Unrelated draft</div><button type="submit" aria-label="发送">Other send</button></form>
+      <form data-composer-placement="home"><div data-composer-markdown contenteditable="true" role="textbox" aria-label="使用 ChatGPT Work"><p><br></p></div><button type="submit" aria-label="发送">Send</button></form></main>`;
+    window.workSends = 0; window.unrelatedSends = 0;
+    document.querySelector('#unrelated').onsubmit = event => { event.preventDefault(); window.unrelatedSends++; };
+    document.querySelector('[data-composer-placement]').onsubmit = event => { event.preventDefault(); window.workSends++; };
+  });
+  assert.equal((await execute({ kind:'diagnose' })).readiness,'ready');
+  assert.equal((await execute({ kind:'diagnose' })).dom.visibleEditorCount,1);
+  await execute({ ...guard,kind:'fill',value:prompt });
+  assert.equal(await page.locator('#unrelated [contenteditable]').innerText(),'Unrelated draft');
+  assert.deepEqual(await execute({ ...guard,kind:'check_send',value:prompt }),{ready:true});
+  await execute({ ...guard,kind:'send',value:prompt });
+  assert.deepEqual(await page.evaluate(() => ({work:window.workSends,other:window.unrelatedSends})),{work:1,other:0});
+  await page.evaluate(() => {
+    const stop = document.createElement('button'); stop.setAttribute('aria-label','停止'); document.querySelector('[data-composer-placement]').append(stop);
+  });
+  assert.equal((await execute({kind:'diagnose'})).dom.stopVisible,true);
+  assert.equal((await execute({kind:'inspect'})).busy,true);
+  await page.evaluate(() => {
+    document.body.innerHTML='<main><div id="prompt-textarea" contenteditable="true" role="textbox" style="min-height:40px"></div><button data-testid="send-button">Send</button></main>';
+  });
   // Observed on live ChatGPT: two <p> blocks produce an extra innerText newline.
   // Deliberate blank lines, soft breaks, and human edits must stay distinguishable.
   await page.evaluate(() => {

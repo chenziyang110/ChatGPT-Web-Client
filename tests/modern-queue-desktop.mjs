@@ -5,12 +5,16 @@ import path from 'node:path';
 import { modernFixture } from './modern-chatgpt-fixture.mjs';
 
 const root = path.resolve('.');
+const workMode = process.argv.includes('--work');
+const queueFixture = workMode ? modernFixture.replace('<form data-chatgpt-composer>', '<form data-composer-placement="home">')
+  .replace('aria-label="询问 ChatGPT"', 'aria-label="使用 ChatGPT Work"') : modernFixture;
+if (workMode) assert.notEqual(queueFixture,modernFixture);
 const directory = await mkdtemp(path.join(root, '.test-modern-queue-'));
 const bootstrap = path.join(directory, 'fixture.cjs');
 await writeFile(bootstrap, `const {app,Notification}=require('electron');
 Notification.isSupported=()=>false;
 app.on('browser-window-created',(_,win)=>{win.on('show',()=>win.hide())});
-app.on('session-created',s=>s.protocol.handle('https',()=>new Response(${JSON.stringify(modernFixture)},{headers:{'Content-Type':'text/html'}})));
+app.on('session-created',s=>s.protocol.handle('https',()=>new Response(${JSON.stringify(queueFixture)},{headers:{'Content-Type':'text/html'}})));
 require(${JSON.stringify(path.join(root,'dist-electron/main.cjs'))});`);
 const env={...process.env,WORKSPACE_USER_DATA:directory,WORKSPACE_HIDDEN_PAGE_IDLE_MS:'3600000',WORKSPACE_PAGE_IDLE_MS:'3600000'};delete env.ELECTRON_RUN_AS_NODE;delete env.WORKSPACE_DEV_URL;
 let desktop, rpc, passed = false;
@@ -56,7 +60,7 @@ try {
   const longPage=contents.find(p=>p.url.endsWith('/long'));assert.deepEqual(longPage.sent,['virtualized-long-reply','virtualized-stopped','after-long-reply']);assert.equal(longPage.clicks,3);
   assert.ok((await rpc('queues.status')).every(q=>!q.paused));
   passed = true;
-  console.log('Modern DOM queue: new-chat binding, delayed send button, ignored click recovery without duplicate, transient fill retry/FIFO, 3 terminal failures advancing, virtualized submitted turn completing without replay, and independent accounts passed.');
+  console.log(`${workMode ? 'Work' : 'Chat'} DOM queue: new-chat binding, delayed send button, ignored click recovery without duplicate, transient fill retry/FIFO, 3 terminal failures advancing, virtualized submitted turn completing without replay, and independent accounts passed.`);
 } finally {
   if (!passed && rpc) console.error(JSON.stringify(await rpc('workspace.status').then(s=>s.tasks.map(t=>({prompt:t.input.prompt,status:t.status,phase:t.phase,error:t.error,retry:t.retryCount}))),null,2));
   await desktop?.close();

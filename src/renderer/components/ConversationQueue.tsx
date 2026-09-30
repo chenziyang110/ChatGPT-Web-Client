@@ -16,6 +16,7 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
   inspect: (task: AgentTask) => void; takeover: (accountId: string, conversationId?: string) => void;
 }) {
   const [target, setTarget] = useState<Conversation>();
+  const [targetError, setTargetError] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -30,12 +31,24 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
   const loading = state.page?.id === page.id && state.page.loading;
   useEffect(() => {
     let disposed = false;
-    setTarget(undefined); setError(''); setEditing(undefined); setMenuId(undefined);
+    let timer: ReturnType<typeof setTimeout>;
+    setTarget(undefined); setTargetError(''); setError(''); setEditing(undefined); setMenuId(undefined);
     if (loading) return;
-    bridge.call<Conversation>('conversations.forPage', { accountId: account.id, pageId: page.id })
-      .then(value => { if (!disposed) setTarget(value); })
-      .catch(reason => { if (!disposed) setError(friendlyError(String(reason.message))); });
-    return () => { disposed = true; };
+    // React can mount ChatGPT's composer after did-finish-load. Resolve this
+    // exact tab again until ready; never require reopening the queue panel.
+    const resolve = async () => {
+      try {
+        const value = await bridge.call<Conversation>('conversations.forPage', { accountId: account.id, pageId: page.id });
+        if (!disposed) { setTarget(value); setTargetError(''); }
+      } catch (reason) {
+        if (!disposed) {
+          setTargetError(friendlyError(reason));
+          timer = setTimeout(resolve, 2000);
+        }
+      }
+    };
+    void resolve();
+    return () => { disposed = true; clearTimeout(timer); };
   }, [bridge, account.id, page.id, page.url, loading, attempt]);
   useEffect(() => {
     let disposed = false; let timer: ReturnType<typeof setTimeout>;
@@ -127,7 +140,8 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
     </div>
     {accountQueue?.paused && <p className="cq-warning">账号已暂停，请到任务中心恢复。</p>}
     {queue?.paused && queue.reason && <p className="cq-warning" role="status">{queue.reason}</p>}
-    {error && <div className="cq-error" role="alert">{error}{!target && <button className="text-button" onClick={() => setAttempt(value => value + 1)}>重新检查页面</button>}</div>}
+    {targetError && <div className="cq-error" role="status">{targetError}<button className="text-button" onClick={() => setAttempt(value => value + 1)}>立即重试</button></div>}
+    {error && <div className="cq-error" role="alert">{error}</div>}
     <div className="cq-list">
       {attention && <div className="cq-attention"><strong>{attentionCopy?.title}</strong><button className="text-button" onClick={() => inspect(attention)}>处理</button></div>}
       {running && <details className="cq-running"><summary>{running.sendIntentAt ? '当前消息' : '等待发送'} · {queueText(running)}</summary><p>{queueText(running)}</p>

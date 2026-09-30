@@ -37,4 +37,6 @@ v1.4.15 起，会话面板队列保存发送记录。重启后已发送任务自
 
 安装前退出应用并保留数据目录。macOS 使用 ad-hoc 签名，Developer ID 签名及公证尚未配置；详见 [macOS 安装与签名](MACOS.md)。x64 / ARM64 是不同安装包，暂不生成 macOS Universal 包；不支持 32 位 x86 / ARMv7。
 
+Windows 验收安装后的账号与标签页时，应从正常桌面启动入口核对。由 Windows 打包宿主（例如 Store 版开发工具）启动的子进程可能继承 AppData 重定向，读取宿主 `LocalCache/Roaming` 下的另一份记录；相同的逻辑 `userData` 路径并不能证明是同一份数据。发现两份记录时分别备份，确认物理目录与原账号标识后再处理，不覆盖数据库或混合浏览器登录资料。详见 [2026-09-30 数据目录核对](validation/composer-home-2026-09-30.md)。
+
 参考：[electron-builder 跨平台构建](https://www.electron.build/v26/docs/features/multi-platform-build/)。

@@ -53,11 +53,11 @@ export function pageOperation(operation: Operation): unknown {
   try {
     if (location.origin !== 'https://chatgpt.com') throw new Error('LOGIN_REQUIRED: sign in to ChatGPT');
     const visible = (element: Element | null | undefined): element is HTMLElement => !!element?.getClientRects().length;
-    // Both schemas are observed on live ChatGPT accounts. Do not use generated
+    // These schemas are observed on live ChatGPT chat and Work accounts. Do not use generated
     // CSS classes, translated placeholder text, or an arbitrary page textbox.
-    const editorSelector = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"][role="textbox"]';
+    const editorSelector = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"][role="textbox"], form[data-composer-placement] [data-composer-markdown][contenteditable="true"][role="textbox"]';
     const editor = [...document.querySelectorAll<HTMLElement>(editorSelector)].find(visible) ?? null;
-    const composer = editor?.closest('[data-chatgpt-composer]');
+    const composer = editor?.closest('[data-chatgpt-composer], form[data-composer-placement]');
     const composerButtons = [...(composer ?? document).querySelectorAll<HTMLButtonElement>('button')].filter(visible);
     const actionLabel = (button: HTMLElement) => (button.getAttribute('aria-label') ?? '').trim();
     const sendButton = () => [...document.querySelectorAll<HTMLButtonElement>('[data-testid="send-button"]')].find(visible) ??

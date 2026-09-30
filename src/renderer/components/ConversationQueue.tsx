@@ -42,14 +42,14 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
         if (!disposed) { setTarget(value); setTargetError(''); }
       } catch (reason) {
         if (!disposed) {
-          setTargetError(friendlyError(reason));
+          setTargetError(friendlyError(reason, 'queue'));
           timer = setTimeout(resolve, 2000);
         }
       }
     };
     void resolve();
     return () => { disposed = true; clearTimeout(timer); };
-  }, [bridge, account.id, page.id, page.url, loading, attempt]);
+  }, [bridge, account.id, page.id, page.url, loading, attempt, diagnostic?.surface]);
   useEffect(() => {
     let disposed = false; let timer: ReturnType<typeof setTimeout>;
     const sample = async () => {
@@ -97,8 +97,19 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
   async function run(method: string, params: Record<string, unknown>, done?: () => void) {
     if (pendingAction.current) return;
     pendingAction.current = true; setBusy(true); setError(''); setMenuId(undefined);
-    try { await bridge.call(method, params); done?.(); await refresh(); }
-    catch (reason) { setError(friendlyError(reason instanceof Error ? reason.message : String(reason))); }
+    try {
+      if (method === 'tasks.create') {
+        // Chat and Work share the home URL. Revalidate the mode at Enter/click,
+        // including the short gap before the next diagnostic sample arrives.
+        const current = await bridge.call<Conversation>('conversations.forPage', { accountId: account.id, pageId: page.id });
+        if (current.id !== params.conversation) {
+          setTarget(current); await refresh();
+          throw new Error('会话已切换，原队列草稿已保留。');
+        }
+      }
+      await bridge.call(method, params); done?.(); await refresh();
+    }
+    catch (reason) { setError(friendlyError(reason, 'queue')); }
     finally { pendingAction.current = false; setBusy(false); }
   }
   function enqueue() {
@@ -131,7 +142,7 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
     } else if (editing) { setEditing(undefined); editor.current?.focus(); }
     else close();
   }}>
-    <header className="cq-header"><div><h2>待发送 <span>{count}</span></h2><p title={`${account.name} · ${conversation?.alias ?? page.title ?? '新会话'}`}>{account.name} · {conversation?.alias ?? page.title ?? '新会话'}</p></div>
+    <header className="cq-header"><div><h2>待发送 <span>{count}</span></h2><p title={`${account.name} · ${conversation?.alias ?? page.title ?? '新会话'}`}>{account.name}{conversation?.surface === 'work' ? ' · 工作' : conversation?.surface === 'dot' ? ' · Your dot' : ''} · {conversation?.alias ?? page.title ?? '新会话'}</p></div>
       <button className="cq-icon-button" aria-label="关闭队列面板" title="关闭面板，队列继续运行" onClick={close}><Icon name="close" size={18} /></button></header>
     <div className={`cq-status ${attention ? 'needs-attention' : ''}`}>
       <span className={`cq-status-dot ${generating ? 'is-generating' : ''}`} /><span role="status">{status}</span>

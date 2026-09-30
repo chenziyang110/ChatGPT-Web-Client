@@ -164,8 +164,8 @@ export class Workspace {
         if (typeof params.action !== 'string') throw new AppError('Missing browser action');
         this.browser.control(account.id, params.action); result = { ok: true }; break;
       }
-      case 'conversations.register': result = this.conversations.register(this.accounts.resolve(params.accountId).id, params.url, params.alias); break;
-      case 'conversations.create': result = this.conversations.create(this.accounts.resolve(params.accountId).id, params.alias); break;
+      case 'conversations.register': result = this.conversations.register(this.accounts.resolve(params.accountId).id, params.url, params.alias, params.surface); break;
+      case 'conversations.create': result = this.conversations.create(this.accounts.resolve(params.accountId).id, params.alias, params.surface); break;
       case 'conversations.get': result = this.conversations.get(this.accounts.resolve(params.accountId).id, params.conversation); break;
       case 'conversations.forPage': {
         if (!this.browser.queueTarget) throw new AppError('会话队列不可用', 503);

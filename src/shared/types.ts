@@ -1,6 +1,8 @@
 export interface Account { id: string; name: string; alias?: string; partition: string; createdAt: number }
+export type ConversationSurface = 'chat' | 'work' | 'dot';
 export interface Conversation {
   id: string; accountId: string; alias?: string; title: string; url?: string;
+  surface?: ConversationSurface;
   remoteId?: string; binding: 'new' | 'bound' | 'uncertain'; createdAt: number; updatedAt: number;
 }
 export type TaskPhase = 'queued' | 'preparing' | 'waiting_page' | 'waiting_idle' | 'preparing_prompt' | 'send_intent' | 'submitted' | 'generating' | 'completed';
@@ -46,6 +48,7 @@ export interface ConversationNotice {
 }
 export type BrowserReadiness = 'ready' | 'loading' | 'verification_required' | 'login_required' | 'not_open' | 'unavailable';
 export interface BrowserDiagnostics {
+  surface?: ConversationSurface;
   accountId: string; url: string; title: string; readiness: BrowserReadiness;
   editor: boolean; draftLength: number; busy: boolean; documentReady?: string; suggestion: string; error?: string;
   dom?: {

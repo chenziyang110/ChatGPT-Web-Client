@@ -9,4 +9,4 @@
 - 面板仅补充模式名称，继续支持 Enter 入队、Shift+Enter 换行、暂停、编辑和调整顺序。
 - API 和 CLI 支持创建 Work 队列，并允许注册个人 Your dot 地址。
 
-真实登录账号已验证 Work / Dot 的连续发送，以及 Dot 本地观察器恢复后继续原消息。桌面回归覆盖首页模式恢复、延迟回复、首次点击无效、Dot 消息标识更换、真正退出重启与跨账号隔离。详细记录见 [Work / Your dot 队列验证](validation/work-dot-queues-2026-09-30.md)。
+真实登录账号已验证 Work / Dot 的连续发送，以及 Dot 本地观察器恢复后继续原消息。桌面回归覆盖首页模式恢复、延迟回复、首次点击无效、Dot 消息标识更换、真正退出重启与跨账号隔离。详细记录见 [Work / Your dot 队列验证](https://github.com/chenziyang110/ChatGPT-Web-Client/blob/v1.4.21/docs/validation/work-dot-queues-2026-09-30.md)。

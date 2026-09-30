@@ -21,17 +21,25 @@ import type { AgentHandoff } from '../shared/types';
 import { UpdateChecker } from './UpdateChecker';
 import { createUpdateInstaller } from './UpdateInstaller';
 import { RELEASES_URL } from '../shared/updates';
+import { RuntimeDiagnostics } from './RuntimeDiagnostics';
 
 app.setName('ChatGPT-Web-Client');
 if (process.platform === 'win32') app.setAppUserModelId('com.chenziyang.chatgptwebclient');
 if (process.env.WORKSPACE_USER_DATA) app.setPath('userData', path.resolve(process.env.WORKSPACE_USER_DATA));
 const locked = app.requestSingleInstanceLock();
+let diagnostics: RuntimeDiagnostics | undefined;
 if (!locked) app.quit();
 else void app.whenReady().then(async () => {
   const userData = app.getPath('userData');
+  diagnostics = new RuntimeDiagnostics(path.join(userData, 'logs'), app.getVersion());
+  process.on('uncaughtExceptionMonitor', error => diagnostics?.error('uncaught_exception', error));
+  app.on('child-process-gone', (_event, details) => diagnostics?.record('child_process_gone', {
+    type: details.type, reason: details.reason, exitCode: details.exitCode }));
+  app.on('will-quit', () => diagnostics?.finish('quit'));
   mkdirSync(userData, { recursive: true, mode: 0o700 });
   chmodSync(userData, 0o700);
   const db = new Database(path.join(userData, 'workspace.sqlite'));
+  diagnostics.record('database_opened');
   let stopping = false;
   let preparingUpdate = false;
   const accounts = new AccountManager(db);
@@ -39,6 +47,28 @@ else void app.whenReady().then(async () => {
   const conversations = new ConversationManager(db);
   const shortcuts = new ShortcutSettings(db);
   const win = createWindow(sessions, shortcuts);
+  let shellRecovery: ReturnType<typeof setTimeout> | undefined;
+  let shellFailures = 0;
+  let lastShellFailure = 0;
+  let recoveringShell = false;
+  win.webContents.on('did-finish-load', () => {
+    if (recoveringShell) { recoveringShell = false; diagnostics?.record('workspace_renderer_recovered'); }
+  });
+  win.webContents.on('render-process-gone', (_event, details) => {
+    diagnostics?.record('workspace_renderer_gone', { reason: details.reason, exitCode: details.exitCode });
+    if (Date.now() - lastShellFailure > 60000) shellFailures = 0;
+    if (stopping || details.reason === 'clean-exit' || shellFailures >= 3) return;
+    lastShellFailure = Date.now();
+    shellFailures++;
+    clearTimeout(shellRecovery);
+    shellRecovery = setTimeout(() => {
+      if (!stopping && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+        recoveringShell = true;
+        diagnostics?.record('workspace_renderer_reloading');
+        win.webContents.reload();
+      }
+    }, 1000);
+  });
   const bossKey = registerBossKey(globalShortcut, win);
   const tray = new Tray(path.join(__dirname, `../dist/brand/workspace.${process.platform === 'win32' ? 'ico' : 'png'}`));
   const trayRegistration = registerTray({
@@ -76,10 +106,12 @@ else void app.whenReady().then(async () => {
       create: options => new Notification(options) }, notice, accountName, openCompletedConversation);
   });
   browser = new BrowserRuntime(win, accounts, sessions, changed, conversations, shortcuts, notifications);
+  diagnostics.record('browser_initialized', { accounts: accounts.list().length, tabs: browser.pages().length });
   const tasks = new AgentGateway(db, (id, input, signal, context) => browser.execute(id, input, signal, context), () => {
     browser.setLocked(tasks.lockedTasks()); changed();
   });
   const discoveryFile = path.join(userData, 'agent-runtime.json');
+  diagnostics.record('queues_initialized');
   let apiError: string | undefined;
   let stopped = false;
   const workspace: Workspace = new Workspace(accounts, tasks, browser, changed, () => ({
@@ -200,6 +232,8 @@ else void app.whenReady().then(async () => {
   app.on('activate', () => { if (!win.isDestroyed()) win.show(); });
   const shutdown = async (installUpdate = false) => {
     stopping = true;
+    diagnostics?.record('stopping', { update: installUpdate });
+    clearTimeout(shellRecovery);
     updates.cancelDownload();
     bossKey.dispose();
     trayRegistration.dispose();
@@ -233,7 +267,10 @@ else void app.whenReady().then(async () => {
   const activeId = accounts.activeId() ?? accounts.list()[0]?.id;
   browser.setLocked(tasks.lockedTasks());
   if (activeId) { accounts.activate(activeId); browser.activate(activeId); }
+  diagnostics.record('ready', { accounts: accounts.list().length, tabs: browser.pages().length, api: api.endpoint !== null });
 }).catch(error => {
+  diagnostics?.error('startup_failed', error);
+  diagnostics?.finish('startup_failed');
   dialog.showErrorBox('ChatGPT Web Client could not start', error instanceof Error ? error.message : String(error));
   app.exit(1);
 });

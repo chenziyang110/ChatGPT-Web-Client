@@ -25,6 +25,7 @@ type Modal = { kind: 'create' } | { kind: 'rename' | 'remove'; account: Account 
 function App() {
   const bridge = window.workspace;
   const [state, setState] = useState<WorkspaceState>();
+  const [loadError, setLoadError] = useState<string>();
   const [tab, setTab] = useState<Tab>('workspace');
   const [modal, setModal] = useState<Modal>();
   const [name, setName] = useState('');
@@ -55,8 +56,15 @@ function App() {
   async function refresh() {
     if (!bridge) return;
     const count = ++refreshCounter.current;
-    const next = await bridge.call<WorkspaceState>('workspace.status');
-    if (count === refreshCounter.current) setState(next);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const next = await Promise.race([bridge.call<WorkspaceState>('workspace.status'),
+        new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error('Workspace status timeout')), 10000); })]);
+      if (count === refreshCounter.current) { setState(next); setLoadError(undefined); }
+    } catch (error) {
+      if (count === refreshCounter.current) setLoadError(friendlyError(error));
+      throw error;
+    } finally { clearTimeout(timeout); }
   }
   useEffect(() => {
     if (!bridge) return;
@@ -66,6 +74,17 @@ function App() {
     void refresh().catch(e => setError(String(e.message)));
     return () => { clearTimeout(timer); off(); };
   }, [bridge]);
+  useEffect(() => {
+    if (!bridge || !loadError) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const retry = async () => {
+      try { await refresh(); } catch { /* Retain the saved view and retry automatically. */ }
+      if (!cancelled) timer = setTimeout(() => { void retry(); }, 5000);
+    };
+    timer = setTimeout(() => { void retry(); }, 5000);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [bridge, loadError]);
   useEffect(() => {
     // Native account views sit above the renderer, including portaled menus.
     void bridge?.call('ui.visibility', { visible: tab === 'workspace' && !modal && !accountMenuOpen }).catch(e => setError(String(e.message)));
@@ -189,8 +208,9 @@ function App() {
         <button className={tab === 'workspace' ? 'nav active' : 'nav'} aria-current={tab === 'workspace' ? 'page' : undefined} onClick={() => setTab('workspace')}><Icon name="grid" /> 工作空间 <Icon name="arrow" className="nav-arrow" size={15} /></button>
         <button className={tab === 'tasks' ? 'nav active' : 'nav'} aria-current={tab === 'tasks' ? 'page' : undefined} onClick={() => setTab('tasks')}><Icon name="tasks" /> 任务中心 <b title={attentionTasks.length ? `${attentionTasks.length} 个任务需要处理` : '执行中的任务'}>{state?.tasks.filter(t => ['pending', 'running'].includes(t.status) || t.attention && !t.resolvedAt).length || ''}</b></button>
       </nav>
-      <div className="section-label"><span>我的账号 <b>{state?.accounts.length ?? 0}</b></span><Icon name="lock" size={13} /></div>
+      <div className="section-label"><span>我的账号 <b>{state?.accounts.length ?? '…'}</b></span><Icon name="lock" size={13} /></div>
       <div className="account-list">
+        {!state && <div className="accounts-empty" role="status"><p>{loadError ? '账号加载失败，正在重试' : '正在读取账号…'}</p></div>}
         {state?.accounts.length === 0 && <div className="accounts-empty"><div className="account-placeholders"><span /><span /><span /></div><p>还没有账号</p></div>}
         {state?.accounts.map((account, index) => <div key={account.id} className={`account-row ${active?.id === account.id ? 'selected' : ''}`}>
           <button className="account" disabled={busy} title={account.name} aria-current={active?.id === account.id ? 'true' : undefined} onClick={() => void action('accounts.switch', { id: account.id }, () => setTab('workspace'))}>
@@ -201,7 +221,7 @@ function App() {
           <ReplyBadge account={account} count={accountActivity(state, account.id).count} onClick={() => openUnread(account)} />
           <button className="account-edit" title={`管理 ${account.name}`} aria-label={`管理 ${account.name}`} onClick={() => openModal({ kind: 'rename', account })}><Icon name="more" size={17} /></button>
         </div>)}
-        <button className="add-account" onClick={() => openModal({ kind: 'create' })}><Icon name="plus" size={16} /> 添加账号</button>
+        <button className="add-account" disabled={!state} onClick={() => openModal({ kind: 'create' })}><Icon name="plus" size={16} /> 添加账号</button>
       </div>
       <div className="sidebar-footer">
         <div className="local-note"><Icon name="shield" size={20} /><div>本机存储<small>独立登录 · 本地保存</small></div><span className="green-dot" /></div>
@@ -230,7 +250,7 @@ function App() {
           <button id="queue-toggle" className={`queue-toggle ${queueOpen ? 'selected' : ''}`} aria-expanded={queueOpen} aria-label={`会话队列${queueCount ? `，${queueCount} 条待发送` : ''}`} onClick={() => setQueueOpen(value => !value)}><Icon name="tasks" size={15} /> 会话队列{queueCount > 0 && <b>{queueCount}</b>}</button>
           <button className="agent-toolbar" disabled={busy} onClick={() => void openPageAgent(active.id)}><Icon name="terminal" size={15} /> Agent 协作</button>
           <button className="new-chat" disabled={busy} onClick={() => void action('browser.newConversation', { accountId: active.id })}><Icon name="plus" size={15} /> 新对话</button>
-        </> : <span className="toolbar-note"><Icon name={tab === 'tasks' ? 'terminal' : tab === 'settings' ? 'lock' : 'shield'} size={14} />{tab === 'tasks' ? '按账号和会话管理队列' : tab === 'settings' ? '快捷键、接口和数据设置' : '添加账号后登录 ChatGPT'}</span>}
+        </> : <span className="toolbar-note"><Icon name={tab === 'tasks' ? 'terminal' : tab === 'settings' ? 'lock' : 'shield'} size={14} />{tab === 'tasks' ? '按账号和会话管理队列' : tab === 'settings' ? '快捷键、接口和数据设置' : !state ? '正在读取本地账号' : '添加账号后登录 ChatGPT'}</span>}
       </div>
       {tab === 'workspace' && active && accountPages.length > 1 && <div className="conversation-tabs" role="tablist" aria-label="打开的会话">{accountPages.map(page => <div className={`conversation-tab ${page.selected ? 'selected' : ''}`} key={page.id}>
         <button role="tab" aria-selected={page.selected} title={page.title} onClick={() => void action('browser.select', { accountId: active.id, pageId: page.id })}>{page.locked ? <span className="preview-dot" /> : <Icon name="chat" size={14} />}<span>{page.title}</span></button>
@@ -266,7 +286,13 @@ function App() {
           clearDraft={(key, text) => setQueueDrafts(values => values[key] === text ? { ...values, [key]: '' } : values)} refresh={refresh} close={closeQueue}
           inspect={task => openModal({ kind: 'task', task })} takeover={takeover} />}
       </div>}
-      {tab === 'workspace' && (!state || !active) && <section className="welcome">
+      {tab === 'workspace' && !state && <section className="empty-state" role="status">
+        <div className="empty-icon"><Icon name="refresh" size={32} className={loadError ? '' : 'spinning'} /></div>
+        <h2>{loadError ? '暂时无法读取账号' : '正在读取本地账号'}</h2>
+        <p>{loadError ? '正在自动重试，你保存的账号不会因此被清空。' : '正在恢复账号和打开的会话。'}</p>
+        {loadError && <button className="primary" onClick={() => void refresh().catch(() => {})}>重新读取账号</button>}
+      </section>}
+      {tab === 'workspace' && state && !active && <section className="welcome">
         <div className="welcome-body"><div className="welcome-art"><div className="orbit-ring" /><div className="logo-tile"><Logo /></div><span className="orbit-label orbit-personal"><span className="mini-avatar">P</span> 个人账号 <span className="green-dot" /></span><span className="orbit-label orbit-work"><span className="mini-avatar warm">W</span> 工作账号 <Icon name="check" size={12} /></span></div>
 
         <h2>在这里管理 ChatGPT 账号</h2>

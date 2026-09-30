@@ -370,18 +370,23 @@ export class BrowserRuntime {
     if (contents.isLoading()) throw new AppError('页面正在加载，请稍后打开队列', 409);
     const url = contents.getURL();
     const home = replyPageUrl(url) === HOME_URL;
+    const page = pageOperationResult<Page>(await contents.executeJavaScript(pageOperationScript({ kind: 'inspect' })));
+    if (contents.isDestroyed() || contents.getURL() !== url || this.owners.get(pageId) !== owner) throw new AppError('页面正在切换，队列将自动重试', 409);
+    if (!page.editor) throw new AppError('网页输入框正在加载，队列将自动重试', 409);
     if (owner.conversationId) {
       const existing = this.conversations.get(accountId, owner.conversationId);
-      if (this.isLocked(pageId) || existing.url === url || existing.binding !== 'bound' && home) return existing;
+      if (this.isLocked(pageId)) return existing;
+      if (existing.url === replyPageUrl(url)) {
+        if (existing.surface === 'work' && page.surface !== 'work') throw new AppError('正在恢复工作会话，队列将自动重试', 409);
+        return this.conversations.register(accountId, existing.url, undefined, page.surface);
+      }
+      if (existing.binding !== 'bound' && home && (existing.surface ?? 'chat') === (page.surface ?? 'chat')) return existing;
     }
     let conversation: Conversation;
     if (home) {
-      const page = pageOperationResult<Page>(await contents.executeJavaScript(pageOperationScript({ kind: 'inspect' })));
-      if (contents.isDestroyed() || contents.getURL() !== url || this.owners.get(pageId) !== owner) throw new AppError('页面正在切换，队列将自动重试', 409);
-      if (!page.editor) throw new AppError('网页输入框正在加载，队列将自动重试', 409);
       if (page.busy || page.messages.length) throw new AppError('等待网页生成会话地址，队列将自动继续', 409);
-      conversation = this.conversations.create(accountId);
-    } else conversation = this.conversations.register(accountId, url);
+      conversation = this.conversations.create(accountId, undefined, page.surface ?? 'chat');
+    } else conversation = this.conversations.register(accountId, replyPageUrl(url) ?? url, undefined, page.surface);
     owner.conversationId = conversation.id;
     this.saveTabs(accountId);
     this.changed();

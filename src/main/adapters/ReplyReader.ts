@@ -16,7 +16,7 @@ export class ReplyReader {
     if (!own || normalize(own.text) !== normalize(task.input.prompt) ||
       (task.submittedMessageId ? own.id !== task.submittedMessageId : users.length !== 1)) return unavailable('无法确认原问题，请核对任务对应的会话');
     const last = page.messages.at(-1);
-    const canonical = !url.includes('/c/WEB:') && url.includes('/c/');
+    const canonical = /^https:\/\/chatgpt\.com\/(?:c|dots)\/[a-zA-Z0-9_-]+$/.test(url);
     const answer = last?.role === 'assistant' && page.messages.indexOf(last) > page.messages.indexOf(own) ? last : undefined;
     const result = answer ? { response: answer.text.slice(0, 64000), url: canonical ? url : undefined, conversationId: task.conversationId } : undefined;
     const fingerprint = JSON.stringify([url, page.messages]);

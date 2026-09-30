@@ -190,6 +190,8 @@ test('conversation addressing and CLI reject ambiguous targets, unsupported URLs
   conversations.bind('a', fresh.id, 'https://chatgpt.com/c/new'); assert.equal(conversations.get('a', fresh.id).binding, 'bound');
   assert.throws(() => conversations.bind('a', fresh.id, 'https://chatgpt.com/c/different'));
   assert.equal(argumentsFor(['prompt', '--account', 'work', '--new', '--text', '你好', '--submit']).options.text, '你好');
+  assert.equal(argumentsFor(['conversations', 'create', '--account', 'a', '--surface', 'work']).options.surface, 'work');
+  assert.throws(() => argumentsFor(['--surface']));
   assert.throws(() => argumentsFor(['--account'])); assert.throws(() => argumentsFor(['--unknown']));
   assert.throws(() => argumentsFor(['--new', '--new'])); assert.throws(() => seconds('NaN')); assert.equal(seconds('120'), 120000);
   db.close();

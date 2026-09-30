@@ -1,10 +1,13 @@
 /** Translate runtime diagnostics into a short message with a useful next step. */
-export function friendlyError(value: unknown): string {
+export function friendlyError(value: unknown, context?: 'queue'): string {
   const raw = value instanceof Error ? value.message : String(value);
   const message = raw.replace(/^(?:Error:\s*)?(?:Error invoking remote method '[^']+':\s*)?(?:Error:\s*)?/, '').trim();
   const messages: [RegExp, string][] = [
     [/QUEUE_CHANGED/, '这条消息或队列已更新，请查看最新状态后再操作。'],
-    [/Use a personal .*conversation URL|Shared, temporary and special chats/, '当前会话暂不支持 Agent 协作，请切换到普通会话或新建会话。'],
+    [/Use a personal .*URL|Shared, temporary and special chats/, context === 'queue'
+      ? '当前页面暂不支持队列，请打开聊天、工作会话或 Your dot。'
+      : '当前会话暂不支持 Agent 协作，请打开聊天、工作会话或 Your dot。'],
+    [/SURFACE_UNAVAILABLE|SURFACE_CHANGED/, '正在恢复原会话模式，随后自动继续。'],
     [/Only https:\/\/chatgpt.com|Invalid URL/, '这个链接暂不支持，请使用 ChatGPT 会话链接。'],
     [/USER_DECISION_REQUIRED/, '有任务需要确认，请到任务中心选择处理方式。'],
     [/STALE_DECISION/, '任务状态已更新，请重新打开任务详情。'],

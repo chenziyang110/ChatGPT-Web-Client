@@ -1,0 +1,93 @@
+import { _electron as electron } from 'playwright';
+import assert from 'node:assert/strict';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import path from 'node:path';
+import { surfaceFixture } from './surface-queue-fixture.mjs';
+
+const root = path.resolve('.');
+const directory = await mkdtemp(path.join(root, '.test-surface-queue-'));
+const bootstrap = path.join(directory, 'fixture.cjs');
+await writeFile(bootstrap, `const {app,Notification}=require('electron');Notification.isSupported=()=>false;
+app.on('browser-window-created',(_,w)=>{w.webContents.setBackgroundThrottling(false);w.on('show',()=>w.hide())});
+app.on('session-created',s=>s.protocol.handle('https',()=>new Response(${JSON.stringify(surfaceFixture)},{headers:{'Content-Type':'text/html'}})));
+require(${JSON.stringify(path.join(root,'dist-electron/main.cjs'))});`);
+const env = { ...process.env, WORKSPACE_USER_DATA: directory, WORKSPACE_HIDDEN_PAGE_IDLE_MS: '3600000', WORKSPACE_PAGE_IDLE_MS: '3600000' };
+delete env.ELECTRON_RUN_AS_NODE; delete env.WORKSPACE_DEV_URL;
+let desktop, ui, passed = false;
+const until = async check => { const end = Date.now() + 45000; while (!await check()) { assert.ok(Date.now() < end, 'Surface queue timed out'); await new Promise(r => setTimeout(r, 100)); } };
+const launch = async () => {
+  desktop = await electron.launch({ args: ['--disable-renderer-backgrounding', '--disable-background-timer-throttling', bootstrap], env });
+  await until(async () => !!(ui = desktop.windows().find(p => p.url().startsWith('file:'))));
+  await ui.waitForFunction(() => !!window.workspace);
+};
+const rpc = (method, params = {}) => ui.evaluate(({ method, params }) => window.workspace.call(method, params), { method, params });
+// Operate on the exact isolated account's native page, never a URL-only match.
+const read = (account, url, script) => desktop.evaluate(async ({ webContents, session }, { partition, url, script }) => {
+  const wc = webContents.getAllWebContents().find(w => w.session === session.fromPartition(partition) && w.getURL() === url);
+  if (!wc) throw Error('Own fixture page unavailable');
+  const result = await wc.executeJavaScript(`(()=>{try{return {ok:true,value:eval(${JSON.stringify(script)})}}catch(e){return {ok:false,error:e.message}}})()`);
+  if (!result.ok) throw Error(result.error); return result.value;
+}, { partition: account.partition, url, script });
+const add = (account, conversation, prompt) => rpc('tasks.create', { accountId: account.id, conversation: conversation.id, background: true,
+  input: { type: 'prompt', prompt, submit: true } });
+try {
+  await launch();
+  const account = await rpc('accounts.create', { name: 'Work and Dot' });
+  await until(async () => { try { return await read(account, 'https://chatgpt.com/', 'window.mode?.() === "chat"'); } catch { return false; } });
+  await ui.getByRole('button', { name: '会话队列', exact: true }).click();
+  const panel = ui.getByRole('complementary', { name: '会话队列' });
+  const composer = panel.getByLabel('下一条消息', { exact: true });
+  await until(() => composer.isEnabled());
+  const chat = (await rpc('workspace.status')).pages.find(p => p.accountId === account.id && p.selected).conversationId;
+  await composer.fill('Chat draft belongs to Chat');
+  await read(account, 'https://chatgpt.com/', `[...document.querySelectorAll('#modes button')][1].click()`);
+  await until(async () => / · 工作 · /.test(await panel.locator('.cq-header').textContent()) && await composer.isEnabled() && await composer.inputValue() === '');
+  const pageId = (await rpc('workspace.status')).page.id;
+  const work = await rpc('conversations.forPage', { accountId: account.id, pageId }); assert.equal(work.surface, 'work');
+  assert.notEqual(work.id, chat, 'Changing the home mode must not reuse the Chat queue');
+  await panel.getByRole('button', { name: '关闭队列面板' }).click();
+  await rpc('queues.pause', { accountId: account.id, conversation: work.id });
+  const workFirst = await add(account, work, 'work-first'), workNext = await add(account, work, 'work-next');
+  // A fresh document defaults to Chat. Queue execution must select Work again.
+  await read(account, 'https://chatgpt.com/', 'location.reload()');
+  await until(async () => { try { return await read(account, 'https://chatgpt.com/', 'window.mode?.() === "chat"'); } catch { return false; } });
+  await rpc('queues.resume', { accountId: account.id, conversation: work.id });
+  await until(async () => (await rpc('tasks.get', { id: workNext.id })).status === 'done');
+  assert.equal((await rpc('tasks.get', { id: workFirst.id })).status, 'done');
+  const boundWork = await rpc('conversations.get', { accountId: account.id, conversation: work.id });
+  assert.equal(boundWork.surface, 'work'); assert.equal(boundWork.url, 'https://chatgpt.com/c/work-bound');
+  assert.deepEqual(await read(account, boundWork.url, 'window.sent()'), ['work-first', 'work-next']);
+  const dotUrl = 'https://chatgpt.com/dots/same-dot';
+  const dot = await rpc('conversations.register', { accountId: account.id, url: dotUrl });
+  const first = await add(account, dot, 'ignored-click'), next = await add(account, dot, 'dot-next');
+  await until(async () => !!(await rpc('tasks.get', { id: first.id })).submittedAt);
+  const receipt = (await rpc('tasks.get', { id: first.id })).submittedMessageId;
+  await new Promise(r => setTimeout(r, 7000));
+  assert.equal((await rpc('tasks.get', { id: first.id })).status, 'running', 'A usable Dot send button is not proof of reply completion');
+  assert.equal((await rpc('tasks.get', { id: next.id })).sendIntentAt, undefined);
+  // Quit while the Dot response is pending and restore its original receipt.
+  await desktop.close(); await launch();
+  await until(async () => (await rpc('tasks.get', { id: first.id })).status === 'running');
+  await until(async () => { try { return await read(account, dotUrl, 'typeof window.finishReply === "function"'); } catch { return false; } });
+  assert.equal((await rpc('tasks.get', { id: first.id })).submittedMessageId, receipt);
+  await read(account, dotUrl, 'window.finishReply()');
+  await until(async () => (await rpc('tasks.get', { id: next.id })).status === 'done');
+  assert.equal((await rpc('tasks.get', { id: first.id })).status, 'done');
+  assert.equal((await rpc('tasks.get', { id: first.id })).result.responseUnavailable, true, 'Dot replaces its optimistic user ID; advance without inventing a matched answer');
+  assert.deepEqual(await read(account, dotUrl, 'window.sent()'), ['ignored-click', 'dot-next']);
+  assert.equal(await read(account, dotUrl, `Number(localStorage.getItem(location.pathname+':clicks'))`), 3);
+  const other = await rpc('accounts.create', { name: 'Other Dot' });
+  const otherDot = await rpc('conversations.register', { accountId: other.id, url: dotUrl });
+  const otherTask = await add(other, otherDot, 'other-first');
+  await until(async () => !!(await rpc('tasks.get', { id: otherTask.id })).submittedAt);
+  await read(other, dotUrl, 'window.finishReply()');
+  await until(async () => (await rpc('tasks.get', { id: otherTask.id })).status === 'done');
+  assert.deepEqual(await read(other, dotUrl, 'window.sent()'), ['other-first']);
+  assert.deepEqual(await read(account, dotUrl, 'window.sent()'), ['ignored-click', 'dot-next']);
+  passed = true;
+  console.log('Work/Dot queues passed: automatic mode detection/restoration, FIFO, delayed Dot reply, ignored-click retry, real process restart without replay, and identical Dot URLs isolated across accounts.');
+} finally {
+  if (!passed && ui) console.error(JSON.stringify(await rpc('workspace.status').then(s => s.tasks.map(t => ({ prompt: t.input.prompt, status: t.status, phase: t.phase, error: t.error }))).catch(() => [])));
+  await desktop?.close(); assert.equal(path.dirname(directory), root); assert.ok(path.basename(directory).startsWith('.test-surface-queue-'));
+  await rm(directory, { recursive: true, force: true });
+}

@@ -24,8 +24,8 @@ const help = `ChatGPT Web Client — local agent CLI
   prompt ID TEXT [--submit] [--wait]   Prepare draft, or explicitly submit
   task ID JSON [--wait]               Run navigate/snapshot/fill/click/prompt
   conversations list --account ID
-  conversations add --account ID --url URL [--alias NAME]
-  conversations create --account ID [--alias NAME]
+  conversations add --account ID --url URL [--alias NAME] [--surface chat|work|dot]
+  conversations create --account ID [--alias NAME] [--surface chat|work]
   conversations get --account ID --conversation ID_OR_ALIAS
   prompt --account ID --conversation ID_OR_ALIAS --text TEXT --submit --wait
   prompt --account ID --new [--alias NAME] --text TEXT --submit
@@ -128,8 +128,8 @@ async function main(): Promise<void> {
     case 'conversations': {
       const accountId = requireArg(options.account, 'account');
       if (id === 'list') result = await call('conversations.list', { accountId });
-      else if (id === 'add') result = await call('conversations.register', { accountId, url: requireArg(options.url, 'URL'), alias: options.alias });
-      else if (id === 'create') result = await call('conversations.create', { accountId, alias: options.alias });
+      else if (id === 'add') result = await call('conversations.register', { accountId, url: requireArg(options.url, 'URL'), alias: options.alias, surface: options.surface });
+      else if (id === 'create') result = await call('conversations.create', { accountId, alias: options.alias, surface: options.surface });
       else if (id === 'get') result = await call('conversations.get', { accountId, conversation: requireArg(options.conversation, 'conversation') });
       else throw new Error('Use conversations list|add|create|get');
       break;

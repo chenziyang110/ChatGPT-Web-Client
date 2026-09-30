@@ -24,7 +24,7 @@ try {
   rpc=(method,params={})=>ui.evaluate(({method,params})=>window.workspace.call(method,params),{method,params});
   const account=await rpc('accounts.create',{name:'Modern fixture'});
   const other=await rpc('accounts.create',{name:'Other isolated account'});
-  const conv=await rpc('conversations.create',{accountId:account.id});
+  const conv=await rpc('conversations.create',{accountId:account.id, surface:workMode?'work':'chat'});
   const add=(accountId,conversation,prompt)=>rpc('tasks.create',{accountId,conversation,background:true,input:{type:'prompt',prompt,submit:true}});
   const until=async(check)=>{const end=Date.now()+120000;while(!await check()){assert.ok(Date.now()<end,'Modern queue timed out');await new Promise(r=>setTimeout(r,100))}};
   const first=await add(account.id,conv.id,'first');
@@ -34,13 +34,13 @@ try {
   const retained=await add(account.id,conv.id,'retained-draft');
   const rendered=await add(account.id,conv.id,'[Link](https://example.com)');
   const last=await add(account.id,conv.id,'last');
-  const retry=await rpc('conversations.register',{accountId:other.id,url:'https://chatgpt.com/c/retry'});
+  const retry=await rpc('conversations.register',{accountId:other.id,url:'https://chatgpt.com/c/retry', surface:workMode?'work':'chat'});
   const retryTask=await add(other.id,retry.id,'retry-head');
   const retryNext=await add(other.id,retry.id,'retry-next');
-  const ignored=await rpc('conversations.register',{accountId:other.id,url:'https://chatgpt.com/c/ignored'});
+  const ignored=await rpc('conversations.register',{accountId:other.id,url:'https://chatgpt.com/c/ignored', surface:workMode?'work':'chat'});
   const ignoredTask=await add(other.id,ignored.id,'ignored-click');
   const ignoredNext=await add(other.id,ignored.id,'after-ignored');
-  const long=await rpc('conversations.register',{accountId:other.id,url:'https://chatgpt.com/c/long'});
+  const long=await rpc('conversations.register',{accountId:other.id,url:'https://chatgpt.com/c/long', surface:workMode?'work':'chat'});
   const longTask=await add(other.id,long.id,'virtualized-long-reply');
   const unmountedStop=await add(other.id,long.id,'virtualized-stopped');
   const longNext=await add(other.id,long.id,'after-long-reply');

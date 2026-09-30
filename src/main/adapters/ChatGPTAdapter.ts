@@ -3,13 +3,13 @@ import type { ExecutionContext } from '../../core/agent/AgentGateway';
 import { ReportedReplyError } from '../../core/agent/AgentGateway';
 import { ConversationManager, conversationUrl } from '../../core/conversation/ConversationManager';
 import { HOME_URL, isChatUrl } from '../../core/validation';
-import type { BrowserReadiness, Conversation, TaskInput } from '../../shared/types';
+import type { BrowserReadiness, Conversation, ConversationSurface, TaskInput } from '../../shared/types';
 import { COMPLETION_STABLE_MS, replyToken } from '../../core/notifications/ConversationNotifications';
 import { ReplyTurnTracker, type ConversationMessage } from './ReplyTurnTracker';
 
 type Message = ConversationMessage;
-export interface Page { url: string; title: string; readiness: BrowserReadiness; editor: boolean; draft: string; busy: boolean; messages: Message[]; error?: string; failure?: 'thinking' | 'interrupted' }
-interface Operation { kind: 'inspect' | 'diagnose' | 'activity' | 'follow_latest' | 'fill' | 'clear' | 'check_send' | 'send' | 'click' | 'snapshot'; url?: string; anchor?: string; value?: string; selector?: string }
+export interface Page { url: string; title: string; readiness: BrowserReadiness; surface?: ConversationSurface; editor: boolean; draft: string; busy: boolean; messages: Message[]; error?: string; failure?: 'thinking' | 'interrupted' }
+interface Operation { kind: 'inspect' | 'diagnose' | 'activity' | 'follow_latest' | 'select_surface' | 'fill' | 'clear' | 'check_send' | 'send' | 'click' | 'snapshot'; url?: string; anchor?: string; value?: string; selector?: string; surface?: ConversationSurface }
 
 // Electron otherwise replaces page exceptions with an unhelpful "Script failed
 // to execute" rejection. Catch inside the page before crossing that boundary.
@@ -33,6 +33,8 @@ export function replyPageUrl(value: string, allowOptimistic = false): string | u
   const url = new URL(value);
   if (url.searchParams.getAll('temporary-chat').some(flag => flag !== 'false' && flag !== '0')) return;
   if (url.pathname === '/') return HOME_URL;
+  const dot = /^\/dots\/([a-zA-Z0-9_-]{1,128})\/?$/.exec(url.pathname);
+  if (dot) return `${HOME_URL}dots/${dot[1]}`;
   let pathname: string;
   try { pathname = decodeURI(url.pathname).replace(/%3A/ig, ':'); } catch { return; }
   if (allowOptimistic && /^\/c\/(?:WEB|local-chatgpt):[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\/?$/.test(pathname)) return `${url.origin}${pathname.replace(/\/$/, '')}`;
@@ -53,18 +55,29 @@ export function pageOperation(operation: Operation): unknown {
   try {
     if (location.origin !== 'https://chatgpt.com') throw new Error('LOGIN_REQUIRED: sign in to ChatGPT');
     const visible = (element: Element | null | undefined): element is HTMLElement => !!element?.getClientRects().length;
-    // These schemas are observed on live ChatGPT chat and Work accounts. Do not use generated
+    // These schemas are observed on live ChatGPT chat, Work and Dot accounts. Do not use generated
     // CSS classes, translated placeholder text, or an arbitrary page textbox.
-    const editorSelector = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"][role="textbox"], form[data-composer-placement] [data-composer-markdown][contenteditable="true"][role="textbox"]';
+    const dot = /^\/dots\/[a-zA-Z0-9_-]{1,128}\/?$/.test(location.pathname);
+    const editorSelector = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"][role="textbox"], form[data-composer-placement] [data-composer-markdown][contenteditable="true"][role="textbox"]' +
+      (dot ? ', [data-codex-composer-root] [data-composer-markdown][contenteditable="true"][role="textbox"]' : '');
     const editor = [...document.querySelectorAll<HTMLElement>(editorSelector)].find(visible) ?? null;
-    const composer = editor?.closest('[data-chatgpt-composer], form[data-composer-placement]');
+    const composer = editor?.closest(dot ? '[data-codex-composer-root]' : '[data-chatgpt-composer], form[data-composer-placement]');
+    const modeButtons = [...document.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')].filter(visible);
+    const workMode = /ChatGPT Work/i.test(editor?.getAttribute('aria-label') ?? '') ||
+      modeButtons.some(button => button.getAttribute('aria-pressed') === 'true' && /^(工作|Work)$/i.test(button.innerText.trim()));
+    const surface: ConversationSurface = dot ? 'dot' : workMode ? 'work' : 'chat';
     const composerButtons = [...(composer ?? document).querySelectorAll<HTMLButtonElement>('button')].filter(visible);
     const actionLabel = (button: HTMLElement) => (button.getAttribute('aria-label') ?? '').trim();
-    const sendButton = () => [...document.querySelectorAll<HTMLButtonElement>('[data-testid="send-button"]')].find(visible) ??
-      (composer ? composerButtons.find(button => button.type === 'submit' && /^(发送|发送消息|Send|Send message|Send prompt)$/i.test(actionLabel(button))) : undefined);
-    const messageSelector = '[data-message-author-role], [data-chatgpt-search-unit-key]';
-    const roleOf = (element: HTMLElement) => element.dataset.messageAuthorRole ??
-      element.getAttribute('data-chatgpt-search-unit-key')?.match(/:(user|assistant)$/)?.[1] ?? '';
+    const sendButton = () => (!dot ? [...document.querySelectorAll<HTMLButtonElement>('[data-testid="send-button"]')].find(visible) : undefined) ??
+      (composer ? composerButtons.find(button => (dot || button.type === 'submit') && /^(发送|发送消息|Send|Send message|Send prompt)$/i.test(actionLabel(button))) : undefined);
+    const messageSelector = dot ? 'main article.message-row[data-message-id]' : '[data-message-author-role], [data-chatgpt-search-unit-key]';
+    // Your dot uses a semantic `self` class on the message row, not the chat
+    // author-role schema. Both user and assistant bodies use assistant-message.
+    const roleOf = (element: HTMLElement) => {
+      if (dot) return element.classList.contains('self') ? 'user' : 'assistant';
+      return element.dataset.messageAuthorRole ?? element.getAttribute('data-chatgpt-search-unit-key')?.match(/:(user|assistant)$/)?.[1] ?? '';
+    };
+    const userSelector = dot ? 'article.message-row.self' : '[data-message-author-role="user"], [data-user-message-bubble]';
     const elements = [...document.querySelectorAll<HTMLElement>(messageSelector)].filter(element =>
       ['user', 'assistant'].includes(roleOf(element)) && !element.parentElement?.closest(messageSelector));
     const turnOf = (element: Element) => element.closest('article, [data-testid^="conversation-turn-"], [data-turn-key]') ?? element;
@@ -117,19 +130,20 @@ export function pageOperation(operation: Operation): unknown {
     const afterLastUser = (element: Element) => !lastUserElement || !!(lastUserElement.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING);
     const currentAssistant = elements.filter(element => roleOf(element) === 'assistant' && visible(element) && afterLastUser(element)).at(-1);
     const currentTurn = currentAssistant ? turnOf(currentAssistant) : lastUserElement ? turnOf(lastUserElement) : undefined;
-    const terminalAction = (turn: Element | null | undefined) => !!turn && [...turn.querySelectorAll<HTMLElement>('[data-testid="copy-turn-action-button"], .turn-action-controls button')]
-      .some(button => visible(button) && (button.getAttribute('data-testid') === 'copy-turn-action-button' || /^(复制|Copy|Copy response)$/i.test(actionLabel(button))));
+    const terminalAction = (turn: Element | null | undefined) => !!turn && [...turn.querySelectorAll<HTMLElement>(dot
+      ? '.message-inline-actions--orbit button[data-action="reply"]' : '[data-testid="copy-turn-action-button"], .turn-action-controls button')]
+      .some(button => visible(button) && (dot || button.getAttribute('data-testid') === 'copy-turn-action-button' || /^(复制|Copy|Copy response)$/i.test(actionLabel(button))));
     // Sidebar loaders and completed image widgets can retain aria-busy. They
     // are not evidence that the current reply is still streaming.
-    const stopVisible = [...document.querySelectorAll('[data-testid="stop-button"]')].some(visible) ||
+    const stopVisible = (!dot && [...document.querySelectorAll('[data-testid="stop-button"]')].some(visible)) ||
       !!composer && composerButtons.some(button => /^(停止|停止生成|停止回复|Stop|Stop generating|Stop response)$/i.test(actionLabel(button)));
-    const streamingVisible = !terminalAction(currentTurn) &&
+    const streamingVisible = (dot || !terminalAction(currentTurn)) &&
       [...document.querySelectorAll('main [data-is-streaming="true"]')].some(element => visible(element) && afterLastUser(element));
-    const ariaBusyVisible = !!currentTurn && !terminalAction(currentTurn) &&
+    const ariaBusyVisible = !!currentTurn && (dot || !terminalAction(currentTurn)) &&
       (currentTurn.matches('[aria-busy="true"]') || [...currentTurn.querySelectorAll('[aria-busy="true"]')].some(visible));
     const interrupted = !!lastUserElement && visible(editor) && !stopVisible &&
       [...document.querySelectorAll<HTMLElement>('main [role="alert"], main div, main p, main span')].some(element => {
-        if (!visible(element) || !afterLastUser(element) || element.closest('[data-message-author-role="user"]')) return false;
+        if (!visible(element) || !afterLastUser(element) || element.closest(userSelector)) return false;
         const raw = element.textContent?.trim() ?? '';
         if (raw.length > 160 || !/连接已中断|Connection interrupted/i.test(raw)) return false;
         const label = element.innerText.trim();
@@ -141,7 +155,7 @@ export function pageOperation(operation: Operation): unknown {
       const messages = elements;
       const last = messages.at(-1);
       const turn = last && turnOf(last);
-      return { url: location.href, title: document.title.slice(0, 120), readiness,
+      return { url: location.href, title: document.title.slice(0, 120), readiness, surface,
         editor: visible(editor), draftLength: draft.length, busy, documentReady: document.readyState,
         dom: { editorTag: editor?.tagName.toLowerCase() ?? null, contentEditable: !!editor?.isContentEditable,
           visibleEditorCount: [...document.querySelectorAll(editorSelector)].filter(visible).length,
@@ -157,7 +171,7 @@ export function pageOperation(operation: Operation): unknown {
     const readMessage = (element: HTMLElement, index: number) => {
       const turn = turnOf(element);
       const role = roleOf(element);
-      const body = role === 'user'
+      const body = dot ? element.querySelector<HTMLElement>('.message-body[data-message-id]') ?? element : role === 'user'
         ? element.querySelector<HTMLElement>('[data-testid="collapsible-user-message-content"], [data-user-message-bubble]') ?? element
         : element.querySelector<HTMLElement>('[data-chatgpt-selection-message-id]') ?? element;
       const userText = (node: Node): string => node.nodeType === Node.TEXT_NODE ? node.textContent ?? ''
@@ -195,7 +209,7 @@ export function pageOperation(operation: Operation): unknown {
     const thinkingLabel = /^(无法思考|Unable to think)(?:\s*[›>])?$/i;
     const thinkingFailure = !!lastUserElement && visible(editor) && !busy && !finishedAnswer &&
       [...document.querySelectorAll<HTMLElement>('main button, main [role="button"], main [aria-expanded], main div, main p, main span')].some(control => {
-        if (!visible(control) || !afterLastUser(control) || control.closest('[data-message-author-role="user"], [data-user-message-bubble]') ||
+        if (!visible(control) || !afterLastUser(control) || control.closest(userSelector) ||
           control.querySelector(messageSelector)) return false;
         const label = (control.innerText || control.getAttribute('aria-label') || '').trim();
         return thinkingLabel.test(label);
@@ -211,19 +225,27 @@ export function pageOperation(operation: Operation): unknown {
         if (role === 'user' && !user) user = readMessage(elements[index], index);
         else if (role === 'assistant' && !assistant) assistant = readMessage(elements[index], index);
       }
-      return { url: location.href, title: document.title.slice(0, 120), editor: visible(editor), busy,
+      return { url: location.href, title: document.title.slice(0, 120), surface, editor: visible(editor), busy,
         hasDraft: !!draft.trim(), error, user: user && { id: user.id, text: user.text.slice(0, 32000) },
         assistant: assistant && { ...assistant, text: assistant.text.slice(0, 64000) },
         lastRole: elements.length ? roleOf(elements.at(-1)!) : undefined };
     }
     const messages = elements.map(readMessage);
-    const page: Page = { url: location.href, title: document.title.slice(0, 120), readiness, editor: visible(editor), draft, busy, messages, error, failure };
+    const page: Page = { url: location.href, title: document.title.slice(0, 120), surface, readiness, editor: visible(editor), draft, busy, messages, error, failure };
     if (operation.kind === 'inspect') return page;
     stage = 'verify_target';
     if (operation.url !== location.href) throw new Error('TARGET_CHANGED: page changed before action');
     if (operation.kind === 'snapshot') return { url: location.href, title: document.title, text: (document.querySelector('main') ?? document.body).innerText.slice(0, 64000) };
     const anchor = JSON.stringify(messages.filter(message => message.role === 'user').map(message => [message.id, message.text]));
     if (operation.anchor !== anchor || busy) throw new Error('PAGE_CHANGED: conversation is no longer idle');
+    if (operation.kind === 'select_surface') {
+      if (operation.surface === surface) return { selected: true };
+      if (location.pathname !== '/' || messages.length || draft.trim() || operation.surface === 'dot') throw new Error('SURFACE_CHANGED: cannot switch this conversation');
+      const button = modeButtons.find(button => (operation.surface === 'work' ? /^(工作|Work)$/i : /^(聊天|Chat)$/i).test(button.innerText.trim()));
+      if (!button || button.disabled) throw new Error('SURFACE_UNAVAILABLE: waiting for conversation mode');
+      button.click(); return { selected: true };
+    }
+    if (operation.surface && operation.surface !== surface) throw new Error('SURFACE_CHANGED: conversation mode changed before action');
     if (operation.kind === 'send' || operation.kind === 'check_send') {
       stage = 'verify_send';
       // Textareas and contenteditable normalize Windows file line endings to LF.
@@ -269,6 +291,7 @@ export function pageOperation(operation: Operation): unknown {
       'PAGE_CHANGED: conversation is no longer idle', 'DRAFT_CHANGED: prompt was edited',
       'SEND_UNAVAILABLE: prompt remains a draft', 'Element unavailable', 'Password fields cannot be automated',
       'DRAFT_CONFLICT: clear or send the existing draft first', 'Element is not editable'];
+    guards.push('SURFACE_CHANGED: cannot switch this conversation', 'SURFACE_UNAVAILABLE: waiting for conversation mode', 'SURFACE_CHANGED: conversation mode changed before action');
     const name = error instanceof Error && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : 'Error';
     throw new Error(`${guards.includes(message) ? message : 'PAGE_SCRIPT_FAILED'} [stage=${stage}; error=${name}]`);
   }
@@ -357,7 +380,7 @@ export class ChatGPTAdapter {
       // A usable composer with no active generation is an idle conversation,
       // even when ChatGPT never produced a copyable assistant turn.
       const ready = !page.busy;
-      const fingerprint = JSON.stringify([page.url, page.messages, page.error, page.draft]);
+      const fingerprint = JSON.stringify([page.url, page.surface, page.messages, page.error, page.draft]);
       if (!ready || previous !== fingerprint) since = Date.now();
       if (ready && Date.now() - since >= (last ? COMPLETION_STABLE_MS : 1000)) {
         await this.context.acquireExecution?.();
@@ -367,7 +390,7 @@ export class ChatGPTAdapter {
         const confirmed = await this.inspect();
         if (confirmed.editor && confirmed.readiness === 'ready' && (!confirmed.error || confirmed.failure || this.context.task().background && !confirmed.busy ||
           (failedTail(confirmed) && (priorError?.continueAfterInterruption || confirmed.error === priorError?.error))) &&
-          !confirmed.busy && usableDraft(confirmed) && JSON.stringify([confirmed.url, confirmed.messages, confirmed.error, confirmed.draft]) === fingerprint) return confirmed;
+          !confirmed.busy && usableDraft(confirmed) && JSON.stringify([confirmed.url, confirmed.surface, confirmed.messages, confirmed.error, confirmed.draft]) === fingerprint) return confirmed;
         this.context.releaseExecution?.();
         previous = ''; since = Date.now(); interval = 250;
         continue;
@@ -381,6 +404,25 @@ export class ChatGPTAdapter {
     this.context.stage('preparing', this.context.task().prepareTimeoutMs);
     this.signal.throwIfAborted();
     await this.track(this.contents.loadURL(url)); await this.loaded();
+  }
+  private async restoreSurface(page: Page, conversation?: Conversation): Promise<Page> {
+    if (!conversation?.surface || !page.surface || page.surface === conversation.surface) return page;
+    // Only the empty home has a mode toggle. A bound thread must restore its
+    // server-owned surface; never convert an existing chat or Dot channel.
+    if (conversation.binding !== 'new' || replyPageUrl(page.url) !== HOME_URL) throw new Error('SURFACE_CHANGED: original conversation mode has not restored');
+    const deadline = Date.now() + Math.min(this.context.task().prepareTimeoutMs ?? 60000, 30000);
+    while (page.surface !== conversation.surface) {
+      try { await this.evaluate({ kind: 'select_surface', url: page.url, anchor: this.anchor(page), surface: conversation.surface }); }
+      catch (error) {
+        if (!(error instanceof Error) || !error.message.startsWith('SURFACE_UNAVAILABLE') || Date.now() >= deadline) throw error;
+      }
+      await this.delay();
+      const next = await this.inspect();
+      if (next.url !== page.url || next.messages.length || next.busy || next.draft.trim()) throw new Error('PAGE_CHANGED: home changed while selecting mode');
+      page = next;
+      if (Date.now() >= deadline && page.surface !== conversation.surface) throw new Error('SURFACE_UNAVAILABLE: waiting for original conversation mode');
+    }
+    return this.idle();
   }
   async execute(input: TaskInput): Promise<unknown> {
     try { return await this.run(input); }
@@ -420,17 +462,18 @@ export class ChatGPTAdapter {
     }
     const target = conversation?.url ?? (conversation ? HOME_URL : task.targetUrl);
     if (!target) throw new Error('TARGET_REQUIRED: choose a conversation');
+    const atTarget = (url: string) => url === target || !!conversation && replyPageUrl(url) === target;
     if (input.type === 'snapshot' && this.contents.getURL() !== target) await this.idle();
-    const navigate = this.contents.getURL() !== target || conversation?.binding === 'new';
+    const navigate = !atTarget(this.contents.getURL()) || conversation?.binding === 'new' && !!initial?.messages.length;
     if (navigate) await this.navigate(target);
-    if (this.contents.getURL() !== target) throw new Error('TARGET_CHANGED: target redirected');
-    if (input.type === 'snapshot') return this.evaluate({ kind: 'snapshot', url: target });
-    const baseline = !navigate && initial ? initial : await this.idle();
-    if (baseline.url !== target) throw new Error('TARGET_CHANGED: conversation changed while waiting');
+    if (!atTarget(this.contents.getURL())) throw new Error('TARGET_CHANGED: target redirected');
+    if (input.type === 'snapshot') return this.evaluate({ kind: 'snapshot', url: this.contents.getURL() });
+    const baseline = await this.restoreSurface(!navigate && initial ? initial : await this.idle(), conversation);
+    if (!atTarget(baseline.url)) throw new Error('TARGET_CHANGED: conversation changed while waiting');
     if (conversation?.binding === 'new' && baseline.messages.length) throw new Error('NEW_CHAT_UNAVAILABLE: expected an empty conversation');
     if (input.type === 'navigate') return { url: target };
     this.context.stage('preparing_prompt', task.prepareTimeoutMs);
-    const guard = { url: target, anchor: this.anchor(baseline) };
+    const guard = { url: baseline.url, anchor: this.anchor(baseline), surface: conversation?.surface };
     if (input.type === 'click') {
       this.context.intent();
       return this.evaluate({ ...guard, kind: 'click', selector: input.selector });
@@ -460,7 +503,7 @@ export class ChatGPTAdapter {
       this.context.checkpoint?.();
       const users = baseline.messages.filter(message => message.role === 'user').slice(-5);
       const tail = baseline.messages.at(-1);
-      this.context.intent({ url: baseline.url, users, anchor: !users.length && tail?.role === 'assistant'
+      this.context.intent({ url: baseline.url, users, anchor: (!users.length || baseline.surface === 'dot') && tail?.role === 'assistant'
         ? { id: tail.id, role: tail.role, text: '', terminal: tail.terminal } : undefined });
       if (conversation?.binding === 'new') this.conversations.markSending(task.accountId, conversation.id);
       await this.evaluate({ ...guard, kind: 'send', value });
@@ -481,7 +524,7 @@ export class ChatGPTAdapter {
   }
   private async awaitReply(baseline: Page, value: string, target: string, conversation?: Conversation): Promise<unknown> {
     const task = this.context.task();
-    const guard = { url: target, anchor: this.anchor(baseline) };
+    const guard = { url: baseline.url, anchor: this.anchor(baseline), surface: conversation?.surface };
     // A short caller deadline must not restart observation before the stable
     // completion window can ever elapse on a recovered turn.
     this.context.stage('generating', task.retryCount ? Math.max(30000, task.replyTimeoutMs ?? 0) : task.replyTimeoutMs);
@@ -541,6 +584,7 @@ export class ChatGPTAdapter {
       }
       if (waitingForPage) { this.context.stage(acknowledged ? 'submitted' : 'generating'); waitingForPage = false; }
       unavailableSince = now;
+      if (conversation?.surface && page.surface && page.surface !== conversation.surface) throw new Error('SURFACE_CHANGED: original reply mode has not restored');
       let ownUser: Message | undefined;
       try { if (!correlationLost) ownUser = turns.read(page.messages); }
       catch (error) {
@@ -623,7 +667,12 @@ export class ChatGPTAdapter {
       const unconfirmedSubmission = !!task.background && !acknowledged && !!task.sendIntentAt && !!task.sendReceipt &&
         now - task.sendIntentAt >= 30000 && (page.messages.length > 0 || !!page.error);
       const stopped = !!boundUrl && page.editor && page.readiness === 'ready' && !page.busy && (!page.draft.trim() || retainedOwnDraft) &&
-        (acknowledged && (userIndex >= 0 || unmountedSubmission) || unconfirmedSubmission);
+        (acknowledged && (userIndex >= 0 || unmountedSubmission) || unconfirmedSubmission) &&
+        // Dot accepts another message while its agent is working. Its global
+        // Pause control is not a turn Stop button. Require an actual new reply
+        // with message actions (or the explicit error handled above).
+        (page.surface !== 'dot' || last?.role === 'assistant' && last.terminal &&
+          (unmountedSubmission && !baseline.messages.some(message => message.id === last.id && message.role === 'assistant') || userIndex >= 0 && page.messages.indexOf(last) > userIndex));
       if (!stopped || fingerprint !== previous) since = Date.now();
       if (stopped && Date.now() - since >= COMPLETION_STABLE_MS) {
         if (retainedOwnDraft) {

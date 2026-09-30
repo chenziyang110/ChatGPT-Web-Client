@@ -105,10 +105,10 @@ Success is `{ok:true,result:...}`. Errors use `{ok:false,error:"..."}` and non-2
 | `accounts.list/create/rename/switch/remove` | `{}`, `{name}`, `{id,name}`, `{id}`, `{id,confirmName}` | Account operations; deletion requires no unresolved tasks |
 | `accounts.alias` | `{id,alias}` | Stable account alias |
 | `conversations.list` | `{accountId?}` | Locally registered conversations |
-| `conversations.register` | `{accountId,url,alias?}` | Register/update an ordinary conversation target |
-| `conversations.create` | `{accountId,alias?}` | Reserve an unbound local conversation |
+| `conversations.register` | `{accountId,url,alias?,surface?}` | Register a personal `/c/<id>` or `/dots/<id>` target; surface is `chat`, `work` or `dot` (Dot inferred from its URL) |
+| `conversations.create` | `{accountId,alias?,surface?}` | Reserve a new Chat/Work conversation; `surface` defaults to `chat`. Open Your dot and register its existing URL instead of creating an unbound Dot target |
 | `conversations.get` | `{accountId,conversation}` | Resolve a target within its account |
-| `conversations.forPage` | `{accountId,pageId}` | Pin a live page to a local conversation, including an empty new-chat page |
+| `conversations.forPage` | `{accountId,pageId}` | Pin the exact live page and detected Chat/Work/Dot surface, including an empty Chat/Work home |
 | `conversations.open` | `{accountId,conversation}` | Select the target's existing page or open a separate page |
 | `tasks.create` | `{accountId,input,conversation?,url?,current?,new?,alias?,idempotencyKey?,replyTimeoutMs?,idleTimeoutMs?,background?}` | Pinned queued task; choose at most one target selector; timeout values are integer milliseconds, 1000–3600000 |
 | `tasks.list/get/cancel/clear` | `{}`, `{id}`, `{id}`, `{}` | History, detail, cancellation, or clear resolved history |

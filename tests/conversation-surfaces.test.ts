@@ -44,4 +44,8 @@ test('Dot reply recovery requires the acknowledged turn and stable assistant rep
   assert.equal(reader.read(task, page, page.url, 0).state, 'reading');
   assert.equal(reader.read(task, page, page.url, 6000).state, 'done');
   assert.equal(reader.read(task, { ...page, url: 'https://chatgpt.com/dots/two' }, page.url, 7000).state, 'unavailable');
+  assert.equal(reader.read(task, { ...page, dotWork: 'working', busy: true }, page.url, 8000).state, 'reading');
+  assert.equal(reader.read(task, { ...page, dotWork: 'working', busy: true }, page.url, 18000).state, 'reading', 'Stable acknowledgement is not a final work result');
+  assert.equal(reader.read(task, { ...page, dotWork: 'idle' }, page.url, 19000).state, 'reading');
+  assert.equal(reader.read(task, { ...page, dotWork: 'idle' }, page.url, 25000).state, 'done');
 });

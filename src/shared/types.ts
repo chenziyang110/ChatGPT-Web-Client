@@ -1,5 +1,6 @@
 export interface Account { id: string; name: string; alias?: string; partition: string; createdAt: number }
 export type ConversationSurface = 'chat' | 'work' | 'dot';
+export type DotWorkState = 'working' | 'idle' | 'unknown';
 export interface Conversation {
   id: string; accountId: string; alias?: string; title: string; url?: string;
   surface?: ConversationSurface;
@@ -49,6 +50,7 @@ export interface ConversationNotice {
 export type BrowserReadiness = 'ready' | 'loading' | 'verification_required' | 'login_required' | 'not_open' | 'unavailable';
 export interface BrowserDiagnostics {
   surface?: ConversationSurface;
+  dotWork?: DotWorkState;
   accountId: string; url: string; title: string; readiness: BrowserReadiness;
   editor: boolean; draftLength: number; busy: boolean; documentReady?: string; suggestion: string; error?: string;
   dom?: {

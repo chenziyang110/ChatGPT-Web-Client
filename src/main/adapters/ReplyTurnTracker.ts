@@ -10,15 +10,21 @@ const changed = (detail: string): never => { throw new Error(`CONVERSATION_CHANG
 export class ReplyTurnTracker {
   private readonly history: ConversationMessage[];
   private ownId?: string;
-  constructor(messages: ConversationMessage[], private readonly prompt: string, submittedId?: string) {
+  private readonly restoredSubmission: boolean;
+  private readonly assistantAnchor?: ConversationMessage;
+  constructor(messages: ConversationMessage[], private readonly prompt: string, submittedId?: string,
+    private readonly renderedContent = false) {
     this.history = messages.filter(message => message.role === 'user').map(message => ({ ...message }));
+    const tail = messages.at(-1);
+    if (!this.history.length && tail?.role === 'assistant' && stableId(tail)) this.assistantAnchor = { ...tail };
     // After a restart the site may virtualize every pre-send turn. A persisted
     // stable receipt still identifies our own turn without matching by text.
     if (submittedId && !submittedId.startsWith('position:')) this.ownId = submittedId;
+    this.restoredSubmission = this.renderedContent && !!this.ownId;
   }
   private same(actual: ConversationMessage, expected: ConversationMessage): void {
     if (actual.id !== expected.id) changed('prior user identity or order changed');
-    if (actual.text !== expected.text) changed('prior user content changed');
+    if (!(this.renderedContent && stableId(actual) && stableId(expected)) && actual.text !== expected.text) changed('prior user content changed');
   }
   private historyBeforeOwn(visible: ConversationMessage[]): void {
     if (visible.length === this.history.length && visible.every((message, index) => message.id === this.history[index].id)) {
@@ -48,8 +54,32 @@ export class ReplyTurnTracker {
   read(messages: ConversationMessage[]): ConversationMessage | undefined {
     const users = messages.filter(message => message.role === 'user');
     if (new Set(users.map(message => message.id)).size !== users.length) changed('duplicate user message identities');
+    // A persisted send acknowledgement already establishes the turn boundary.
+    // Reloading can mount history that was never in the pre-send DOM (including
+    // an empty new-chat receipt). Do not require that old DOM window again.
+    if (this.restoredSubmission) {
+      const index = users.findIndex(message => message.id === this.ownId);
+      if (index >= 0) {
+        if (index !== users.length - 1) changed('additional user turn appeared');
+        return users[index];
+      }
+    }
     let own: ConversationMessage | undefined;
-    if (this.ownId !== undefined) {
+    const anchorIndex = this.assistantAnchor ? messages.findIndex(message => message.id === this.assistantAnchor!.id && message.role === 'assistant') : -1;
+    if (anchorIndex >= 0) {
+      // Sending at the bottom of a long answer can remount older user turns.
+      // Only a user AFTER the observed pre-send assistant can be our new send;
+      // an older identical prompt before that boundary is not acknowledgement.
+      const following = messages.slice(anchorIndex + 1).filter(message => message.role === 'user');
+      if (following.length > 1) changed('additional user turn appeared');
+      own = following[0];
+      if (!own) return;
+      if (this.ownId !== undefined && own.id !== this.ownId) changed('submitted user identity changed');
+      const previous = users.slice(0, users.indexOf(own));
+      if (this.history.length) this.historyBeforeOwn(previous);
+      if (!previous.every(stableId)) changed('history moved without stable message IDs');
+      if (!this.history.length) this.history.push(...previous.map(message => ({ ...message })));
+    } else if (this.ownId !== undefined) {
       const index = users.findIndex(message => message.id === this.ownId);
       if (index < 0) { this.waitingHistory(users); return; }
       if (index !== users.length - 1) changed('additional user turn appeared');
@@ -69,7 +99,10 @@ export class ReplyTurnTracker {
       own = candidate;
     }
     if (own) {
-      if (own.text.replace(/\r\n?/g, '\n') !== this.prompt.replace(/\r\n?/g, '\n').trim()) changed('submitted turn does not match');
+      // The website may render Markdown links differently from composer source.
+      // Background queues already verify the exact draft before clicking; stable
+      // history/turn identities remain mandatory. API answer retrieval is strict.
+      if ((!this.renderedContent || !stableId(own)) && own.text.replace(/\r\n?/g, '\n') !== this.prompt.replace(/\r\n?/g, '\n').trim()) changed('submitted turn does not match');
       this.ownId = own.id;
     }
     return own;

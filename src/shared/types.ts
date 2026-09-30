@@ -3,7 +3,7 @@ export interface Conversation {
   id: string; accountId: string; alias?: string; title: string; url?: string;
   remoteId?: string; binding: 'new' | 'bound' | 'uncertain'; createdAt: number; updatedAt: number;
 }
-export type TaskPhase = 'queued' | 'preparing' | 'waiting_idle' | 'preparing_prompt' | 'send_intent' | 'submitted' | 'generating' | 'completed';
+export type TaskPhase = 'queued' | 'preparing' | 'waiting_page' | 'waiting_idle' | 'preparing_prompt' | 'send_intent' | 'submitted' | 'generating' | 'completed';
 export interface AccountQueue { accountId: string; conversationId?: string; runningTaskIds?: string[]; paused: boolean; pausedConversationCount?: number; reason?: string; runningTaskId?: string; control?: 'agent' | 'human' }
 export type TaskChoice = 'retry' | 'takeover' | 'cancel' | 'acknowledge';
 export interface TaskAttention {
@@ -27,7 +27,7 @@ export interface AgentTask {
   idempotencyKey?: string; requestHash?: string; sendIntentAt?: number; submittedAt?: number; resolvedAt?: number;
   submittedMessageId?: string;
   retryCount?: number; nextAttemptAt?: number;
-  sendReceipt?: { url: string; users: Array<{ id: string; role: string; text: string; terminal: boolean }> };
+  sendReceipt?: { url: string; users: Array<{ id: string; role: string; text: string; terminal: boolean }>; anchor?: { id: string; role: string; text: string; terminal: boolean } };
   progress?: { response: string; url?: string };
   replyTimeoutMs?: number; prepareTimeoutMs?: number; idleTimeoutMs?: number;
   createdAt: number; updatedAt: number; result?: unknown; error?: string;

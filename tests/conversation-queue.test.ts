@@ -13,6 +13,25 @@ async function until(check: () => boolean) { const end = Date.now() + 3000; whil
 const gate = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
 const prompt = (value: string) => ({ type: 'prompt' as const, prompt: value, submit: true });
 
+test('stopped unconfirmed background send advances FIFO without claiming submission or requiring review', async () => {
+  const db = new Database(':memory:'); const sent:string[]=[];
+  const gateway = new AgentGateway(db,async(_id,input,_signal,context)=>{
+    if(input.type!=='prompt')return;
+    context.intent({url:'https://chatgpt.com/c/one',users:[]});sent.push(input.prompt);
+    if(input.prompt==='first')throw new ReportedReplyError('Stopped with unavailable receipt',true,true);
+    context.submitted('next-id');
+  },()=>{});
+  try{
+    const first=gateway.createTask('a',prompt('first'),{conversationId:'one',background:true});
+    const next=gateway.createTask('a',prompt('next'),{conversationId:'one',background:true});
+    await until(()=>gateway.get(next.id).status==='done');
+    assert.equal(gateway.get(first.id).status,'failed');assert.equal(gateway.get(first.id).phase,'completed');
+    assert.equal(gateway.get(first.id).submittedAt,undefined);assert.equal(gateway.get(first.id).attention,undefined);
+    assert.equal(gateway.get(first.id).result,undefined);assert.deepEqual(sent,['first','next']);
+    assert.equal(gateway.queues().find(q=>q.conversationId==='one')?.paused,false);
+  }finally{await gateway.stop();db.close()}
+});
+
 test('restart resumes an unsent background queue but preserves an explicit pause', async () => {
   const db = new Database(':memory:'); const sent: string[] = [];
   let gateway = new AgentGateway(db, async () => {}, () => {});

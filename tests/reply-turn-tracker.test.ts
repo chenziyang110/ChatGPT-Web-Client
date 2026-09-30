@@ -7,11 +7,50 @@ const answer: ConversationMessage = { id: 'reply', role: 'assistant', text: 'Ans
 const history = [user('old-1'), user('old-2'), user('old-3')];
 const own = user('submitted', 'Question');
 
+test('queue tracking uses stable turn boundaries when Markdown rendering changes source text', () => {
+  const original = user('anchor', '[old](https://example.com/old)');
+  const rendered = user('anchor', 'old');
+  const sent = user('new', 'new link');
+  const tracker = new ReplyTurnTracker([original], '[new link](https://example.com/new)', undefined, true);
+  assert.equal(tracker.read([rendered, sent]), sent);
+  assert.equal(tracker.read([sent]), sent);
+  assert.equal(new ReplyTurnTracker([original], 'source', 'new', true).read([rendered, sent]), sent);
+  assert.throws(() => new ReplyTurnTracker([original], 'source').read([rendered, sent]), /content changed/);
+  assert.throws(() => new ReplyTurnTracker([original], 'source', undefined, true).read([sent]), /anchor is missing/);
+  assert.throws(() => tracker.read([sent, user('extra', 'new link')]), /additional user turn/);
+  assert.throws(() => new ReplyTurnTracker([], 'source', undefined, true).read([user('position:0', 'different')]), /does not match/);
+});
+
+test('sending after a virtualized answer tolerates remounted history without acknowledging an older identical prompt', () => {
+  const tracker = new ReplyTurnTracker([answer], 'Question');
+  const older = user('older-identical', 'Question');
+  assert.equal(tracker.read([older, answer]), undefined);
+  assert.equal(tracker.read([older, answer, own]), own);
+  assert.equal(tracker.read([own]), own);
+  assert.equal(tracker.read([older, answer, own]), own);
+  assert.throws(() => tracker.read([older, answer, user('another', 'Question')]), /identity changed/);
+  assert.throws(() => new ReplyTurnTracker([answer], 'Question').read([older, answer, own, user('extra', 'Question')]), /additional user turn/);
+  assert.equal(new ReplyTurnTracker([answer], 'Question', own.id).read([older, answer, own]), own);
+});
+
 test('restores a persisted stable submission after all older DOM history unmounts', () => {
   assert.equal(new ReplyTurnTracker(history, 'Question', own.id).read([own, answer]), own);
   assert.throws(() => new ReplyTurnTracker(history, 'Question', own.id).read([user('different', 'Question'), answer]), /CONVERSATION_CHANGED/);
   assert.throws(() => new ReplyTurnTracker(history, 'Question', own.id).read([user(own.id, 'Edited'), answer]), /does not match/);
   assert.throws(() => new ReplyTurnTracker(history, 'Question', 'position:3').read([own, answer]), /anchor is missing/);
+});
+
+test('restored queue acknowledgement survives history mounted outside its original DOM window', () => {
+  for (const baseline of [[], history, [answer]]) {
+    const tracker = new ReplyTurnTracker(baseline, 'Question', own.id, true);
+    const remounted = [user('previously-unmounted'), own, answer];
+    assert.equal(tracker.read(remounted), own);
+    assert.equal(tracker.read([own, answer]), own);
+    assert.throws(() => tracker.read([...remounted, user('external')]), /additional user turn/);
+    assert.throws(() => tracker.read([own, own]), /duplicate/);
+  }
+  assert.throws(() => new ReplyTurnTracker([], 'Question', own.id).read([user('old'), own]), /anchor is missing/);
+  assert.throws(() => new ReplyTurnTracker([], 'Question', undefined, true).read([user('old'), own]), /additional user/);
 });
 
 test('matches a sent turn after the old DOM prefix unmounts before acknowledgement', () => {

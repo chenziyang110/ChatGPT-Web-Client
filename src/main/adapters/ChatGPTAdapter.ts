@@ -97,9 +97,12 @@ export function pageOperation(operation: Operation): unknown {
         node instanceof HTMLParagraphElement || (node.nodeType === Node.TEXT_NODE && !node.textContent?.trim()))) {
         return children.filter((node): node is HTMLParagraphElement => node instanceof HTMLParagraphElement).map(paragraph => {
           if (paragraph.childNodes.length === 1 && paragraph.firstChild instanceof HTMLBRElement) return '';
-          const value = paragraph.innerText;
-          return paragraph.lastChild instanceof HTMLBRElement && paragraph.lastChild.classList.contains('ProseMirror-trailingBreak')
-            ? value.replace(/\n$/, '') : value;
+          // Link/mention wrappers can have block or inline-flex layout. Their
+          // visual line breaks are not editor input; only explicit BRs are.
+          const text = (node: Node): string => node.nodeType === Node.TEXT_NODE ? node.textContent ?? ''
+            : node instanceof HTMLBRElement ? node.classList.contains('ProseMirror-trailingBreak') ? '' : '\n'
+            : [...node.childNodes].map(text).join('');
+          return text(paragraph);
         }).join('\n');
       }
       return element.innerText;
@@ -157,6 +160,10 @@ export function pageOperation(operation: Operation): unknown {
       const body = role === 'user'
         ? element.querySelector<HTMLElement>('[data-testid="collapsible-user-message-content"], [data-user-message-bubble]') ?? element
         : element.querySelector<HTMLElement>('[data-chatgpt-selection-message-id]') ?? element;
+      const userText = (node: Node): string => node.nodeType === Node.TEXT_NODE ? node.textContent ?? ''
+        : node instanceof HTMLBRElement ? '\n'
+        : [...node.childNodes].map(child => child instanceof HTMLParagraphElement
+          ? `${userText(child)}\n` : userText(child)).join('');
       const hasContent = role === 'assistant' &&
         [...turn.querySelectorAll('img, video, canvas')].some(media => {
           if (!visible(media)) return false;
@@ -164,7 +171,7 @@ export function pageOperation(operation: Operation): unknown {
           const bounds = media.getBoundingClientRect(); return bounds.width >= 32 && bounds.height >= 32;
         });
       return { id: element.dataset.messageId ?? element.getAttribute('data-chatgpt-search-message-ids')?.trim().split(/\s+/)[0] ?? `position:${index}`, role,
-        text: body.innerText.trim(), terminal: role === 'assistant' && terminalAction(turn), hasContent };
+        text: (role === 'user' ? userText(body) : body.innerText).trim(), terminal: role === 'assistant' && terminalAction(turn), hasContent };
     };
     const markedError = [...document.querySelectorAll<HTMLElement>('[data-testid="conversation-error"], [data-testid="error-message"]')]
       .find(element => visible(element) && afterLastUser(element));
@@ -291,6 +298,11 @@ export class ChatGPTAdapter {
     return pageOperationResult<T>(await this.track(this.contents.executeJavaScript(pageOperationScript(operation), true)));
   }
   private inspect(): Promise<Page> { return this.evaluate<Page>({ kind: 'inspect' }); }
+  private async clearConfirmedDraft(page: Page, value: string): Promise<void> {
+    await this.context.acquireExecution?.();
+    try { await this.evaluate({ kind: 'clear', url: page.url, anchor: this.anchor(page), value }); }
+    finally { this.context.releaseExecution?.(); }
+  }
   private anchor(page: Page): string { return JSON.stringify(page.messages.filter(message => message.role === 'user').map(message => [message.id, message.text])); }
   private async loaded(): Promise<void> { while (this.contents.isLoading()) await this.delay(); }
   private async idle(): Promise<Page> {
@@ -298,6 +310,13 @@ export class ChatGPTAdapter {
     this.context.releaseExecution?.();
     const priorError = this.context.precedingReplyError;
     const conversationId = this.context.task().conversationId;
+    const usableDraft = (page: Page): boolean => {
+      if (!page.draft.trim()) return true;
+      const task = this.context.task();
+      const url = conversationId ? this.conversations.get(task.accountId, conversationId).url : undefined;
+      return !!task.background && task.input.type === 'prompt' && task.input.submit && !!url && replyPageUrl(page.url) === url &&
+        page.draft.replace(/\r\n?/g, '\n').trim() === task.input.prompt.replace(/\r\n?/g, '\n').trim();
+    };
     const failedTail = (page: Page): boolean => {
       if (!priorError || !conversationId) return false;
       const target = this.conversations.get(this.context.task().accountId, conversationId);
@@ -309,6 +328,7 @@ export class ChatGPTAdapter {
     let lastSample = Date.now();
     let interval = 250;
     let composerMissingSince = Date.now();
+    let waitingForPage = false;
     const composerBudget = Math.min(this.context.task().prepareTimeoutMs ?? 60000, 30000);
     while (true) {
       this.context.checkpoint?.();
@@ -321,6 +341,7 @@ export class ChatGPTAdapter {
       const terminalFailure = !!page.failure || !!this.context.task().background && !!page.error && !page.busy;
       if (page.error && !terminalFailure && !(previousFailure && (priorError?.continueAfterInterruption || page.error === priorError?.error))) throw new Error(page.error);
       if (!page.editor || page.readiness === 'login_required' || page.readiness === 'verification_required') {
+        if (!waitingForPage) { this.context.stage('waiting_page'); waitingForPage = true; }
         if (Date.now() - composerMissingSince >= composerBudget) {
           if (page.readiness === 'login_required') throw new Error('LOGIN_REQUIRED: 请在此账号网页完成登录，再继续原任务');
           if (page.readiness === 'verification_required') throw new Error('VERIFICATION_REQUIRED: 网页停在验证页面，请在此账号完成验证后继续原任务；未发送消息');
@@ -329,13 +350,14 @@ export class ChatGPTAdapter {
         previous = ''; since = Date.now();
         interval = 250; await this.delay(interval); continue;
       }
+      if (waitingForPage) { this.context.stage('waiting_idle'); waitingForPage = false; }
       composerMissingSince = Date.now();
-      if (page.draft.trim()) throw new Error('DRAFT_CONFLICT: clear or send the existing draft first');
+      if (!usableDraft(page)) throw new Error('DRAFT_CONFLICT: clear or send the existing draft first');
       const last = page.messages.at(-1);
       // A usable composer with no active generation is an idle conversation,
       // even when ChatGPT never produced a copyable assistant turn.
       const ready = !page.busy;
-      const fingerprint = JSON.stringify([page.url, page.messages, page.error]);
+      const fingerprint = JSON.stringify([page.url, page.messages, page.error, page.draft]);
       if (!ready || previous !== fingerprint) since = Date.now();
       if (ready && Date.now() - since >= (last ? COMPLETION_STABLE_MS : 1000)) {
         await this.context.acquireExecution?.();
@@ -345,7 +367,7 @@ export class ChatGPTAdapter {
         const confirmed = await this.inspect();
         if (confirmed.editor && confirmed.readiness === 'ready' && (!confirmed.error || confirmed.failure || this.context.task().background && !confirmed.busy ||
           (failedTail(confirmed) && (priorError?.continueAfterInterruption || confirmed.error === priorError?.error))) &&
-          !confirmed.busy && !confirmed.draft.trim() && JSON.stringify([confirmed.url, confirmed.messages, confirmed.error]) === fingerprint) return confirmed;
+          !confirmed.busy && usableDraft(confirmed) && JSON.stringify([confirmed.url, confirmed.messages, confirmed.error, confirmed.draft]) === fingerprint) return confirmed;
         this.context.releaseExecution?.();
         previous = ''; since = Date.now(); interval = 250;
         continue;
@@ -381,7 +403,7 @@ export class ChatGPTAdapter {
       const target = conversation?.url ?? task.sendReceipt.url;
       if (replyPageUrl(this.contents.getURL(), true) === HOME_URL && target !== HOME_URL) await this.navigate(target);
       return this.awaitReply({ url: task.sendReceipt.url, title: '', readiness: 'ready', editor: true, draft: '', busy: false,
-        messages: task.sendReceipt.users }, input.prompt, task.sendReceipt.url, conversation);
+        messages: [...task.sendReceipt.users, ...(task.sendReceipt.anchor ? [task.sendReceipt.anchor] : [])] }, input.prompt, task.sendReceipt.url, conversation);
     }
     const initial = input.type !== 'snapshot' ? await this.idle() : undefined;
     let conversation = task.conversationId ? this.conversations.get(task.accountId, task.conversationId) : undefined;
@@ -417,8 +439,11 @@ export class ChatGPTAdapter {
     let prepared = false;
     try {
       this.context.checkpoint?.();
-      const result = await this.evaluate({ ...guard, kind: 'fill', selector: input.type === 'fill' ? input.selector : undefined, value });
-      prepared = true;
+      // A matching draft is already the explicitly queued payload. Submit it
+      // in place instead of clearing/refilling it, or retrying a conflict forever.
+      const reuseDraft = task.background && input.type === 'prompt' && input.submit && !!baseline.draft.trim();
+      const result = reuseDraft ? { prepared: true } : await this.evaluate({ ...guard, kind: 'fill', selector: input.type === 'fill' ? input.selector : undefined, value });
+      prepared = !reuseDraft;
       if (input.type !== 'prompt' || !input.submit) return result;
       await this.delay();
       this.context.checkpoint?.();
@@ -433,7 +458,10 @@ export class ChatGPTAdapter {
         }
       }
       this.context.checkpoint?.();
-      this.context.intent({ url: baseline.url, users: baseline.messages.filter(message => message.role === 'user').slice(-5) });
+      const users = baseline.messages.filter(message => message.role === 'user').slice(-5);
+      const tail = baseline.messages.at(-1);
+      this.context.intent({ url: baseline.url, users, anchor: !users.length && tail?.role === 'assistant'
+        ? { id: tail.id, role: tail.role, text: '', terminal: tail.terminal } : undefined });
       if (conversation?.binding === 'new') this.conversations.markSending(task.accountId, conversation.id);
       await this.evaluate({ ...guard, kind: 'send', value });
     } catch (error) {
@@ -458,8 +486,10 @@ export class ChatGPTAdapter {
     // completion window can ever elapse on a recovered turn.
     this.context.stage('generating', task.retryCount ? Math.max(30000, task.replyTimeoutMs ?? 0) : task.replyTimeoutMs);
     this.context.releaseExecution?.();
-    const turns = new ReplyTurnTracker(baseline.messages, value, task.submittedMessageId);
-    let acknowledged = false; let boundUrl = conversation?.url;
+    let turns = new ReplyTurnTracker(baseline.messages, value, task.submittedMessageId, !!task.background);
+    let acknowledged = !!task.background && !!task.submittedAt && !!task.submittedMessageId && !task.submittedMessageId.startsWith('position:');
+    let correlationLost = false;
+    let boundUrl = conversation?.url;
     let observedConversationUrl = boundUrl;
     let optimisticUrl: string | undefined;
     let previous = ''; let since = Date.now();
@@ -467,6 +497,9 @@ export class ChatGPTAdapter {
     let lastSample = Date.now();
     let nextPollMs = 250;
     let lastSendAttempt = Date.now(); let sendRetries = 0; let readFailures = 0;
+    let unavailableSince = Date.now();
+    let waitingForPage = false;
+    const unavailableBudget = Math.min(task.prepareTimeoutMs ?? 60000, 30000);
     while (true) {
       const interval = nextPollMs;
       await this.delay(interval);
@@ -492,7 +525,47 @@ export class ChatGPTAdapter {
         if (optimisticUrl && replyUrl !== optimisticUrl) throw changedReplyTarget(optimisticUrl, page.url);
         optimisticUrl = replyUrl;
       } else if (replyUrl !== HOME_URL) observedConversationUrl ??= replyUrl;
-      const ownUser = turns.read(page.messages);
+      // A successfully executed DOM read is not necessarily a loaded chat.
+      // Login/challenge shells and empty React pages used to remain here for
+      // the entire reply timeout, falsely labelled as an ongoing response.
+      // Preserve the send receipt; retry observation, never resend on absence.
+      if (!page.editor || page.readiness !== 'ready') {
+        if (!waitingForPage) { this.context.stage('waiting_page'); waitingForPage = true; }
+        previous = ''; since = now; failureFingerprint = ''; failureSince = now;
+        if (now - unavailableSince >= unavailableBudget) {
+          if (page.readiness === 'verification_required') throw new Error('VERIFICATION_REQUIRED: 等待网页验证，完成后自动继续观察原回复');
+          if (page.readiness === 'login_required') throw new Error('LOGIN_REQUIRED: 等待账号登录，完成后自动继续观察原回复');
+          throw new Error('COMPOSER_NOT_READY: 原会话页面尚未恢复，正在重试读取；不会重复发送');
+        }
+        nextPollMs = 1000; continue;
+      }
+      if (waitingForPage) { this.context.stage(acknowledged ? 'submitted' : 'generating'); waitingForPage = false; }
+      unavailableSince = now;
+      let ownUser: Message | undefined;
+      try { if (!correlationLost) ownUser = turns.read(page.messages); }
+      catch (error) {
+        // Old queue receipts can lose every history anchor after a reload.
+        // Do not restart this same failed comparison forever. Observe the
+        // conversation stopping below; never claim a matched answer or resend.
+        if (!task.background || !boundUrl || !(error instanceof Error) || !error.message.startsWith('CONVERSATION_CHANGED:')) throw error;
+        // An acknowledged queue turn can be followed by external messages while
+        // the app is closed. Observe this fixed conversation until it stops;
+        // never retry the obsolete history comparison, resend, or claim its answer.
+        if (acknowledged) correlationLost = true;
+        // Older persisted receipts may contain layout-generated whitespace.
+        // A new stable ID immediately after the recorded last user, with the
+        // exact queued text, still proves this submission without reusing an
+        // older identical prompt or weakening foreground answer matching.
+        const users = page.messages.filter(message => message.role === 'user');
+        const previousId = baseline.messages.filter(message => message.role === 'user').at(-1)?.id;
+        const candidate = users.at(-1);
+        if (!acknowledged && users.length >= 2 && previousId && users.at(-2)?.id === previousId && candidate &&
+          !candidate.id.startsWith('position:') && !baseline.messages.some(message => message.id === candidate.id) &&
+          candidate.text.replace(/\r\n?/g, '\n') === value.replace(/\r\n?/g, '\n').trim()) {
+          ownUser = candidate;
+          turns = new ReplyTurnTracker(page.messages.slice(0, page.messages.indexOf(candidate)), value, candidate.id, true);
+        }
+      }
       if (ownUser && !acknowledged) { this.context.submitted(ownUser.id); acknowledged = true; }
       // A click can be ignored while ChatGPT hydrates or reconnects. Retry only
       // when the unchanged prompt is still a draft AND the recorded pre-send user
@@ -515,6 +588,8 @@ export class ChatGPTAdapter {
         boundUrl = conversationUrl(replyUrl).url;
         this.conversations.bind(task.accountId, conversation.id, boundUrl);
       }
+      const retainedOwnDraft = !!task.background && acknowledged && !!ownUser && !!page.draft.trim() &&
+        page.draft.replace(/\r\n?/g, '\n').trim() === value.replace(/\r\n?/g, '\n').trim();
       if (page.error) {
         // A visible reply error is terminal only after the sent user turn and
         // the actual conversation are confirmed. Earlier failures stay in the
@@ -522,13 +597,14 @@ export class ChatGPTAdapter {
         if (acknowledged && boundUrl) {
           if (page.busy) continue;
           {
-            const fingerprint = JSON.stringify([replyUrl, page.messages, page.error]);
+            const fingerprint = JSON.stringify([replyUrl, page.messages, page.error, page.draft]);
             if (fingerprint !== failureFingerprint) { failureFingerprint = fingerprint; failureSince = now; }
             if (now - failureSince < COMPLETION_STABLE_MS) continue;
           }
+          if (retainedOwnDraft) await this.clearConfirmedDraft(page, value);
           throw new ReportedReplyError(page.error, !!page.failure);
         }
-        throw new Error(page.error);
+        if (!task.background || !boundUrl) throw new Error(page.error);
       }
       failureFingerprint = '';
       const last = page.messages.at(-1);
@@ -538,11 +614,26 @@ export class ChatGPTAdapter {
       }
       const finished = acknowledged && !!boundUrl && page.editor && !page.busy && !page.draft.trim() && userIndex >= 0 &&
         page.messages.length > userIndex + 1 && last?.role === 'assistant' && last.terminal && (!!last.text || !!last.hasContent);
-      const fingerprint = JSON.stringify([replyUrl, page.messages]);
-      const stopped = acknowledged && !!boundUrl && page.readiness === 'ready' && !page.busy && !page.draft.trim() && userIndex >= 0;
+      const fingerprint = JSON.stringify([replyUrl, page.messages, page.draft]);
+      // Long ChatGPT replies can unmount even the submitted user turn. A queue
+      // can advance after an acknowledged send and a stable idle page without
+      // claiming that an uncorrelated visible answer belongs to that send.
+      // Keep strict turn matching for foreground/API answer retrieval.
+      const unmountedSubmission = !!task.background && acknowledged && userIndex < 0;
+      const unconfirmedSubmission = !!task.background && !acknowledged && !!task.sendIntentAt && !!task.sendReceipt &&
+        now - task.sendIntentAt >= 30000 && (page.messages.length > 0 || !!page.error);
+      const stopped = !!boundUrl && page.editor && page.readiness === 'ready' && !page.busy && (!page.draft.trim() || retainedOwnDraft) &&
+        (acknowledged && (userIndex >= 0 || unmountedSubmission) || unconfirmedSubmission);
       if (!stopped || fingerprint !== previous) since = Date.now();
       if (stopped && Date.now() - since >= COMPLETION_STABLE_MS) {
+        if (retainedOwnDraft) {
+          await this.clearConfirmedDraft(page, value);
+          previous = ''; since = Date.now(); continue;
+        }
+        if (unconfirmedSubmission) throw new ReportedReplyError('网页已停止，旧发送记录无法确认；结束本轮并继续下一条', true, true);
         if (finished) return { submitted: true, response: last!.text.slice(0, 64000), url: boundUrl, conversationId: conversation?.id, replyToken: replyToken(ownUser!, last!) };
+        if (unmountedSubmission && last?.role === 'assistant' && last.terminal) return { submitted: true, responseUnavailable: true,
+          completionReason: correlationLost ? 'idle_after_reply_correlation_lost' : 'idle_after_submitted_turn_unmounted', url: boundUrl, conversationId: conversation?.id };
         throw new ReportedReplyError('ChatGPT 已停止回复，本轮未提供完整可确认的答复', true);
       }
       previous = fingerprint;

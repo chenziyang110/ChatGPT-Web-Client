@@ -8,7 +8,7 @@ Work 首页和聊天首页都使用 `https://chatgpt.com/`。只识别输入框�
 
 Your dot 使用 `/dots/<id>` 和 `[data-codex-composer-root]`，没有表单。它的发送控件是 `type=button`、带 Send/发送标签的按钮。消息使用 `article.message-row[data-message-id]`，用户行具有语义类 `self`，正文位于 `.message-body[data-message-id]`。回复操作位于 `.message-inline-actions--orbit`，不使用聊天页的复制按钮。
 
-Dot 的「Pause your dot」控制后台 Agent 活动，不能当成单条消息的 Stop 控件。队列等待发送之后的新回复与稳定的消息操作；可用输入框和持续后台活动都不能独自证明当前回复结束。发送前的回复标识保存在回执中，避免把历史主动消息误当成新答复。
+Dot 的「Pause your dot」控制后台 Agent 活动，不能当成单条消息的 Stop 控件。v1.4.21 等待发送之后的新回复与稳定的消息操作；后续真实工具查询确认这仍会把确认消息误判为工作完成。v1.4.22 增加独立工作状态等待，详见 [Dot 工作完成验证](dot-work-completion-2026-09-30.md)。发送前的回复标识保存在回执中，避免把历史主动消息误当成新答复。
 
 每个账号和会话保持独立队列。Dot 地址复用时按账号隔离；`/c/<id>` 与 `/dots/<id>` 即使路径末尾相同也不共享标识。主页切换模式时，面板自动重新绑定，并在加入消息时再次核对页面；原队列草稿保留。
 

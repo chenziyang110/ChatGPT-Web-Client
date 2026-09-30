@@ -221,6 +221,43 @@ try {
   await page.evaluate(() => { document.body.innerHTML = '<main style="height:2400px">No messages yet</main>'; window.scrollTo(0, 0); });
   assert.deepEqual(await execute({ kind: 'follow_latest', url }), { scrolled: false });
   assert.equal(await page.evaluate(() => window.scrollY), 0, 'Pages without conversation messages do not move');
+  // Live Dot acknowledges immediately, then works without streaming a message.
+  // Its summary avatar changes running -> idle; its status text can lag a minute.
+  await page.evaluate(() => {
+    history.replaceState({}, '', '/dots/work-fixture');
+    document.body.innerHTML = `<aside><div data-codex-pet-state="running"></div></aside><main>
+      <article class="message-row self" data-message-id="own"><div class="message-body" data-message-id="own">Question</div></article>
+      <article class="message-row" data-message-id="ack"><div class="message-body" data-message-id="ack">Received</div><div class="message-inline-actions--orbit"><button data-action="reply">Reply</button></div></article>
+      <div data-codex-composer-root><div data-composer-markdown contenteditable="true" role="textbox"></div><button type="button" aria-label="发送">Send</button></div>
+      <span data-slot="thread-summary-panel-item-leading"><div id="pet" data-codex-pet-state="running"></div></span>
+      <button class="group/aeon-status" aria-label="Pause your dot" aria-describedby="work-status"><span id="work-status">活跃</span><span aria-hidden="true">Pause your dot</span></button>
+      <div class="typing-indicator" data-visible="false" role="status"></div></main>`;
+  });
+  const dotPage = await execute({ kind: 'inspect' });
+  assert.equal(dotPage.dotWork, 'working'); assert.equal(dotPage.busy, true);
+  assert.equal(dotPage.messages.at(-1).terminal, true, 'Acknowledgement has reply controls while the agent is still running');
+  assert.equal((await execute({ kind: 'diagnose' })).dotWork, 'working');
+  assert.match((await execute({ kind: 'fill', url: 'https://chatgpt.com/dots/work-fixture', anchor: JSON.stringify([['own', 'Question']]), value: 'Next' }, true)).error, /PAGE_CHANGED/);
+  await page.evaluate(() => document.querySelector('#pet').setAttribute('data-codex-pet-state', 'idle'));
+  assert.equal((await execute({ kind: 'inspect' })).dotWork, 'idle', 'Explicit idle overrides stale Active text and unrelated sidebar avatars');
+  assert.equal((await execute({ kind: 'activity' })).busy, false);
+  await page.evaluate(() => document.querySelector('.typing-indicator').setAttribute('data-visible', 'true'));
+  assert.equal((await execute({ kind: 'inspect' })).busy, true, 'The next reply starting resets idle evidence');
+  await page.evaluate(() => { document.querySelector('.typing-indicator').setAttribute('data-visible', 'false'); document.querySelector('#pet').remove(); });
+  assert.equal((await execute({ kind: 'inspect' })).dotWork, 'working', 'Status description is used when the avatar is unavailable');
+  await page.evaluate(() => document.querySelector('#work-status').textContent = 'Active 1分钟前');
+  assert.equal((await execute({ kind: 'inspect' })).dotWork, 'idle');
+  await page.evaluate(() => document.querySelector('#work-status').textContent = 'Active 1 minute ago');
+  assert.equal((await execute({ kind: 'inspect' })).dotWork, 'idle');
+  await page.evaluate(() => document.querySelector('#work-status').textContent = 'Unknown status');
+  assert.equal((await execute({ kind: 'inspect' })).dotWork, 'unknown');
+  assert.equal((await execute({ kind: 'inspect' })).busy, true, 'Missing work evidence cannot turn an acknowledgement into completion');
+  await page.evaluate(() => {
+    const pet = document.createElement('div'); pet.setAttribute('data-codex-pet-state', 'unrecognized');
+    document.querySelector('[data-slot="thread-summary-panel-item-leading"]').append(pet);
+    document.querySelector('#work-status').textContent = 'Active 1 minute ago';
+  });
+  assert.equal((await execute({ kind: 'inspect' })).dotWork, 'unknown', 'An unsupported explicit state cannot be overridden by an old timestamp');
   console.log('Page operation desktop checks passed: safe exception transport, contenteditable input, draft/send guards, diagnostics and latest-reply scrolling without moving the sidebar, code blocks, draft or focus.');
 } finally {
   await desktop?.close();

@@ -113,6 +113,13 @@ const runInPageById = (account, id, script) => desktop.evaluate(async ({ session
   return contents.mainFrame.executeJavaScript(script);
 }, { partition: account.partition, id, script });
 
+const waitSettledDocument = (account, id, label) => until(async () => {
+  const contents = await webContentsById(account, id);
+  return !!contents && !contents.loading && !contents.waitingResponse && !contents.loadingMainFrame &&
+    await runInPageById(account, id,
+      "document.readyState === 'complete' && !!document.querySelector('#prompt-textarea')");
+}, label);
+
 const emitPageEvent = (account, id, event) => desktop.evaluate(({ session, webContents }, { partition, id, event }) => {
   const isolated = session.fromPartition(partition);
   const contents = webContents.getAllWebContents().find(item => item.session === isolated && item.id === id);
@@ -284,12 +291,8 @@ try {
   // A task may finish as soon as the composer mounts, before the original
   // navigation's final native loading event. Start the fault on a settled
   // document so that event cannot cancel the deliberately blocked reload.
-  await until(async () => {
-    const contents = await webContentsById(first, retryOriginal.id);
-    return !!contents && !contents.loading && !contents.waitingResponse && !contents.loadingMainFrame &&
-      await runInPageById(first, retryOriginal.id,
-        "document.readyState === 'complete' && !!document.querySelector('#prompt-textarea')");
-  }, 'Manual retry document must finish its original navigation before blocking reload');
+  await waitSettledDocument(first, retryOriginal.id,
+    'Manual retry document must finish its original navigation before blocking reload');
   await desktop.evaluate(({ session, webContents }, { partition, id }) => {
     const contents = webContents.getAllWebContents().find(item => item.session === session.fromPartition(partition) && item.id === id);
     if (!contents || contents.isDestroyed()) throw new Error(`Fixture WebContents missing: ${id}`);
@@ -381,8 +384,12 @@ try {
     'Usable reset start page did not open');
   const usableResetPage = (await rpc('workspace.status')).page;
   const usableResetOriginal = await requireWebContentsFor(first, usableResetStartUrl);
+  await waitSettledDocument(first, usableResetOriginal.id,
+    'Usable reset original document must finish loading before adding its pending iframe');
   await runInPage(first, usableResetStartUrl,
     "const iframe = document.createElement('iframe'); iframe.hidden = true; iframe.src = '/slow-resource?usable-reset'; document.body.append(iframe);");
+  await until(() => desktop.evaluate(() => globalThis.protocolRequests.includes('https://chatgpt.com/slow-resource?usable-reset')),
+    'Usable reset fixture must actually start its new iframe request');
   await until(async () => (await webContentsById(first, usableResetOriginal.id))?.loading === true,
     'Usable reset fixture did not keep loading true with a pending iframe');
   assert.equal(await runInPageById(first, usableResetOriginal.id,
@@ -426,6 +433,8 @@ try {
     'Draft guard start page did not open');
   const draftPage = (await rpc('workspace.status')).page;
   const draftOriginal = await requireWebContentsFor(first, draftStartUrl);
+  await waitSettledDocument(first, draftOriginal.id,
+    'Draft guard original document must finish loading before the pending target navigation');
   const humanDraft = 'keep this human draft on its original conversation';
   await startPendingMainNavigationById(first, draftOriginal.id, draftDestinationUrl);
   await until(async () => {
@@ -477,6 +486,8 @@ try {
     'Busy guard start page did not open');
   const busyPage = (await rpc('workspace.status')).page;
   const busyOriginal = await requireWebContentsFor(first, busyStartUrl);
+  await waitSettledDocument(first, busyOriginal.id,
+    'Busy guard original document must finish loading before the pending target navigation');
   const heldPrompt = 'HOLD:keep this manual reply while navigation is pending';
   await startPendingMainNavigationById(first, busyOriginal.id, busyDestinationUrl);
   await until(async () => {

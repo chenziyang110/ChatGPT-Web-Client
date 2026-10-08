@@ -85,13 +85,6 @@ const waitTask = task => until(async () => {
   assert.ok(!['failed', 'blocked', 'waiting_user'].includes(current.status), current.error ?? current.status);
   return current.status === 'done';
 }, `Task ${task.id} did not finish`);
-const webContentsFor = (account, url) => desktop.evaluate(({ session, webContents }, { partition, url }) => {
-  const isolated = session.fromPartition(partition);
-  const contents = webContents.getAllWebContents().find(item => item.session === isolated && item.getURL() === url);
-  if (!contents) return null;
-  return { id: contents.id, url: contents.getURL(), loading: contents.isLoading(), title: contents.getTitle(), destroyed: contents.isDestroyed() };
-}, { partition: account.partition, url });
-
 const accountWebContents = account => desktop.evaluate(({ session, webContents }, partition) => {
   const isolated = session.fromPartition(partition);
   return webContents.getAllWebContents().filter(item => item.session === isolated && !item.isDestroyed()).map(item => ({
@@ -101,9 +94,8 @@ const accountWebContents = account => desktop.evaluate(({ session, webContents }
 const openNewConversationContents = async (account, label) => {
   const before = new Set((await accountWebContents(account)).map(item => item.id));
   const page = await rpc('browser.newConversation', { accountId: account.id });
-  await until(async () => (await accountWebContents(account)).some(item => !before.has(item.id) && item.url.startsWith('https://chatgpt.com/')), `${label} did not attach`);
-  const contents = (await accountWebContents(account)).find(item => !before.has(item.id) && item.url.startsWith('https://chatgpt.com/'));
-  assert.ok(contents, `${label} should have a new WebContents`);
+  const contents = await waitSelectedPageReady(account, page.id, 'https://chatgpt.com/', '#prompt-textarea', `${label} did not attach and load its document`);
+  assert.ok(!before.has(contents.id), `${label} should have a new WebContents`);
   return { page, contents };
 };
 
@@ -112,7 +104,8 @@ const selectedWebContents = account => desktop.evaluate(({ BrowserWindow, sessio
   const window = BrowserWindow.getAllWindows().find(window => !window.isDestroyed() && window.webContents.getURL().startsWith('file:'));
   const visible = window?.contentView.children.find(view => view.webContents && !view.webContents.isDestroyed() && view.webContents.session === isolated)?.webContents;
   if (!visible) return null;
-  return { id: visible.id, url: visible.getURL(), title: visible.getTitle(), loading: visible.isLoading() };
+  return { id: visible.id, url: visible.getURL(), title: visible.getTitle(), loading: visible.isLoading(),
+    waitingResponse: visible.isWaitingForResponse(), loadingMainFrame: visible.isLoadingMainFrame() };
 }, account.partition);
 const contentsById = (account, id) => desktop.evaluate(({ session, webContents }, { partition, id }) => {
   const isolated = session.fromPartition(partition);
@@ -182,7 +175,7 @@ const startPendingMainNavigationById = (account, id, url) => desktop.evaluate(({
     code: error.code, errno: error.errno, message: error.message }));
 }, { partition: account.partition, id, url });
 
-const waitSelector = (account, id, selector, label = `Selector ${selector} did not become ready`, allowPendingResources = false) => until(() =>
+const selectorReady = (account, id, selector, allowPendingResources = false) =>
   desktop.evaluate(async ({ session, webContents }, { partition, id, selector, allowPendingResources }) => {
     const contents = webContents.getAllWebContents().find(item => item.session === session.fromPartition(partition) && item.id === id);
     if (!contents || contents.isDestroyed() || contents.isWaitingForResponse() || (!allowPendingResources && contents.isLoading())) return false;
@@ -202,7 +195,29 @@ const waitSelector = (account, id, selector, label = `Selector ${selector} did n
       if (contents.isDestroyed() || /context.*destroyed|frame.*disposed|frame.*destroyed/i.test(String(error))) return false;
       throw error;
     }
-  }, { partition: account.partition, id, selector, allowPendingResources }), label);
+  }, { partition: account.partition, id, selector, allowPendingResources });
+const waitSelector = (account, id, selector, label = `Selector ${selector} did not become ready`, allowPendingResources = false) =>
+  until(() => selectorReady(account, id, selector, allowPendingResources), label);
+
+const waitSelectedPageReady = async (account, pageId, expectedUrl, selector, label, allowPendingResources = false) => {
+  let restored;
+  const matchesUrl = url => typeof expectedUrl === 'string' ? url === expectedUrl : expectedUrl.test(url);
+  await until(async () => {
+    const state = await rpc('workspace.status');
+    if (state.activeAccountId !== account.id || state.page?.id !== pageId || state.page.error || !matchesUrl(state.page.url)) return false;
+    const contents = await selectedWebContents(account);
+    if (!contents || !matchesUrl(contents.url) || !await selectorReady(account, contents.id, selector, allowPendingResources)) return false;
+    // A recovery may retire a native instance between the URL and DOM probes.
+    // Match the logical tab again so a ready sibling cannot satisfy this wait.
+    const finalState = await rpc('workspace.status');
+    const current = await selectedWebContents(account);
+    if (finalState.activeAccountId !== account.id || finalState.page?.id !== pageId || finalState.page.error || current?.id !== contents.id ||
+      current.url !== contents.url || finalState.page.url !== current.url || current.waitingResponse || (!allowPendingResources && current.loading)) return false;
+    restored = current;
+    return true;
+  }, label);
+  return restored;
+};
 
 const popupFor = account => desktop.evaluate(({ BrowserWindow, session }, partition) => {
   const isolated = session.fromPartition(partition);
@@ -241,12 +256,15 @@ try {
   const second = await rpc('accounts.create', { name: 'OAuth secondary' });
   await until(async () => (await rpc('browser.inspect', { accountId: second.id })).editor, 'Secondary account did not load');
   await rpc('accounts.switch', { id: second.id });
-  const secondHome = await selectedWebContents(second);
+  const secondHomePage = (await rpc('workspace.status')).page;
+  const secondHome = await waitSelectedPageReady(second, secondHomePage?.id, 'https://chatgpt.com/', '#prompt-textarea', 'Secondary account did not attach its ready home page');
   await scriptIn(second, secondHome.id, "localStorage.setItem('partition-marker','secondary-only'); document.cookie='partition_marker=secondary; path=/';");
   await rpc('accounts.switch', { id: first.id });
 
   const lockedNav = await rpc('browser.navigate', { accountId: first.id, url: 'https://chatgpt.com/c/locked-queue' });
   await waitTask(lockedNav);
+  const lockedReadyPage = (await rpc('workspace.status')).page;
+  await waitSelectedPageReady(first, lockedReadyPage?.id, 'https://chatgpt.com/c/locked-queue', '#prompt-textarea', 'Locked queue target did not finish its original document load');
   const lockedTask = await rpc('tasks.create', { accountId: first.id, current: true, input: { type: 'prompt', prompt: 'HOLD:keep queue locked', submit: true }, background: true });
   await until(async () => !!(await rpc('tasks.get', { id: lockedTask.id })).submittedAt, 'Locked queue task did not submit');
   const lockedPage = (await rpc('workspace.status')).pages.find(page => page.accountId === first.id && page.url === 'https://chatgpt.com/c/locked-queue');
@@ -255,13 +273,11 @@ try {
   const { page: oauthHome, contents: oauthHomeContents } = await openNewConversationContents(first, 'New OAuth page');
   await waitSelector(first, oauthHomeContents.id, '#google-login', 'Google login button did not become ready');
   await clickSelector(first, oauthHomeContents.id, '#google-login');
-  await until(async () => (await contentsById(first, oauthHomeContents.id))?.url.startsWith('https://auth.openai.com/'), 'ChatGPT login click did not navigate to OpenAI auth');
-  await waitSelector(first, oauthHomeContents.id, '#continue-google', 'OpenAI auth document did not become ready');
-  await clickSelector(first, oauthHomeContents.id, '#continue-google');
-  await until(async () => (await contentsById(first, oauthHomeContents.id))?.url.startsWith('https://accounts.google.com/'), 'OpenAI auth did not navigate to Google');
-  await waitSelector(first, oauthHomeContents.id, '#account-choice', 'Google account choice did not become ready');
-  await clickSelector(first, oauthHomeContents.id, '#account-choice');
-  await until(async () => (await contentsById(first, oauthHomeContents.id))?.url.startsWith('https://chatgpt.com/'), 'Google account choice did not return to ChatGPT');
+  const oauthAuthContents = await waitSelectedPageReady(first, oauthHome.id, /^https:\/\/auth\.openai\.com\//, '#continue-google', 'ChatGPT login click did not load a ready OpenAI auth document');
+  await clickSelector(first, oauthAuthContents.id, '#continue-google');
+  const oauthGoogleContents = await waitSelectedPageReady(first, oauthHome.id, /^https:\/\/accounts\.google\.com\//, '#account-choice', 'OpenAI auth did not load a ready Google account-selection document');
+  await clickSelector(first, oauthGoogleContents.id, '#account-choice');
+  await waitSelectedPageReady(first, oauthHome.id, 'https://chatgpt.com/?oauth=done', '#prompt-textarea', 'Google account choice did not return the original tab to ready ChatGPT');
   await until(async () => (await rpc('browser.inspect', { accountId: first.id, pageId: oauthHome.id })).readiness === 'ready', 'OAuth page did not return to ready ChatGPT');
   assert.equal((await rpc('tasks.get', { id: lockedTask.id })).status, 'running', 'Independent OAuth page must not stop the running queue');
 
@@ -271,15 +287,14 @@ try {
     if (!contents) throw new Error('Missing pending Google page');
     void contents.loadURL('https://accounts.google.com/o/oauth2/v2/auth?pending=1&redirect_uri=' + encodeURIComponent('https://auth.openai.com/callback')).catch(() => {});
   }, { partition: first.partition, id: pendingGoogleContents.id });
-  await until(async () => (await contentsById(first, pendingGoogleContents.id))?.url.startsWith('https://accounts.google.com/'), 'Pending Google page did not load');
-  await waitSelector(first, pendingGoogleContents.id, '#account-choice', 'Pending Google page DOM did not become interactive', true);
-  const pendingGoogleBefore = await contentsById(first, pendingGoogleContents.id);
+  const pendingGoogleReady = await waitSelectedPageReady(first, pendingGooglePage.id, /^https:\/\/accounts\.google\.com\//, '#account-choice', 'Pending Google page DOM did not become interactive', true);
+  const pendingGoogleBefore = await contentsById(first, pendingGoogleReady.id);
   await new Promise(resolve => setTimeout(resolve, 1800));
-  const pendingGoogleAfter = await contentsById(first, pendingGoogleContents.id);
+  const pendingGoogleAfter = await contentsById(first, pendingGoogleReady.id);
   assert.equal(pendingGoogleAfter?.id, pendingGoogleBefore.id, 'Ready Google OAuth page with a pending iframe must not be replaced');
   assert.equal(pendingGoogleAfter?.url.startsWith('https://accounts.google.com/'), true, 'Ready Google OAuth page with a pending iframe must stay on Google');
-  await clickSelector(first, pendingGoogleContents.id, '#account-choice');
-  await until(async () => (await contentsById(first, pendingGoogleContents.id))?.url.startsWith('https://chatgpt.com/'), 'Pending Google page account click did not complete OAuth');
+  await clickSelector(first, pendingGoogleReady.id, '#account-choice');
+  await waitSelectedPageReady(first, pendingGooglePage.id, 'https://chatgpt.com/?oauth=done', '#prompt-textarea', 'Pending Google page account click did not complete OAuth in its original tab');
 
   const { page: pendingMainPage, contents: pendingMainContents } = await openNewConversationContents(first, 'Pending main tab');
   await desktop.evaluate(({ session, webContents }, { partition, id }) => {
@@ -287,19 +302,19 @@ try {
     if (!contents) throw new Error('Missing pending main page');
     void contents.loadURL('https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=' + encodeURIComponent('https://auth.openai.com/callback')).catch(() => {});
   }, { partition: first.partition, id: pendingMainContents.id });
-  await until(async () => (await contentsById(first, pendingMainContents.id))?.url.startsWith('https://accounts.google.com/'), 'Pending main Google page did not load');
-  await waitSelector(first, pendingMainContents.id, '#account-choice', 'Pending main Google page must finish its original document load');
+  const pendingMainGoogle = await waitSelectedPageReady(first, pendingMainPage.id, /^https:\/\/accounts\.google\.com\//, '#account-choice', 'Pending main Google page must finish its original document load');
   const chatCallbackUrl = 'https://chatgpt.com/?code=syntheticsecret&state=pending-main';
-  await startPendingMainNavigationById(first, pendingMainContents.id, chatCallbackUrl);
+  await startPendingMainNavigationById(first, pendingMainGoogle.id, chatCallbackUrl);
   await until(async () => {
-    const pendingMain = await contentsById(first, pendingMainContents.id);
+    const pendingMain = await contentsById(first, pendingMainGoogle.id);
     return !!pendingMain?.loading && pendingMain.waitingResponse && pendingMain.loadingMainFrame;
   }, 'Real callback navigation must wait for a main-frame response');
   await until(async () => {
     const page = (await rpc('workspace.status')).pages.find(page => page.id === pendingMainPage.id);
     const restored = await selectedWebContents(first);
-    return !!page && page.url === chatCallbackUrl && !!restored && restored.id !== pendingMainContents.id && restored.url === chatCallbackUrl && !restored.loading;
+    return !!page && page.url === chatCallbackUrl && !!restored && restored.id !== pendingMainGoogle.id && restored.url === chatCallbackUrl && !restored.loading;
   }, 'Pending ChatGPT callback navigation should recreate the same tab at the requested target rather than the old Google URL');
+  await waitSelectedPageReady(first, pendingMainPage.id, chatCallbackUrl, '#prompt-textarea', 'Recovered callback page did not finish its new document');
   const pendingMainRestored = (await rpc('workspace.status')).pages.find(page => page.id === pendingMainPage.id);
   assert.equal(pendingMainRestored?.url.startsWith('https://accounts.google.com/'), false,
     'Pending ChatGPT callback navigation must not restore the old Google URL');
@@ -313,7 +328,7 @@ try {
     if (!contents) throw new Error('Missing callback leak page');
     void contents.loadURL(url).catch(() => {});
   }, { partition: first.partition, id: callbackLeakContents.id, url: apiCallbackUrl });
-  await until(async () => (await contentsById(first, callbackLeakContents.id))?.url.startsWith('https://chatgpt.com/api/auth/callback'), 'ChatGPT callback URL did not stay visible for leak check');
+  await waitSelectedPageReady(first, callbackLeakPage.id, apiCallbackUrl, '#prompt-textarea', 'ChatGPT callback document did not stay ready for leak check');
 
   const { page: reloadAuthPage, contents: reloadAuthContents } = await openNewConversationContents(first, 'Reload auth tab');
   await desktop.evaluate(({ session, webContents }, { partition, id }) => {
@@ -321,35 +336,48 @@ try {
     if (!contents) throw new Error('Missing reload auth page');
     void contents.loadURL('https://auth.openai.com/login?reload=1').catch(() => {});
   }, { partition: first.partition, id: reloadAuthContents.id });
-  await until(async () => (await contentsById(first, reloadAuthContents.id))?.url.startsWith('https://auth.openai.com/'), 'Reload auth page did not reach auth');
+  const reloadAuthUrl = 'https://auth.openai.com/login?reload=1';
+  await waitSelectedPageReady(first, reloadAuthPage.id, reloadAuthUrl, '#continue-google', 'Reload auth page did not finish its original document');
   await rpc('browser.select', { accountId: first.id, pageId: reloadAuthPage.id });
+  const authRequestsBeforeReload = await desktop.evaluate((_electron, url) => globalThis.oauthRequests.filter(request => request.url === url).length, reloadAuthUrl);
   await rpc('browser.control', { accountId: first.id, action: 'reload' });
+  await until(async () => (await desktop.evaluate((_electron, url) => globalThis.oauthRequests.filter(request => request.url === url).length, reloadAuthUrl)) > authRequestsBeforeReload,
+    'Manual OAuth reload must actually request the original OAuth destination');
+  await waitSelectedPageReady(first, reloadAuthPage.id, reloadAuthUrl, '#continue-google', 'Manual reload must restore the same tab and OAuth document');
   await new Promise(resolve => setTimeout(resolve, 1800));
-  assert.equal((await contentsById(first, reloadAuthContents.id))?.url.startsWith('https://auth.openai.com/'), true, 'Manual reload on OAuth page must preserve the current OAuth URL');
+  const reloadAuthRestored = await waitSelectedPageReady(first, reloadAuthPage.id, reloadAuthUrl, '#continue-google', 'Reloaded OAuth page must remain ready after its watchdog interval');
+  assert.equal(reloadAuthRestored.url, reloadAuthUrl, 'Manual reload on OAuth page must preserve the exact current OAuth URL');
+  assert.equal((await rpc('workspace.status')).page?.id, reloadAuthPage.id, 'Manual OAuth reload preserves the selected tab');
+  assert.equal((await rpc('tasks.get', { id: lockedTask.id })).status, 'running', 'Manual OAuth reload preserves the sibling queue');
+  assert.equal((await rpc('workspace.status')).pages.find(page => page.id === lockedPage.id)?.locked, true, 'Manual OAuth reload keeps the original queue page locked');
 
   await rpc('browser.select', { accountId: first.id, pageId: lockedPage.id });
-  const lockedContents = await webContentsFor(first, 'https://chatgpt.com/c/locked-queue');
+  const lockedContents = await waitSelectedPageReady(first, lockedPage.id, 'https://chatgpt.com/c/locked-queue', '#prompt-textarea', 'Original locked queue page did not reattach and finish loading');
   await desktop.evaluate(({ session, webContents }, { partition, id }) => {
     const contents = webContents.getAllWebContents().find(item => item.session === session.fromPartition(partition) && item.id === id);
     if (!contents) throw new Error('Missing locked contents');
     void contents.loadURL('https://auth.openai.com/login?connection=google&return_to=https%3A%2F%2Fchatgpt.com%2Fc%2Flocked-queue').catch(() => {});
   }, { partition: first.partition, id: lockedContents.id });
-  await until(async () => (await contentsById(first, lockedContents.id))?.url.startsWith('https://auth.openai.com/'), 'Locked page did not reach auth');
-  await waitSelector(first, lockedContents.id, '#continue-google', 'Locked OpenAI auth document did not become ready');
-  await clickSelector(first, lockedContents.id, '#continue-google');
-  await until(async () => (await contentsById(first, lockedContents.id))?.url.startsWith('https://accounts.google.com/'), 'Locked auth page could not click through to Google');
-  await waitSelector(first, lockedContents.id, '#account-choice', 'Locked Google account choice did not become ready');
-  await clickSelector(first, lockedContents.id, '#account-choice');
-  await until(async () => (await contentsById(first, lockedContents.id))?.url.startsWith('https://chatgpt.com/'), 'Locked page OAuth did not return to ChatGPT');
+  const lockedAuthContents = await waitSelectedPageReady(first, lockedPage.id, /^https:\/\/auth\.openai\.com\//, '#continue-google', 'Locked OpenAI auth document did not become ready');
+  await clickSelector(first, lockedAuthContents.id, '#continue-google');
+  const lockedGoogleContents = await waitSelectedPageReady(first, lockedPage.id, /^https:\/\/accounts\.google\.com\//, '#account-choice', 'Locked auth page could not load ready Google account selection');
+  await clickSelector(first, lockedGoogleContents.id, '#account-choice');
+  const lockedChatContents = await waitSelectedPageReady(first, lockedPage.id, /^https:\/\/chatgpt\.com\//, '#prompt-textarea', 'Locked page OAuth did not return to a ready ChatGPT document in its original tab');
   const lockedAfterOAuth = (await rpc('workspace.status')).pages.find(page => page.id === lockedPage.id);
   assert.ok(lockedAfterOAuth?.locked, 'Locked task remains attached after manual OAuth returns to ChatGPT');
+  assert.equal((await rpc('tasks.get', { id: lockedTask.id })).status, 'running', 'Manual OAuth interaction must preserve the running task');
 
   const { page: popupPage, contents: popupContents } = await openNewConversationContents(first, 'Popup tab');
   await waitSelector(first, popupContents.id, '#popup-login', 'Popup login button did not become ready');
   await clickSelector(first, popupContents.id, '#popup-login');
   await until(async () => !!await popupFor(first), 'OAuth popup was not created');
-  await until(async () => (await popupFor(first))?.url.startsWith('https://accounts.google.com/'), 'OAuth popup did not load Google');
-  let popup = await popupFor(first);
+  let popup;
+  await until(async () => {
+    const current = await popupFor(first);
+    if (!current?.url.startsWith('https://accounts.google.com/') || !await selectorReady(first, current.id, '#account-choice')) return false;
+    popup = current;
+    return true;
+  }, 'OAuth popup did not finish its Google account-selection document');
   assert.equal(popup.visible, true, 'OAuth popup must remain visible while another conversation is locked');
   await waitSelector(first, popup.id, '#account-choice', 'Popup Google account choice did not become ready');
   await clickSelector(first, popup.id, '#account-choice');
@@ -361,17 +389,21 @@ try {
     if (!contents) throw new Error('Missing POST test page');
     void contents.loadURL('https://auth.openai.com/login?post=1').catch(() => {});
   }, { partition: first.partition, id: postContents.id });
-  await until(async () => (await contentsById(first, postContents.id))?.url.startsWith('https://auth.openai.com/'), 'POST test did not reach auth');
-  await waitSelector(first, postContents.id, '#post-callback-button', 'POST auth document did not become ready');
-  await clickSelector(first, postContents.id, '#post-callback-button');
-  await until(async () => (await contentsById(first, postContents.id))?.url.startsWith('https://chatgpt.com/'), 'POST callback did not return to ChatGPT');
+  const postAuthContents = await waitSelectedPageReady(first, postPage.id, 'https://auth.openai.com/login?post=1', '#post-callback-button', 'POST auth document did not become ready');
+  await clickSelector(first, postAuthContents.id, '#post-callback-button');
+  await waitSelectedPageReady(first, postPage.id, 'https://chatgpt.com/?oauth=done', '#prompt-textarea', 'POST callback did not return its original tab to ready ChatGPT');
   assert.ok(await desktop.evaluate(() => globalThis.oauthRequests.some(request => request.method === 'POST' && request.url.startsWith('https://auth.openai.com/callback'))), 'OAuth callback POST was not observed');
 
   const { page: externalPage, contents: externalContents } = await openNewConversationContents(first, 'External test tab');
   await waitSelector(first, externalContents.id, '#external-link', 'External link button did not become ready');
+  const externalAttemptsBeforeClick = await desktop.evaluate(() => globalThis.externalOpenAttempts.length);
   await clickSelector(first, externalContents.id, '#external-link');
+  await until(async () => await desktop.evaluate((_electron, before) => globalThis.externalOpenAttempts.slice(before).some(item => item.kind === 'dialog' &&
+    JSON.stringify(item).includes('evil.example/phish')), externalAttemptsBeforeClick), 'This external navigation must reach the denial confirmation');
   await new Promise(resolve => setTimeout(resolve, 500));
-  assert.equal((await contentsById(first, externalContents.id)).url.startsWith('https://chatgpt.com/'), true, 'Untrusted external navigation must stay inside ChatGPT page');
+  const externalRestored = await waitSelectedPageReady(first, externalPage.id, 'https://chatgpt.com/', '#prompt-textarea', 'Denied external navigation must keep its original ChatGPT tab ready');
+  assert.equal(externalRestored.url, 'https://chatgpt.com/', 'Untrusted external navigation must stay inside the original ChatGPT page');
+  assert.equal(externalRestored.id, externalContents.id, 'Denied external navigation must not replace the healthy ChatGPT instance');
   assert.equal(await desktop.evaluate(() => globalThis.oauthRequests.some(request => request.url.startsWith('https://evil.example/'))), false, 'Untrusted external host must not load in the account partition');
   assert.equal(await desktop.evaluate(() => globalThis.externalOpenAttempts.some(item => item.kind === 'openExternal')), false, 'Cancelled external confirmation must not open the system browser');
 
@@ -385,7 +417,7 @@ try {
   await desktop.evaluate(({ session, webContents }, { partition, id }) => {
     const contents = webContents.getAllWebContents().find(item => item.session === session.fromPartition(partition) && item.id === id);
     if (contents && !contents.isDestroyed()) void contents.executeJavaScript('window.fixtureFinish && window.fixtureFinish()');
-  }, { partition: first.partition, id: lockedContents.id });
+  }, { partition: first.partition, id: lockedChatContents.id });
   passed = true;
   console.log(JSON.stringify({ pendingNavigationEvents: await desktop.evaluate(() => globalThis.pendingNavigationEvents) }));
   console.log('OAuth interaction passed: queued sibling pages stay locked, independent and locked OAuth pages accept mouse account selection, popup login remains visible, callback POST returns, external hosts are denied, and account partitions remain isolated.');

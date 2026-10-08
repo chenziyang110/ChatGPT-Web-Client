@@ -173,6 +173,7 @@ const currentContents = async account => {
 };
 const requestCount = pattern => desktop.evaluate((_, pattern) => globalThis.customLinkRequests.filter(item => item.url.includes(pattern)).length, pattern);
 const externalAttempts = () => desktop.evaluate(() => globalThis.customLinkExternalAttempts);
+const externalAttemptCount = async pattern => (await externalAttempts()).filter(item => JSON.stringify(item).includes(pattern)).length;
 const profileValue = (account, urlPrefix, expression) => desktop.evaluate(({ session, webContents }, { partition, urlPrefix, expression }) => {
   const contents = webContents.getAllWebContents().find(item => item.session === session.fromPartition(partition) && item.getURL().startsWith(urlPrefix));
   if (!contents || contents.isDestroyed()) return null;
@@ -262,11 +263,14 @@ try {
   await clickSelector(primary, authContents.id, '#blank-popup');
   await until(async () => !!await popupFor(primary), 'Blank popup did not open');
   const popup = await popupFor(primary);
+  await until(async () => await scriptIn(primary, popup.id,
+    "!!document.querySelector('#popup-ready') && !!document.body && ['processType', 'requireType', 'workspaceType'].every(key => Object.prototype.hasOwnProperty.call(document.body.dataset, key))"),
+  'Blank popup DOM and security markers did not become ready');
   const popupSecurity = await scriptIn(primary, popup.id, "({ processType: document.body.dataset.processType, requireType: document.body.dataset.requireType, workspaceType: document.body.dataset.workspaceType })");
   assert.deepEqual(popupSecurity, { processType: 'undefined', requireType: 'undefined', workspaceType: 'undefined' }, 'Blank custom-link popup runs without Node, require, or workspace IPC');
 
   await clickSelector(primary, authContents.id, '#external-https');
-  await until(async () => (await contentsById(primary, authContents.id)).url.startsWith('https://evil.example/external-before-chatgpt'),
+  await until(async () => (await contentsById(primary, authContents.id))?.url.startsWith('https://evil.example/external-before-chatgpt') ?? false,
     'Custom-link mode should permit HTTPS auth-provider hops before ChatGPT is reached');
   await desktop.evaluate(({ session, webContents }, { partition, id, url }) => {
     const contents = webContents.getAllWebContents().find(item => item.session === session.fromPartition(partition) && item.id === id);
@@ -303,8 +307,10 @@ try {
     void contents.loadURL('https://chatgpt.com/').catch(() => {});
   }, { partition: primary.partition, id: fragmentContents.id });
   await waitSelector(primary, fragmentContents.id, '#external-after-stable', 'Fragment-token stable ChatGPT page did not reload');
+  const fragmentExternalAttempts = await externalAttemptCount('evil.example/after-stable');
   await clickSelector(primary, fragmentContents.id, '#external-after-stable');
-  await pause(500);
+  await until(async () => await externalAttemptCount('evil.example/after-stable') > fragmentExternalAttempts,
+    'Stable ChatGPT page after the fragment callback did not handle this external navigation');
   assert.ok((await contentsById(primary, fragmentContents.id)).url.startsWith('https://chatgpt.com/'),
     'A stable ChatGPT page after a fragment-token callback must revoke temporary custom-link navigation');
   await rpc('browser.closePage', { accountId: primary.id, pageId: fragmentPage.id });
@@ -314,16 +320,18 @@ try {
   authContents = reopenedAuth.contents;
 
   await clickSelector(primary, authContents.id, '#google');
-  await until(async () => (await contentsById(primary, authContents.id)).url.startsWith('https://accounts.google.com/'), 'Auth page did not navigate to Google');
+  await until(async () => (await contentsById(primary, authContents.id))?.url.startsWith('https://accounts.google.com/') ?? false, 'Auth page did not navigate to Google');
   await waitSelector(primary, authContents.id, '#account-choice', 'Google account chooser did not become ready');
   await clickSelector(primary, authContents.id, '#account-choice');
-  await until(async () => (await contentsById(primary, authContents.id)).url.startsWith('https://chatgpt.com/'), 'Exact loopback callback did not return to ChatGPT');
+  await until(async () => (await contentsById(primary, authContents.id))?.url.startsWith('https://chatgpt.com/') ?? false, 'Exact loopback callback did not return to ChatGPT');
   await waitSelector(primary, authContents.id, '#prompt-textarea', 'ChatGPT did not become ready after loopback callback');
   assert.ok(await appFilesContain(secret) === undefined, 'Authorization callback secret must not be written to runtime storage or logs');
   assert.ok(await appFilesContain(authStartUrl) === undefined, 'Custom authorization link must not be written to runtime storage or logs');
 
+  const strictExternalAttempts = await externalAttemptCount('evil.example/after-stable');
   await clickSelector(primary, authContents.id, '#external-after-stable');
-  await pause(500);
+  await until(async () => await externalAttemptCount('evil.example/after-stable') > strictExternalAttempts,
+    'Strict-mode external handling did not record this navigation attempt');
   const afterStrict = await contentsById(primary, authContents.id);
   assert.ok(afterStrict.url.startsWith('https://chatgpt.com/'), 'After returning to stable ChatGPT, the tab must restore strict ChatGPT-only navigation');
   const attempts = await externalAttempts();

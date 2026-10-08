@@ -17,6 +17,7 @@ globalThis.oneShotBlockedTargetUrls = new Set();
 globalThis.badNativeLoads = [];
 globalThis.blockedMainLoads = 0;
 globalThis.protocolRequests = [];
+globalThis.pendingNavigationEvents = [];
 app.on('browser-window-created', (_, win) => {
   win.webContents.setBackgroundThrottling(false);
   win.setSkipTaskbar(true);
@@ -119,15 +120,28 @@ const emitPageEvent = (account, id, event) => desktop.evaluate(({ session, webCo
   return { id: contents.id, url: contents.getURL(), loading: contents.isLoading(), waitingResponse: contents.isWaitingForResponse() };
 }, { partition: account.partition, id, event });
 
-const simulatePendingMainNavigationById = (account, id, url) => desktop.evaluate(({ session, webContents }, { partition, id, url }) => {
+const startPendingMainNavigationById = (account, id, url) => desktop.evaluate(({ session, webContents }, { partition, id, url }) => {
   const isolated = session.fromPartition(partition);
   const contents = webContents.getAllWebContents().find(item => item.session === isolated && item.id === id);
   if (!contents) throw new Error(`Fixture WebContents missing: ${id}`);
-  contents.isLoading = () => true;
-  contents.isLoadingMainFrame = () => true;
-  contents.isWaitingForResponse = () => true;
-  contents.emit('did-start-navigation', { url, isMainFrame: true, isSameDocument: false });
-  return { id: contents.id, url: contents.getURL(), loading: contents.isLoading(), waitingResponse: contents.isWaitingForResponse(), loadingMainFrame: contents.isLoadingMainFrame() };
+  const started = Date.now();
+  const record = (event, details = {}) => globalThis.pendingNavigationEvents.push({ event, id,
+    elapsedMs: Date.now() - started, loading: contents.isDestroyed() ? undefined : contents.isLoading(),
+    waitingResponse: contents.isDestroyed() ? undefined : contents.isWaitingForResponse(),
+    loadingMainFrame: contents.isDestroyed() ? undefined : contents.isLoadingMainFrame(), ...details });
+  contents.on('did-start-navigation', details => record('did-start-navigation', {
+    url: details.url, isMainFrame: details.isMainFrame, isSameDocument: details.isSameDocument }));
+  contents.on('did-start-loading', () => record('did-start-loading'));
+  contents.on('did-stop-loading', () => record('did-stop-loading'));
+  contents.on('did-fail-load', (_event, code, description, validatedUrl, isMainFrame) => record('did-fail-load', {
+    code, description, url: validatedUrl, isMainFrame }));
+  contents.on('did-navigate', (_event, committedUrl) => record('did-navigate', { url: committedUrl }));
+  // The first real main-frame request stalls; a recreated WebContents can load
+  // the same conversation normally. Let Chromium emit its actual load events.
+  globalThis.oneShotBlockedTargetUrls.add(url);
+  record('loadURL-start', { url });
+  void contents.loadURL(url).then(() => record('loadURL-resolved'), error => record('loadURL-rejected', {
+    code: error.code, errno: error.errno, message: error.message }));
 }, { partition: account.partition, id, url });
 
 const installStuckWrapper = (account, url) => desktop.evaluate(({ session, webContents }, { partition, url }) => {
@@ -168,7 +182,7 @@ const profileState = (account, write = false) => desktop.evaluate(async ({ sessi
 }, { account, write });
 
 try {
-  desktop = await electron.launch({ args: ['--disable-renderer-backgrounding', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', bootstrap], env });
+  desktop = await electron.launch({ args: ['--no-sandbox', '--disable-renderer-backgrounding', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', bootstrap], env });
   desktopPid = desktop.process()?.pid;
   shell = await bounded(desktop.firstWindow(), 'First window');
   shell.setDefaultTimeout(15000);
@@ -335,6 +349,9 @@ try {
     'human draft survives responsive recovery', 'Draft input survives a cancelled unresponsive recovery timer');
 
   const usableResetStartUrl = 'https://chatgpt.com/c/usable-reset-start';
+  // Use a distinct real navigation rather than a same-address reload while
+  // preserving the same canonical conversation identity.
+  const usableResetDestinationUrl = `${usableResetStartUrl}/`;
   const usableResetNav = await rpc('browser.navigate', { accountId: first.id, url: usableResetStartUrl });
   await until(async () => (await rpc('tasks.get', { id: usableResetNav.id })).status === 'done',
     'Usable reset start page did not open');
@@ -350,23 +367,27 @@ try {
   await new Promise(resolve => setTimeout(resolve, 2800));
   assert.equal((await requireWebContentsFor(first, usableResetStartUrl)).id, usableResetOriginal.id,
     'Pending iframe marks the page usable without replacing it');
-  const pendingMain = await simulatePendingMainNavigationById(first, usableResetOriginal.id, usableResetStartUrl);
-  assert.equal(pendingMain.loading, true, 'Injected main navigation keeps the old WebContents loading');
-  assert.equal(pendingMain.waitingResponse, true, 'Injected main navigation waits for the main-frame response');
-  assert.equal(pendingMain.loadingMainFrame, true, 'Injected main navigation marks the main frame as loading');
-  let sawInjectedRecoveryState = false;
+  await startPendingMainNavigationById(first, usableResetOriginal.id, usableResetDestinationUrl);
+  await until(async () => {
+    const pendingMain = await webContentsById(first, usableResetOriginal.id);
+    return !!pendingMain?.loading && pendingMain.waitingResponse && pendingMain.loadingMainFrame;
+  }, 'Real main navigation after a usable iframe must wait for a main-frame response');
+  let sawMainRecoveryState = false;
   await until(async () => {
     const pageError = (await rpc('workspace.status')).page?.error ?? '';
-    sawInjectedRecoveryState ||= /加载超时|恢复/.test(pageError);
-    const contents = await webContentsFor(first, usableResetStartUrl);
-    return sawInjectedRecoveryState || !!contents && contents.id !== usableResetOriginal.id;
-  }, 'Injected pending main navigation did not enter recovery or recreate the WebContents', 5000);
+    sawMainRecoveryState ||= /加载超时|恢复/.test(pageError);
+    const contents = await webContentsFor(first, usableResetDestinationUrl);
+    return sawMainRecoveryState || !!contents && contents.id !== usableResetOriginal.id;
+  }, 'Real pending main navigation did not enter recovery or recreate the WebContents', 5000);
   await until(async () => {
-    const contents = await webContentsFor(first, usableResetStartUrl);
+    const contents = await webContentsFor(first, usableResetDestinationUrl);
     return !!contents && contents.id !== usableResetOriginal.id && (await rpc('browser.inspect', { accountId: first.id, pageId: usableResetPage.id })).readiness === 'ready';
   }, 'Main navigation after a usable pending-resource page did not recreate the WebContents');
   const usableResetRestored = (await rpc('workspace.status')).pages.find(page => page.id === usableResetPage.id);
-  assert.equal(usableResetRestored?.url, usableResetStartUrl, 'Main navigation recovery keeps the same tab on its conversation URL');
+  assert.equal(usableResetRestored?.url, usableResetDestinationUrl, 'Main navigation recovery keeps the requested conversation URL');
+  assert.equal(usableResetRestored?.conversationId, usableResetPage.conversationId, 'Main navigation recovery preserves the conversation binding');
+  assert.equal((await rpc('workspace.status')).page?.id, usableResetPage.id, 'Main navigation recovery preserves the selected tab');
+  console.log(JSON.stringify({ pendingNavigationEvents: await desktop.evaluate(() => globalThis.pendingNavigationEvents) }));
 
   passed = true;
   console.log('Stuck view recovery passed: damaged WebContents are recreated, queued messages survive and resume once, manual recovery resets exhausted retries, account switching stays responsive, ready pages with stuck subresources are not rebuilt, responsive pages cancel recovery timers, and usable pages reset on later main navigation stalls.');
@@ -386,6 +407,7 @@ try {
       blockedMainLoads: globalThis.blockedMainLoads,
       oneShotBlockedRemaining: [...globalThis.oneShotBlockedTargetUrls],
       lastProtocolRequests: globalThis.protocolRequests.slice(-20),
+      pendingNavigationEvents: globalThis.pendingNavigationEvents,
       accountWebContents: webContents.getAllWebContents().filter(item => item.session === isolated).map(item => ({
         id: item.id, url: item.getURL(), destroyed: item.isDestroyed(), loading: item.isLoading(),
         waitingResponse: item.isWaitingForResponse(), loadingMainFrame: item.isLoadingMainFrame(), crashed: item.isCrashed()

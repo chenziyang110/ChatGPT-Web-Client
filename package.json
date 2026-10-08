@@ -112,7 +112,7 @@
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.1",
     "electron": "44.4.1",
-    "electron-builder": "26.15.3",
+    "electron-builder": "26.17.0",
     "esbuild": "0.28.2",
     "playwright": "1.63.0",
     "tsx": "4.23.13",
@@ -123,5 +123,8 @@
     "type": "git",
     "url": "https://github.com/chenziyang110/ChatGPT-Web-Client.git"
   },
-  "author": "ChatGPT Web Client contributors"
+  "author": "ChatGPT Web Client contributors",
+  "overrides": {
+    "@electron/get": "5.1.0"
+  }
 }

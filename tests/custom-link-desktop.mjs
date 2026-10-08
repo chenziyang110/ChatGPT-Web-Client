@@ -112,12 +112,6 @@ const waitTask = task => until(async () => {
   assert.ok(!['failed', 'blocked', 'waiting_user', 'uncertain'].includes(current.status), current.error ?? current.status);
   return current.status === 'done';
 }, `Task ${task.id} did not finish`);
-const accountWebContents = account => desktop.evaluate(({ session, webContents }, partition) => {
-  const isolated = session.fromPartition(partition);
-  return webContents.getAllWebContents().filter(item => item.session === isolated && !item.isDestroyed()).map(item => ({
-    id: item.id, url: item.getURL(), title: item.getTitle(), loading: item.isLoading()
-  }));
-}, account.partition);
 const contentsById = (account, id) => desktop.evaluate(({ session, webContents }, { partition, id }) => {
   const contents = webContents.getAllWebContents().find(item => item.session === session.fromPartition(partition) && item.id === id);
   if (!contents || contents.isDestroyed()) return null;
@@ -133,12 +127,27 @@ const waitSelector = (account, id, selector, label = `Selector ${selector} did n
   if (!contents || contents.loading) return false;
   return await scriptIn(account, id, `!!document.querySelector(${JSON.stringify(selector)})`);
 }, label);
-const clickSelector = (account, id, selector) => desktop.evaluate(async ({ session, webContents }, { partition, id, selector }) => {
+const clickSelector = (account, id, selector) => desktop.evaluate(async ({ app, BrowserWindow, session, webContents }, { partition, id, selector }) => {
   const contents = webContents.getAllWebContents().find(item => item.session === session.fromPartition(partition) && item.id === id);
   if (!contents || contents.isDestroyed()) throw new Error(`Missing WebContents ${id}`);
   const rect = await contents.mainFrame.executeJavaScript(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), text: el.textContent }; })()`);
   if (!rect) throw new Error(`Missing selector ${selector} at ${contents.getURL()}`);
+  // Focus the existing visible native host; showing a hidden popup here would
+  // hide a runtime visibility failure and weaken the real interaction test.
+  const host = BrowserWindow.fromWebContents(contents) ?? BrowserWindow.getAllWindows().find(window =>
+    !window.isDestroyed() && window.contentView.children.some(child => child.webContents === contents));
+  if (!host || host.isDestroyed() || !host.isVisible()) throw new Error(`Missing visible host for WebContents ${id}`);
+  if (process.platform === 'darwin') app.focus({ steal: true });
+  host.focus();
+  const focusDeadline = Date.now() + 3000;
   contents.focus();
+  while (!host.isFocused() || !contents.isFocused()) {
+    if (host.isDestroyed() || contents.isDestroyed() || Date.now() >= focusDeadline)
+      throw new Error(`Native host/page did not focus for WebContents ${id}`);
+    if (!host.isFocused()) host.focus();
+    contents.focus();
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
   contents.sendInputEvent({ type: 'mouseMove', x: rect.x, y: rect.y });
   contents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: rect.x, y: rect.y });
   contents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: rect.x, y: rect.y });
@@ -150,12 +159,17 @@ const currentContents = async account => {
   const page = state.page?.accountId === account.id ? state.page
     : state.pages.find(item => item.accountId === account.id && item.selected) ?? state.pages.find(item => item.accountId === account.id);
   assert.ok(page?.id, 'No selected page');
-  const contents = await contentsById(account, page.id);
-  if (contents) return contents;
-  const visible = await accountWebContents(account);
-  const fallback = visible.find(item => item.url === page.url) ?? visible.find(item => item.url.startsWith('https://chatgpt.com/')) ?? visible.at(-1);
-  assert.ok(fallback, 'Selected page should have a WebContents');
-  return fallback;
+  // Workspace page IDs are UUIDs, unlike native WebContents IDs. Find the
+  // attached account view so two tabs with the same URL cannot select each other.
+  const attached = await desktop.evaluate(({ BrowserWindow, session }, partition) => {
+    const isolated = session.fromPartition(partition);
+    const window = BrowserWindow.getAllWindows().find(window => !window.isDestroyed() && window.webContents.getURL().startsWith('file:'));
+    const view = window?.contentView.children.find(view => view.webContents && !view.webContents.isDestroyed() && view.webContents.session === isolated);
+    if (!view) return null;
+    return { id: view.webContents.id, url: view.webContents.getURL(), title: view.webContents.getTitle(), loading: view.webContents.isLoading() };
+  }, account.partition);
+  assert.ok(attached, 'Selected account page should be attached to the main window');
+  return attached;
 };
 const requestCount = pattern => desktop.evaluate((_, pattern) => globalThis.customLinkRequests.filter(item => item.url.includes(pattern)).length, pattern);
 const externalAttempts = () => desktop.evaluate(() => globalThis.customLinkExternalAttempts);

@@ -117,13 +117,28 @@ const contentsById = (account, id) => desktop.evaluate(({ session, webContents }
   if (!contents || contents.isDestroyed()) return null;
   return { id: contents.id, url: contents.getURL(), title: contents.getTitle(), loading: contents.isLoading() };
 }, { partition: account.partition, id });
-const clickSelector = (account, id, selector) => desktop.evaluate(async ({ session, webContents }, { partition, id, selector }) => {
+const clickSelector = (account, id, selector) => desktop.evaluate(async ({ app, BrowserWindow, session, webContents }, { partition, id, selector }) => {
   const isolated = session.fromPartition(partition);
   const contents = webContents.getAllWebContents().find(item => item.session === isolated && item.id === id);
   if (!contents || contents.isDestroyed()) throw new Error(`Missing WebContents ${id}`);
   const rect = await contents.mainFrame.executeJavaScript(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), text: el.textContent, disabled: !!el.disabled }; })()`);
   if (!rect) throw new Error(`Missing selector ${selector} at ${contents.getURL()}`);
+  // Account WebContentsViews are children of the main window, whereas login
+  // popups own their WebContents. Focus the actual visible host in either case.
+  const host = BrowserWindow.fromWebContents(contents) ?? BrowserWindow.getAllWindows().find(window =>
+    !window.isDestroyed() && window.contentView.children.some(child => child.webContents === contents));
+  if (!host || host.isDestroyed() || !host.isVisible()) throw new Error(`Missing visible host for WebContents ${id}`);
+  if (process.platform === 'darwin') app.focus({ steal: true });
+  host.focus();
+  const focusDeadline = Date.now() + 3000;
   contents.focus();
+  while (!host.isFocused() || !contents.isFocused()) {
+    if (host.isDestroyed() || contents.isDestroyed() || Date.now() >= focusDeadline)
+      throw new Error(`Native host/page did not focus for WebContents ${id}`);
+    if (!host.isFocused()) host.focus();
+    contents.focus();
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
   contents.sendInputEvent({ type: 'mouseMove', x: rect.x, y: rect.y });
   contents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: rect.x, y: rect.y });
   contents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: rect.x, y: rect.y });

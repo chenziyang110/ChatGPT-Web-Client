@@ -50,12 +50,31 @@ try {
  // and submit with Enter from its own queue. Neither A reply is finished first.
  const otherAccount=await rpc('accounts.create',{name:'Second account'});
  await until(async()=> (await rpc('browser.inspect',{accountId:otherAccount.id})).readiness==='ready');
+ await until(async()=> (await rpc('workspace.status')).activeAccountId===otherAccount.id);
+ await page.getByRole('heading',{name:'Second account'}).waitFor();
  await page.getByRole('button',{name:'会话队列',exact:true}).click();
  const queue=page.getByRole('complementary',{name:'会话队列'});
- await queue.getByLabel('下一条消息',{exact:true}).fill('From second account');
- await queue.getByLabel('下一条消息',{exact:true}).press('Enter');
+ await queue.waitFor();
+ await until(async()=>/Second account/.test(await queue.locator('.cq-header').innerText().catch(()=>'')));
+ const secondDraft=queue.getByLabel('下一条消息',{exact:true});
+ await until(async()=>await secondDraft.isEnabled());
+ await secondDraft.fill('From second account');
+ await secondDraft.press('Enter');
  let other;
- await until(async()=>{other=(await rpc('tasks.list')).find(task=>task.accountId===otherAccount.id&&task.submittedAt);return !!other;});
+ try {
+  await until(async()=>{other=(await rpc('tasks.list')).find(task=>task.accountId===otherAccount.id&&task.submittedAt);return !!other;});
+ } catch (error) {
+  const diagnostic={
+   tasks:await rpc('tasks.list'),
+   status:await rpc('workspace.status'),
+   queueHeader:await queue.locator('.cq-header').innerText().catch(reason=>String(reason)),
+   queueStatus:await queue.locator('.cq-status').innerText().catch(reason=>String(reason)),
+   draftEnabled:await secondDraft.isEnabled().catch(()=>false),
+   draftValue:await secondDraft.inputValue().catch(reason=>String(reason))
+  };
+  console.error(JSON.stringify({parallelSecondAccountQueue:diagnostic},null,2));
+  throw error;
+ }
  assert.equal((await rpc('tasks.get',{id:a.id})).status,'running');
  assert.equal((await rpc('tasks.get',{id:b2.id})).status,'running');
  assert.equal((await rpc('tasks.get',{id:follow.id})).status,'pending','Same conversation still waits for its own reply');

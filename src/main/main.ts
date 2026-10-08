@@ -105,7 +105,7 @@ else void app.whenReady().then(async () => {
     notifyConversationCompleted({ supported: () => Notification.isSupported(),
       create: options => new Notification(options) }, notice, accountName, openCompletedConversation);
   });
-  browser = new BrowserRuntime(win, accounts, sessions, changed, conversations, shortcuts, notifications);
+  browser = new BrowserRuntime(win, accounts, sessions, changed, conversations, shortcuts, notifications, diagnostics);
   diagnostics.record('browser_initialized', { accounts: accounts.list().length, tabs: browser.pages().length });
   const tasks = new AgentGateway(db, (id, input, signal, context) => browser.execute(id, input, signal, context), () => {
     browser.setLocked(tasks.lockedTasks()); changed();

@@ -84,7 +84,9 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
   const pageWait = diagnostic?.readiness === 'verification_required' ? '等待网页验证，完成后自动继续'
     : diagnostic?.readiness === 'login_required' ? '等待登录，完成后自动继续'
     : diagnostic?.readiness === 'loading' ? '等待会话页面恢复' : undefined;
-  const status = !conversation ? loading ? '页面加载中' : '检查会话' : attention ? '需要处理' : paused ? '已暂停' : pageWait ?? (running ? phaseLabels[running.phase ?? 'preparing'] : retryLabel ?? (diagnostic?.busy ? '等待当前回复' : waiting.length ? '等待发送' : '就绪'));
+  const dotWait = diagnostic?.surface === 'dot' && diagnostic.dotWork !== 'idle'
+    ? diagnostic?.dotWork === 'working' ? running?.sendIntentAt ? 'Dot 正在工作' : '等待 Dot 工作结束' : '等待 Dot 工作状态恢复' : undefined;
+  const status = !conversation ? loading ? '页面加载中' : '检查会话' : attention ? '需要处理' : paused ? '已暂停' : pageWait ?? dotWait ?? (running ? phaseLabels[running.phase ?? 'preparing'] : retryLabel ?? (diagnostic?.busy ? '等待当前回复' : waiting.length ? '等待发送' : '就绪'));
   const elapsed = running?.submittedAt ? Math.max(0, Math.floor((now - running.submittedAt) / 1000)) : undefined;
   const edited = editing && state.tasks.find(task => task.id === editing.id);
   const staleEdit = !!editing && (edited?.status !== 'pending' || edited.updatedAt !== editing.version);

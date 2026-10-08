@@ -5,7 +5,7 @@ import type { ConversationNotifications } from './notifications/ConversationNoti
 import type { ShortcutSettings } from './settings/ShortcutSettings';
 import { defaultShortcuts } from '../shared/shortcuts';
 import { buildAgentPrompt } from './agent/AgentPrompt';
-import { AppError, HOME_URL, chatUrl, identifier, text } from './validation';
+import { AppError, HOME_URL, chatUrl, webLink, identifier, text } from './validation';
 import type { AgentTask, BrowserDiagnostics, BrowserPage, Conversation, PageState, TaskChoice, TaskResponse, WorkspaceState } from '../shared/types';
 export interface BrowserAdapter {
   activate(id: string, pageId?: string): void;
@@ -13,6 +13,7 @@ export interface BrowserAdapter {
   closePage?(accountId: string, pageId: string): void;
   remove(id: string): Promise<void>;
   navigate(id: string, url: unknown): Promise<void>;
+  openLink?(id: string, url: string): BrowserPage;
   control(id: string, action: string): void;
   page(): PageState | null;
   url?(accountId: string): string | undefined;
@@ -158,6 +159,12 @@ export class Workspace {
         let conversationId: string | undefined;
         try { conversationId = this.conversations.register(account.id, url).id; } catch { /* Home opens independently. */ }
         result = this.tasks.createTask(account.id, { type: 'navigate', url }, { targetUrl: url, conversationId }); break;
+      }
+      case 'browser.openLink': {
+        const account = this.accounts.resolve(params.accountId);
+        const url = webLink(params.url);
+        if (!this.browser.openLink) throw new AppError('当前客户端不支持打开自定义链接', 503);
+        result = this.browser.openLink(account.id, url); break;
       }
       case 'browser.control': {
         const account = this.accounts.resolve(params.accountId);

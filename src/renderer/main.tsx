@@ -15,9 +15,11 @@ import { TaskDecision } from './components/TaskDecision';
 import { ConversationQueue } from './components/ConversationQueue';
 import { isQueueTask } from '../shared/conversationQueue';
 import { Toast } from './components/Toast';
+import { PageAddress } from './components/PageAddress';
 import { friendlyError } from './errors';
 import './style.css';
 import { taskAttentionCopy } from '../shared/taskAttentionCopy';
+import { isAccountLoginUrl } from '../shared/accountNavigation';
 declare global { interface Window { workspace?: WorkspaceBridge } }
 type Tab = 'workspace' | 'tasks' | 'settings';
 type Modal = { kind: 'create' } | { kind: 'rename' | 'remove'; account: Account } | { kind: 'task'; task: AgentTask } | { kind: 'agent'; target: AgentPromptTarget };
@@ -137,6 +139,11 @@ function App() {
     catch (e) { setError(e instanceof Error ? e.message.replace(/^Error invoking remote method '[^']+': Error: /, '') : String(e)); }
     finally { actionPending.current = false; setBusy(false); }
   }
+  async function openLink(accountId: string, url: string) {
+    let opened = false;
+    await action('browser.openLink', { accountId, url }, () => { opened = true; });
+    return opened;
+  }
   function openModal(next: Modal) { setError(''); setName(next.kind === 'rename' ? next.account.name : ''); setModal(next); }
   async function openPageAgent(accountId: string) {
     if (!bridge || actionPending.current) return;
@@ -191,8 +198,10 @@ function App() {
   const attentionTasks = state?.tasks.filter(task => task.attention && !task.resolvedAt) ?? [];
   const attentionTask = attentionTasks.find(task => task.id === activePage?.taskId || task.accountId === active?.id && !!task.conversationId && task.conversationId === activePage?.conversationId);
   const pageLocked = !!activePage?.locked;
+  const loginPage = isAccountLoginUrl(state?.page?.url ?? activePage?.url ?? '');
+  const inputLocked = pageLocked && !loginPage;
   const previewTask = runningTask ?? attentionTask;
-  const showPreview = tab === 'workspace' && !!active && pageLocked;
+  const showPreview = tab === 'workspace' && !!active && inputLocked;
   const previewStatus = (previewTask ? taskAttentionCopy(previewTask)?.title : undefined) ?? phaseLabels[previewTask?.phase ?? 'preparing'];
   const modalTask = modal?.kind === 'task' ? state?.tasks.find(task => task.id === modal.task.id) ?? modal.task : undefined;
   if (!bridge) return <div className="standalone"><Logo /><h1>请在桌面应用中打开</h1>
@@ -243,10 +252,11 @@ function App() {
           open={accountMenuOpen} onOpenChange={setAccountMenuOpen} onValueChange={id => void action('accounts.switch', { id })} />}
         {focused && active && <><ReplyBadge account={active} count={accountActivity(state, active.id).count} onClick={() => openUnread(active)} />{accountActivity(state, active.id).running && <span className="conversation-spinner" aria-label="会话运行中" />}</>}
         {tab === 'workspace' && active ? <>
-          <button aria-label="后退" title="后退" disabled={!state?.page?.canGoBack || busy || pageLocked} onClick={() => void action('browser.control', { accountId: active.id, action: 'back' })}><Icon name="back" size={16} /></button>
-          <button aria-label="前进" title="前进" disabled={!state?.page?.canGoForward || busy || pageLocked} onClick={() => void action('browser.control', { accountId: active.id, action: 'forward' })}><Icon name="arrow" size={16} /></button>
-          <button aria-label="重新加载" title="重新加载" disabled={busy || pageLocked} onClick={() => void action('browser.control', { accountId: active.id, action: 'reload' })}><Icon name="refresh" size={16} className={state?.page?.loading ? 'spinning' : ''} /></button>
-          <span className="page-url"><Icon name="lock" size={13} /><span>{state?.page?.loading ? '正在加载…' : state?.page?.url || 'https://chatgpt.com/'}</span></span>
+          <button aria-label="后退" title="后退" disabled={!state?.page?.canGoBack || busy || inputLocked} onClick={() => void action('browser.control', { accountId: active.id, action: 'back' })}><Icon name="back" size={16} /></button>
+          <button aria-label="前进" title="前进" disabled={!state?.page?.canGoForward || busy || inputLocked} onClick={() => void action('browser.control', { accountId: active.id, action: 'forward' })}><Icon name="arrow" size={16} /></button>
+          <button aria-label="重新加载" title="重新加载" disabled={busy || inputLocked} onClick={() => void action('browser.control', { accountId: active.id, action: 'reload' })}><Icon name="refresh" size={16} className={state?.page?.loading ? 'spinning' : ''} /></button>
+          <PageAddress key={`${active.id}:${activePage?.id ?? ''}`} url={state?.page?.url || activePage?.url || ''} loading={state?.page?.loading} busy={busy}
+            onOpen={url => openLink(active.id, url)} />
           <button id="queue-toggle" className={`queue-toggle ${queueOpen ? 'selected' : ''}`} aria-expanded={queueOpen} aria-label={`会话队列${queueCount ? `，${queueCount} 条待发送` : ''}`} onClick={() => setQueueOpen(value => !value)}><Icon name="tasks" size={15} /> 会话队列{queueCount > 0 && <b>{queueCount}</b>}</button>
           <button className="agent-toolbar" disabled={busy} onClick={() => void openPageAgent(active.id)}><Icon name="terminal" size={15} /> Agent 协作</button>
           <button className="new-chat" disabled={busy} onClick={() => void action('browser.newConversation', { accountId: active.id })}><Icon name="plus" size={15} /> 新对话</button>
@@ -256,10 +266,10 @@ function App() {
         <button role="tab" aria-selected={page.selected} title={page.title} onClick={() => void action('browser.select', { accountId: active.id, pageId: page.id })}>{page.locked ? <span className="preview-dot" /> : <Icon name="chat" size={14} />}<span>{page.title}</span></button>
         <button aria-label={`关闭会话 ${page.title}`} disabled={page.locked || busy} onClick={() => void action('browser.closePage', { accountId: active.id, pageId: page.id })}><Icon name="close" size={12} /></button>
       </div>)}</div>}
-      {tab === 'workspace' && (showPreview || !!attentionTask) && <div className={`workspace-status ${showPreview && runningTask?.status === 'running' ? 'is-running' : ''} ${attentionTask ? 'attention-banner' : ''}`}>
+      {tab === 'workspace' && (showPreview || !!attentionTask || loginPage) && <div className={`workspace-status ${showPreview && runningTask?.status === 'running' ? 'is-running' : ''} ${attentionTask ? 'attention-banner' : ''}`}>
         <div className="workspace-status-label" role="status">
           <span aria-hidden="true" className={`preview-dot ${!showPreview || previewTask?.attention ? 'needs-attention' : ''}`} />
-          <span className="workspace-status-text" title={showPreview ? previewStatus : attentionTask && !pageLocked ? '当前页面可操作，该会话有暂停的任务等待你的选择' : '其他会话或账号有任务等待处理，不影响当前页面'}>{showPreview ? previewStatus : attentionTask && !pageLocked ? '当前页面可操作 · 此会话任务待处理' : '当前页面可操作 · 其他任务待处理'}</span>
+          <span className="workspace-status-text" title={loginPage ? '登录页面可直接操作' : showPreview ? previewStatus : attentionTask && !pageLocked ? '当前页面可操作，该会话有暂停的任务等待你的选择' : '其他会话或账号有任务等待处理，不影响当前页面'}>{loginPage ? '请完成账号登录' : showPreview ? previewStatus : attentionTask && !pageLocked ? '当前页面可操作 · 此会话任务待处理' : '当前页面可操作 · 其他任务待处理'}</span>
           {showPreview && <span className="preview-mode" title="自动跟随最新回复。需要浏览历史或操作网页时，请选择接管。">只读预览 · 自动跟随</span>}
         </div>
         <div className="workspace-status-actions">
@@ -274,8 +284,8 @@ function App() {
       </div>}
       {tab === 'workspace' && active && <div className={`workspace-body ${queueOpen ? 'with-queue' : ''}`}>
         <div className="browser-slot" ref={browserSlot}>
-          {pageLocked && <AgentPreview key={activePage?.id} bridge={bridge} accountId={active.id} pageId={activePage?.id} />}
-          {activePage && !pageLocked && (!state?.page || state.page.error) && <section className="empty-state browser-recovery">
+          {inputLocked && <AgentPreview key={activePage?.id} bridge={bridge} accountId={active.id} pageId={activePage?.id} />}
+          {activePage && !inputLocked && (!state?.page || state.page.error) && <section className="empty-state browser-recovery">
             <div className="empty-icon"><Icon name="refresh" size={32} /></div><h2>{state?.page ? '页面暂时无法加载' : '网页画面中断'}</h2>
             <p>{state?.page?.error ? friendlyError(state.page.error) : '正在恢复当前会话的网页画面。'}</p>
             <button className="primary" onClick={() => void action('browser.control', { accountId: active.id, action: 'reload' })}>恢复页面</button>

@@ -3,12 +3,12 @@ import type { ExecutionContext } from '../../core/agent/AgentGateway';
 import { ReportedReplyError } from '../../core/agent/AgentGateway';
 import { ConversationManager, conversationUrl } from '../../core/conversation/ConversationManager';
 import { HOME_URL, isChatUrl } from '../../core/validation';
-import type { BrowserReadiness, Conversation, ConversationSurface, TaskInput } from '../../shared/types';
+import type { BrowserReadiness, Conversation, ConversationSurface, DotWorkState, TaskInput } from '../../shared/types';
 import { COMPLETION_STABLE_MS, replyToken } from '../../core/notifications/ConversationNotifications';
 import { ReplyTurnTracker, type ConversationMessage } from './ReplyTurnTracker';
 
 type Message = ConversationMessage;
-export interface Page { url: string; title: string; readiness: BrowserReadiness; surface?: ConversationSurface; editor: boolean; draft: string; busy: boolean; messages: Message[]; error?: string; failure?: 'thinking' | 'interrupted' }
+export interface Page { url: string; title: string; readiness: BrowserReadiness; surface?: ConversationSurface; dotWork?: DotWorkState; editor: boolean; draft: string; busy: boolean; messages: Message[]; error?: string; failure?: 'thinking' | 'interrupted' }
 interface Operation { kind: 'inspect' | 'diagnose' | 'activity' | 'follow_latest' | 'select_surface' | 'fill' | 'clear' | 'check_send' | 'send' | 'click' | 'snapshot'; url?: string; anchor?: string; value?: string; selector?: string; surface?: ConversationSurface }
 
 // Electron otherwise replaces page exceptions with an unhelpful "Script failed
@@ -23,6 +23,13 @@ export function pageOperationResult<T>(result: unknown): T {
     throw new Error('error' in result && typeof result.error === 'string' ? result.error : 'PAGE_SCRIPT_FAILED: invalid page result');
   }
   throw new Error('PAGE_SCRIPT_FAILED: missing page result');
+}
+
+export function executePageScript(contents: WebContents, script: string, userGesture = false): Promise<unknown> {
+  // WebContents.executeJavaScript waits for main-frame resource loading to end.
+  // Address the live document directly so a pending image cannot stall a ready composer.
+  const frame = contents.mainFrame;
+  return frame ? frame.executeJavaScript(script, userGesture) : contents.executeJavaScript(script, userGesture);
 }
 
 // During the first send ChatGPT may retain model/UI query parameters and a
@@ -149,13 +156,35 @@ export function pageOperation(operation: Operation): unknown {
         const label = element.innerText.trim();
         return label.length < 160 && /^(?:连接已中断[。.!！]?\s*正在等待完整回复|Connection interrupted[.!]?\s*Waiting for (?:a )?complete response)[。.!！…]*$/i.test(label);
       });
-    const busy = stopVisible || !interrupted && (streamingVisible || ariaBusyVisible);
+    // Dot can acknowledge a directive while its background agent keeps working.
+    // The summary avatar exposes that agent's running/idle state independently
+    // of message streaming. Ignore sidebar avatars and the standing Pause action.
+    // Read its status description as a fallback when the avatar is not rendered.
+    // Missing/unrecognized work status is not positive evidence of completion.
+    let dotWork: DotWorkState | undefined;
+    if (dot) {
+      const pets = [...document.querySelectorAll('[data-slot="thread-summary-panel-item-leading"] [data-codex-pet-state]')]
+        .filter(visible).map(pet => pet.getAttribute('data-codex-pet-state'));
+      const status = [...document.querySelectorAll<HTMLButtonElement>('button')]
+        .find(button => visible(button) && button.classList.contains('group/aeon-status'));
+      const description = status?.getAttribute('aria-describedby')?.split(/\s+/)
+        .map(id => document.getElementById(id)?.textContent?.trim() ?? '').join(' ').trim() ?? '';
+      const typing = [...document.querySelectorAll('main .typing-indicator[data-visible="true"], main .typing-bubble[data-active="true"]')].some(visible);
+      const activeStatus = /^(?:活跃|Active|Working|正在工作)$/i.test(description);
+      const idleStatus = /^(?:(?:Active|Last active)\s+(?:.+(?:ago|前)|just now)|(?:上次活跃|活跃于)\s*.+前)$/i.test(description);
+      // The text stays "Active" briefly after completion. The explicit avatar
+      // state takes precedence; a timestamp is only the avatar-less fallback.
+      dotWork = typing || pets.includes('running') ? 'working'
+        : pets.length > 0 ? pets.every(state => state === 'idle') ? 'idle' : 'unknown'
+        : activeStatus ? 'working' : idleStatus ? 'idle' : 'unknown';
+    }
+    const busy = stopVisible || !interrupted && (streamingVisible || ariaBusyVisible) || dot && dotWork !== 'idle';
     if (operation.kind === 'diagnose') {
       const send = sendButton();
       const messages = elements;
       const last = messages.at(-1);
       const turn = last && turnOf(last);
-      return { url: location.href, title: document.title.slice(0, 120), readiness, surface,
+      return { url: location.href, title: document.title.slice(0, 120), readiness, surface, dotWork,
         editor: visible(editor), draftLength: draft.length, busy, documentReady: document.readyState,
         dom: { editorTag: editor?.tagName.toLowerCase() ?? null, contentEditable: !!editor?.isContentEditable,
           visibleEditorCount: [...document.querySelectorAll(editorSelector)].filter(visible).length,
@@ -225,13 +254,13 @@ export function pageOperation(operation: Operation): unknown {
         if (role === 'user' && !user) user = readMessage(elements[index], index);
         else if (role === 'assistant' && !assistant) assistant = readMessage(elements[index], index);
       }
-      return { url: location.href, title: document.title.slice(0, 120), surface, editor: visible(editor), busy,
+      return { url: location.href, title: document.title.slice(0, 120), surface, dotWork, editor: visible(editor), busy,
         hasDraft: !!draft.trim(), error, user: user && { id: user.id, text: user.text.slice(0, 32000) },
         assistant: assistant && { ...assistant, text: assistant.text.slice(0, 64000) },
         lastRole: elements.length ? roleOf(elements.at(-1)!) : undefined };
     }
     const messages = elements.map(readMessage);
-    const page: Page = { url: location.href, title: document.title.slice(0, 120), surface, readiness, editor: visible(editor), draft, busy, messages, error, failure };
+    const page: Page = { url: location.href, title: document.title.slice(0, 120), surface, dotWork, readiness, editor: visible(editor), draft, busy, messages, error, failure };
     if (operation.kind === 'inspect') return page;
     stage = 'verify_target';
     if (operation.url !== location.href) throw new Error('TARGET_CHANGED: page changed before action');
@@ -301,7 +330,8 @@ export class ChatGPTAdapter {
   private readonly pending = new Set<Promise<unknown>>();
   constructor(private readonly contents: WebContents, private readonly signal: AbortSignal,
     private readonly context: ExecutionContext, private readonly conversations: ConversationManager,
-    private readonly pollingInterval: () => number = () => 250) {}
+    private readonly pollingInterval: () => number = () => 250,
+    private readonly pageLoading: () => boolean = () => contents.isLoading()) {}
   private async wait<T>(promise: Promise<T>): Promise<T> {
     this.signal.throwIfAborted();
     return new Promise<T>((resolve, reject) => {
@@ -318,7 +348,7 @@ export class ChatGPTAdapter {
   }
   private async evaluate<T>(operation: Operation): Promise<T> {
     this.signal.throwIfAborted();
-    return pageOperationResult<T>(await this.track(this.contents.executeJavaScript(pageOperationScript(operation), true)));
+    return pageOperationResult<T>(await this.track(executePageScript(this.contents, pageOperationScript(operation), true)));
   }
   private inspect(): Promise<Page> { return this.evaluate<Page>({ kind: 'inspect' }); }
   private async clearConfirmedDraft(page: Page, value: string): Promise<void> {
@@ -327,7 +357,7 @@ export class ChatGPTAdapter {
     finally { this.context.releaseExecution?.(); }
   }
   private anchor(page: Page): string { return JSON.stringify(page.messages.filter(message => message.role === 'user').map(message => [message.id, message.text])); }
-  private async loaded(): Promise<void> { while (this.contents.isLoading()) await this.delay(); }
+  private async loaded(): Promise<void> { while (this.pageLoading()) await this.delay(); }
   private async idle(): Promise<Page> {
     this.context.stage('waiting_idle', this.context.task().idleTimeoutMs);
     this.context.releaseExecution?.();
@@ -668,9 +698,8 @@ export class ChatGPTAdapter {
         now - task.sendIntentAt >= 30000 && (page.messages.length > 0 || !!page.error);
       const stopped = !!boundUrl && page.editor && page.readiness === 'ready' && !page.busy && (!page.draft.trim() || retainedOwnDraft) &&
         (acknowledged && (userIndex >= 0 || unmountedSubmission) || unconfirmedSubmission) &&
-        // Dot accepts another message while its agent is working. Its global
-        // Pause control is not a turn Stop button. Require an actual new reply
-        // with message actions (or the explicit error handled above).
+        // Dot needs both a new reply and explicit agent idle evidence. busy
+        // includes its background work, not just the acknowledgement streaming.
         (page.surface !== 'dot' || last?.role === 'assistant' && last.terminal &&
           (unmountedSubmission && !baseline.messages.some(message => message.id === last.id && message.role === 'assistant') || userIndex >= 0 && page.messages.indexOf(last) > userIndex));
       if (!stopped || fingerprint !== previous) since = Date.now();

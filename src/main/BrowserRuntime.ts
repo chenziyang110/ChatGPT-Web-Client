@@ -5,13 +5,14 @@ import { SessionManager } from '../core/session/SessionManager';
 import { AppError, HOME_URL, chatUrl, isAccountNavigation, isChatUrl } from '../core/validation';
 import type { AgentTask, BrowserBounds, BrowserDiagnostics, BrowserPreview, BrowserPage, Conversation, PageState, TaskInput, TaskResponse } from '../shared/types';
 import { bindShortcuts } from './shortcuts';
-import { ChatGPTAdapter, pageOperationScript, pageOperationResult, replyPageUrl, type Page } from './adapters/ChatGPTAdapter';
+import { ChatGPTAdapter, executePageScript, pageOperationScript, pageOperationResult, replyPageUrl, type Page } from './adapters/ChatGPTAdapter';
 import { ReplyReader } from './adapters/ReplyReader';
 import { ConversationActivityObserver, type ActivitySnapshot, type ConversationNotifications } from '../core/notifications/ConversationNotifications';
 import type { ShortcutSettings } from '../core/settings/ShortcutSettings';
 import type { ExecutionContext } from '../core/agent/AgentGateway';
 import type { ConversationManager } from '../core/conversation/ConversationManager';
 import { allowChatGptClipboardWrite } from './permissions';
+import type { RuntimeDiagnostics } from './RuntimeDiagnostics';
 
 interface PageOwner {
   accountId: string;
@@ -32,6 +33,19 @@ const MONITOR_INTERVAL_MS = 1_500;
 const PREVIEW_TIMEOUT_MS = 5_000;
 const DEFAULT_PAGE_LOAD_TIMEOUT_MS = 20_000;
 const PAGE_LOAD_TIMEOUT_ERROR = '网页加载时间过长，请检查网络或点击“恢复页面”重试';
+const PAGE_PROBE_TIMEOUT_MS = 2_000;
+const MAX_PAGE_RECOVERIES = 3;
+type RecoveryReason = 'load_timeout' | 'load_failed' | 'renderer_gone' | 'unresponsive' | 'manual';
+interface RecoveryState { attempts: number; healthySince?: number; timer?: ReturnType<typeof setTimeout> }
+
+async function boundedPageOperation<T>(operation: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([operation, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('PAGE_PROBE_TIMEOUT')), PAGE_PROBE_TIMEOUT_MS);
+    })]);
+  } finally { clearTimeout(timer); }
+}
 
 function pageLoadTimeoutMs(): number {
   const value = Number(process.env.WORKSPACE_PAGE_LOAD_TIMEOUT_MS);
@@ -65,7 +79,13 @@ export class BrowserRuntime {
   private readonly configured = new Set<string>();
   private bounds?: BrowserBounds;
   private readonly observer: ConversationActivityObserver;
-  private readonly observing = new Set<string>();
+  private readonly observing = new Map<string, WebContentsView>();
+  private readonly usableContents = new WeakSet<WebContents>();
+  private readonly loadGenerations = new WeakMap<WebContentsView, number>();
+  private readonly pendingNavigations = new WeakMap<WebContentsView, string>();
+  private readonly recoveries = new Map<string, RecoveryState>();
+  private readonly recovering = new Map<string, Promise<void>>();
+  private readonly deferredRecoveries = new Map<string, { view: WebContentsView; generation?: number; reason: RecoveryReason }>();
   private readonly previews = new Map<string, Promise<BrowserPreview | null>>();
   private readonly previewAwaken = new Set<string>();
   private readonly previewStale = new Set<string>();
@@ -77,7 +97,8 @@ export class BrowserRuntime {
   private readonly loadTimeoutMs = pageLoadTimeoutMs();
   constructor(private readonly window: BrowserWindow, private readonly accounts: AccountManager,
     private readonly sessions: SessionManager, private readonly changed: () => void, private readonly conversations: ConversationManager,
-    private readonly shortcuts: ShortcutSettings, private readonly notifications: ConversationNotifications) {
+    private readonly shortcuts: ShortcutSettings, private readonly notifications: ConversationNotifications,
+    private readonly diagnostics?: Pick<RuntimeDiagnostics, 'record' | 'error'>) {
     for (const account of accounts.list()) {
       const saved = sessions.restoreTabs(account.id);
       if (!saved) continue;
@@ -118,16 +139,16 @@ export class BrowserRuntime {
   }
   private async observe(id: string, view: WebContentsView): Promise<void> {
     const contents = view.webContents;
-    if (this.closing || this.observing.has(id) || !contents || contents.isDestroyed() || contents.isLoading()) return;
+    if (this.closing || this.observing.has(id) || !contents || contents.isDestroyed() || this.pageLoading(contents)) return;
     const owner = this.owners.get(id); if (!owner) return;
     if (this.redirectingDuplicates.has(id)) return;
     const url = contents.getURL();
     if (owner.lastUrl && owner.lastUrl !== url) this.observer.disconnected(owner.accountId, owner.lastUrl);
     owner.lastUrl = url; owner.url = url;
     if (!isChatUrl(url)) { owner.hibernationReady = false; return; }
-    this.observing.add(id);
+    this.observing.set(id, view);
     try {
-      const snapshot = pageOperationResult<ActivitySnapshot>(await contents.executeJavaScript(pageOperationScript({ kind: 'activity' })));
+      const snapshot = pageOperationResult<ActivitySnapshot>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'activity' }))));
       if (this.closing || this.views.get(id) !== view || contents.isDestroyed() || contents.getURL() !== url) return;
       snapshot.title = this.title(owner.accountId, snapshot.url, snapshot.title);
       const activityKey = JSON.stringify([snapshot.url, snapshot.busy, snapshot.hasDraft, snapshot.user?.id,
@@ -137,11 +158,157 @@ export class BrowserRuntime {
         busy: snapshot.busy, hibernationReady: snapshot.editor && !snapshot.error, activityKey });
       this.observer.observe(owner.accountId, snapshot);
       this.markViewed(id, snapshot.url);
+      if (snapshot.editor && !snapshot.error) this.pageHealthy(id);
     } catch {
-      owner.hibernationReady = false;
-      if (!this.closing && this.views.get(id) === view) this.observer.disconnected(owner.accountId, url);
+      if (!this.closing && this.views.get(id) === view) {
+        owner.hibernationReady = false;
+        this.observer.disconnected(owner.accountId, url);
+      }
     }
-    finally { this.observing.delete(id); }
+    finally { if (this.observing.get(id) === view) this.observing.delete(id); }
+  }
+  private pageLoading(contents: WebContents): boolean {
+    return contents.isLoading() && !this.usableContents.has(contents);
+  }
+  private pageHealthy(id: string): void {
+    const recovery = this.recoveries.get(id);
+    if (!recovery || this.errors.has(id)) return;
+    if (recovery.healthySince === undefined && recovery.attempts > 0) this.diagnostics?.record('page_recovery_loaded');
+    recovery.healthySince ??= Date.now();
+    // A briefly visible page must not reset the budget of a repeatedly failing renderer.
+    if (Date.now() - recovery.healthySince >= 60_000) recovery.attempts = 0;
+  }
+  private async checkStalledLoad(id: string, view: WebContentsView, generation: number): Promise<void> {
+    const contents = view.webContents;
+    const current = () => this.views.get(id) === view && this.loadGenerations.get(view) === generation;
+    if (!contents || !current() || contents.isDestroyed() || !this.pageLoading(contents)) return;
+    // isLoading() includes images and iframes. A usable composer must remain visible
+    // and queueable even if an unrelated resource never finishes loading.
+    if (isChatUrl(contents.getURL()) && !contents.isWaitingForResponse()) {
+      try {
+        const page = pageOperationResult<Page>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'inspect' }))));
+        if (!current() || contents.isDestroyed()) return;
+        if (page.editor && page.readiness === 'ready') {
+          this.usableContents.add(contents);
+          this.errors.delete(id);
+          this.pageHealthy(id);
+          this.diagnostics?.record('page_resource_load_pending');
+          this.layout(); this.changed(); return;
+        }
+      } catch { /* A hung renderer is replaced below, not probed indefinitely. */ }
+    }
+    if (!current() || contents.isDestroyed() || !this.pageLoading(contents)) return;
+    this.errors.set(id, PAGE_LOAD_TIMEOUT_ERROR);
+    this.diagnostics?.record('page_load_timeout', { mainFrame: contents.isLoadingMainFrame(), waitingResponse: contents.isWaitingForResponse() });
+    this.layout(); this.changed();
+    this.scheduleRecovery(id, view, 'load_timeout');
+  }
+  private scheduleRecovery(id: string, view: WebContentsView, reason: RecoveryReason): void {
+    if (this.closing || this.views.get(id) !== view) return;
+    if (this.recovering.has(id)) {
+      this.deferredRecoveries.set(id, { view, generation: this.loadGenerations.get(view), reason });
+      return;
+    }
+    const state = this.recoveries.get(id) ?? { attempts: 0 };
+    state.healthySince = undefined;
+    this.recoveries.set(id, state);
+    if (state.timer || state.attempts >= MAX_PAGE_RECOVERIES) return;
+    // Preserve a known human draft on a responsive page. Main-frame loads and
+    // crashed pages have no usable document to preserve.
+    const owner = this.owners.get(id);
+    const contents = view.webContents;
+    if (owner?.hasDraft && contents && !contents.isDestroyed() && !contents.isCrashed() && !this.pageLoading(contents)) return;
+    const generation = this.loadGenerations.get(view);
+    state.timer = setTimeout(() => {
+      state.timer = undefined;
+      if (this.closing || this.views.get(id) !== view || this.loadGenerations.get(view) !== generation || !this.errors.has(id)) return;
+      void this.recoverPage(id, view, reason).catch(error => this.recoveryFailed(id, view, error));
+    }, 1000 * 2 ** state.attempts);
+  }
+  private recoveryFailed(id: string, view: WebContentsView, error: unknown): void {
+    this.diagnostics?.error('page_recovery_failed', error);
+    if (!this.closing && this.views.get(id) === view) {
+      this.errors.set(id, '网页恢复未完成，请点击“恢复页面”重试');
+      this.layout(); this.changed();
+    }
+  }
+  private recoverPage(id: string, view: WebContentsView, reason: RecoveryReason): Promise<void> {
+    const pending = this.recovering.get(id);
+    if (pending) {
+      if (reason === 'manual') this.deferredRecoveries.set(id, { view, generation: this.loadGenerations.get(view), reason });
+      return pending;
+    }
+    const operation = this.rebuildPage(id, view, reason);
+    this.recovering.set(id, operation);
+    void operation.finally(() => {
+      if (this.recovering.get(id) !== operation) return;
+      this.recovering.delete(id);
+      const deferred = this.deferredRecoveries.get(id);
+      this.deferredRecoveries.delete(id);
+      if (deferred && this.views.get(id) === deferred.view && this.loadGenerations.get(deferred.view) === deferred.generation) {
+        if (deferred.reason === 'manual') {
+          const contents = deferred.view.webContents;
+          if (this.errors.has(id) || contents && !contents.isDestroyed() && this.pageLoading(contents))
+            void this.recoverPage(id, deferred.view, 'manual').catch(error => this.recoveryFailed(id, deferred.view, error));
+        } else if (this.errors.has(id)) this.scheduleRecovery(id, deferred.view, deferred.reason);
+      }
+    }).catch(() => {});
+    return operation;
+  }
+  private async rebuildPage(id: string, view: WebContentsView, reason: RecoveryReason): Promise<void> {
+    const owner = this.owners.get(id);
+    if (this.closing || !owner || this.views.get(id) !== view) return;
+    const generation = this.loadGenerations.get(view);
+    const current = () => !this.closing && this.owners.get(id) === owner && this.views.get(id) === view &&
+      this.loadGenerations.get(view) === generation && (reason === 'manual' || this.errors.has(id));
+    const contents = view.webContents;
+    const stillDamaged = async () => {
+      if (!current()) return false;
+      if (reason === 'manual' || !contents || contents.isDestroyed() || contents.isCrashed() || contents.isWaitingForResponse()) return true;
+      try {
+        const page = pageOperationResult<Page>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'inspect' }))));
+        if (!current()) return false;
+        if (page.editor && page.readiness === 'ready') {
+          this.usableContents.add(contents); this.errors.delete(id);
+          Object.assign(owner, { hasDraft: !!page.draft.trim(), busy: page.busy });
+          this.pageHealthy(id); this.layout(); this.changed();
+          return false;
+        }
+      } catch { /* An unresponsive document cannot keep recovery pending forever. */ }
+      return current();
+    };
+    if (!await stillDamaged()) return;
+    const state = this.recoveries.get(id) ?? { attempts: 0 };
+    clearTimeout(state.timer); state.timer = undefined; state.healthySince = undefined;
+    if (reason === 'manual') state.attempts = 0;
+    state.attempts++;
+    this.recoveries.set(id, state);
+    const isolated = session.fromPartition(this.accounts.get(owner.accountId).partition);
+    // Closing the session's connection pool affects EVERY page in this account.
+    // Reset it only when this damaged page is its sole live page, with no task
+    // or login popup. Other accounts and healthy sibling replies remain untouched.
+    const canResetConnections = !this.isLocked(id) && ![...this.views].some(([otherId, other]) => {
+      const otherContents = other.webContents;
+      return otherId !== id && otherContents && !otherContents.isDestroyed() && otherContents.session === isolated;
+    }) && ![...this.popups.values()].some(popups => [...popups].some(popup => !popup.isDestroyed() && popup.webContents.session === isolated));
+    this.diagnostics?.record('page_recovery_started', { reason, attempt: state.attempts, resetConnections: canResetConnections });
+    if (canResetConnections) {
+      try { await boundedPageOperation(Promise.all([isolated.closeAllConnections(), isolated.clearHostResolverCache()])); }
+      catch (error) { this.diagnostics?.error('page_connection_reset_failed', error); }
+    }
+    if (!current() || !await stillDamaged()) return;
+    const selected = this.accounts.activeId() === owner.accountId && this.selected.get(owner.accountId) === id;
+    // Preserve a user's requested conversation if its main-frame response never
+    // arrives. Agent-locked pages always retain their original pinned destination.
+    if (!this.isLocked(id)) owner.url = this.pendingNavigations.get(view) ?? owner.url;
+    // Replace only the native page. Owner, tab, conversation and persisted send
+    // receipts survive, so a submitted message is read back rather than replayed.
+    this.destroyView(id);
+    this.errors.delete(id);
+    this.openView(id);
+    if (selected) this.activate(owner.accountId, id);
+    this.layout(); this.changed();
+    this.diagnostics?.record('page_recovery_recreated', { reason });
   }
   private configureSession(partition: string): void {
     if (this.configured.has(partition)) return;
@@ -267,33 +434,75 @@ export class BrowserRuntime {
       if (timer) clearTimeout(timer);
       this.loadTimers.delete(id);
     };
-    view.webContents.on('did-start-loading', () => {
+    const startLoad = () => {
       if (this.views.get(id) !== view) return;
+      const generation = (this.loadGenerations.get(view) ?? 0) + 1;
+      this.loadGenerations.set(view, generation);
+      const recovery = this.recoveries.get(id);
+      clearTimeout(recovery?.timer);
+      if (recovery) { recovery.timer = undefined; recovery.healthySince = undefined; }
+      this.usableContents.delete(view.webContents);
       owner.hibernationReady = false; this.errors.delete(id);
       clearLoadTimer();
       this.loadTimers.set(id, setTimeout(() => {
-        if (this.views.get(id) !== view || !view.webContents || view.webContents.isDestroyed() || !view.webContents.isLoading()) return;
-        this.errors.set(id, PAGE_LOAD_TIMEOUT_ERROR);
-        update();
+        void this.checkStalledLoad(id, view, generation).catch(error => this.diagnostics?.error('page_load_probe_failed', error));
       }, this.loadTimeoutMs));
       update();
+    };
+    view.webContents.on('did-start-loading', startLoad);
+    // A main navigation can start while an old image/iframe still keeps the
+    // loading spinner active, without another did-start-loading event.
+    view.webContents.on('did-start-navigation', details => {
+      if (this.views.get(id) !== view || !details.isMainFrame || details.isSameDocument) return;
+      this.pendingNavigations.delete(view);
+      if (replyPageUrl(details.url)) this.pendingNavigations.set(view, details.url);
+      startLoad();
     });
     view.webContents.on('did-stop-loading', () => {
       if (this.views.get(id) !== view) return;
       clearLoadTimer();
       if (this.errors.get(id) === PAGE_LOAD_TIMEOUT_ERROR) this.errors.delete(id);
+      const recovery = this.recoveries.get(id);
+      if (!this.errors.has(id) && recovery?.timer) { clearTimeout(recovery.timer); recovery.timer = undefined; }
       owner.title = view.webContents?.getTitle() || owner.title; this.saveTabs(owner.accountId); update();
     });
-    view.webContents.on('page-title-updated', (_event, title) => { owner.title = title || owner.title; this.saveTabs(owner.accountId); update(); });
+    view.webContents.on('page-title-updated', (_event, title) => {
+      if (this.closing || this.views.get(id) !== view) return;
+      owner.title = title || owner.title; this.saveTabs(owner.accountId); update();
+    });
     const save = (url: string) => { if (!this.closing && this.views.get(id) === view && isChatUrl(url)) this.savePage(id, url); update(); };
-    view.webContents.on('did-navigate', (_event, url) => save(url));
+    view.webContents.on('did-navigate', (_event, url) => { this.pendingNavigations.delete(view); save(url); });
     view.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => { if (isMainFrame) save(url); });
     view.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
-      if (this.views.get(id) === view && isMainFrame && code !== -3) { clearLoadTimer(); this.errors.set(id, `${description} (${code})`); update(); }
+      if (this.views.get(id) === view && isMainFrame && code !== -3) {
+        clearLoadTimer(); this.errors.set(id, `${description} (${code})`); update();
+        this.diagnostics?.record('page_load_failed', { code });
+        this.scheduleRecovery(id, view, 'load_failed');
+      }
     });
     view.webContents.on('render-process-gone', (_event, details) => {
-      if (this.views.get(id) === view) this.errors.set(id, `Page stopped: ${details.reason}. Reload to continue.`);
+      if (this.views.get(id) === view) {
+        this.errors.set(id, '网页进程中断，正在自动恢复');
+        this.diagnostics?.record('page_renderer_gone', { reason: details.reason, exitCode: details.exitCode });
+        this.scheduleRecovery(id, view, 'renderer_gone');
+      }
       update();
+    });
+    view.webContents.on('unresponsive', () => {
+      if (this.views.get(id) !== view) return;
+      this.errors.set(id, '网页暂时没有响应，正在自动恢复');
+      this.diagnostics?.record('page_unresponsive');
+      this.scheduleRecovery(id, view, 'unresponsive'); update();
+    });
+    view.webContents.on('responsive', () => {
+      if (this.views.get(id) !== view) return;
+      if (this.errors.get(id) === '网页暂时没有响应，正在自动恢复') {
+        this.errors.delete(id);
+        const recovery = this.recoveries.get(id);
+        clearTimeout(recovery?.timer);
+        if (recovery) recovery.timer = undefined;
+        update();
+      }
     });
     view.webContents.once('destroyed', () => {
       clearLoadTimer();
@@ -367,10 +576,10 @@ export class BrowserRuntime {
     const owner = this.owners.get(pageId);
     if (!owner || owner.accountId !== accountId) throw new AppError('会话页面已关闭或不属于此账号', 404);
     const contents = this.openView(pageId).webContents;
-    if (contents.isLoading()) throw new AppError('页面正在加载，请稍后打开队列', 409);
+    if (this.pageLoading(contents)) throw new AppError('页面正在加载，请稍后打开队列', 409);
     const url = contents.getURL();
     const home = replyPageUrl(url) === HOME_URL;
-    const page = pageOperationResult<Page>(await contents.executeJavaScript(pageOperationScript({ kind: 'inspect' })));
+    const page = pageOperationResult<Page>(await executePageScript(contents, pageOperationScript({ kind: 'inspect' })));
     if (contents.isDestroyed() || contents.getURL() !== url || this.owners.get(pageId) !== owner) throw new AppError('页面正在切换，队列将自动重试', 409);
     if (!page.editor) throw new AppError('网页输入框正在加载，队列将自动重试', 409);
     if (owner.conversationId) {
@@ -440,7 +649,7 @@ export class BrowserRuntime {
   page(): PageState | null {
     const contents = this.activeId ? this.views.get(this.activeId)?.webContents : undefined;
     if (!contents || contents.isDestroyed()) return null;
-    return { id: this.activeId!, conversationId: this.owners.get(this.activeId!)?.conversationId, url: contents.getURL(), title: contents.getTitle(), loading: contents.isLoading(),
+    return { id: this.activeId!, conversationId: this.owners.get(this.activeId!)?.conversationId, url: contents.getURL(), title: contents.getTitle(), loading: this.pageLoading(contents),
       canGoBack: contents.navigationHistory.canGoBack(), canGoForward: contents.navigationHistory.canGoForward(),
       error: this.errors.get(this.activeId!) };
   }
@@ -450,8 +659,8 @@ export class BrowserRuntime {
     const id = url ? [...this.owners].find(([, owner]) => owner.accountId === task.accountId && replyPageUrl(owner.url) === url)?.[0] : this.taskPage(task);
     const contents = id && this.owners.get(id)?.accountId === task.accountId ? this.openView(id).webContents : undefined;
     if (!contents || contents.isDestroyed()) return { taskId: task.id, state: 'unavailable', reason: '请在原账号打开已发送的咨询页面，再用 resume TASK_ID --url 会话地址读取' };
-    if (contents.isLoading()) return { taskId: task.id, state: 'reading' };
-    const page = pageOperationResult<Page>(await contents.executeJavaScript(pageOperationScript({ kind: 'inspect' })));
+    if (this.pageLoading(contents)) return { taskId: task.id, state: 'reading' };
+    const page = pageOperationResult<Page>(await executePageScript(contents, pageOperationScript({ kind: 'inspect' })));
     if (contents.isDestroyed() || contents.getURL() !== page.url) return { taskId: task.id, state: 'reading' };
     return this.replyReader.read(task, page, bound ?? url);
   }
@@ -462,10 +671,10 @@ export class BrowserRuntime {
     const contents = id ? this.openView(id).webContents : undefined;
     const base = { accountId, url: (id ? this.owners.get(id)?.url : this.url(accountId)) ?? HOME_URL, title: '', editor: false, draftLength: 0, busy: false };
     if (!contents || contents.isDestroyed()) return { ...base, readiness: 'not_open', suggestion: '请先在客户端打开此账号，再检查页面；队列未改变' };
-    if (contents.isLoading()) return { ...base, readiness: 'loading', suggestion: '页面正在加载，请稍后再次诊断' };
+    if (this.pageLoading(contents)) return { ...base, readiness: 'loading', suggestion: '页面正在加载，请稍后再次诊断' };
     if (!isChatUrl(contents.getURL())) return { ...base, readiness: 'login_required', suggestion: '请在此账号页面完成登录' };
     try {
-      const detail = pageOperationResult<Omit<BrowserDiagnostics, 'accountId' | 'suggestion'>>(await contents.executeJavaScript(pageOperationScript({ kind: 'diagnose' })));
+      const detail = pageOperationResult<Omit<BrowserDiagnostics, 'accountId' | 'suggestion'>>(await executePageScript(contents, pageOperationScript({ kind: 'diagnose' })));
       const suggestions = { ready: detail.draftLength ? '页面已有草稿，请由人类处理后再继续任务' : detail.busy ? '网页正在回复，请等待完成' : '输入框已就绪；暂停的队列仍需明确恢复',
         loading: '输入框尚未就绪，请稍后再次诊断', verification_required: '请在此账号网页完成验证后继续原任务，不要重复提交',
         login_required: '请在此账号网页完成登录', not_open: '请先打开此账号', unavailable: '页面不可用，请在客户端检查' };
@@ -486,9 +695,9 @@ export class BrowserRuntime {
     if (existing) return existing;
     const capture = (async () => {
       const url = contents.getURL();
-      if (this.activeId === id && this.visible && !contents.isLoading() && isChatUrl(url)) {
+      if (this.activeId === id && this.visible && !this.pageLoading(contents) && isChatUrl(url)) {
         try {
-          await contents.executeJavaScript(pageOperationScript({ kind: 'follow_latest', url }));
+          await executePageScript(contents, pageOperationScript({ kind: 'follow_latest', url }));
         } catch { /* Navigation can interrupt following; a later preview retries. */ }
       }
       if (!this.isLocked(id) || contents.isDestroyed() || contents.getURL() !== url) return null;
@@ -527,11 +736,11 @@ export class BrowserRuntime {
     for (const view of this.views.values()) {
       const contents = view.webContents;
       if (!contents || contents.isDestroyed() || !isChatUrl(contents.getURL())) continue;
-      if (contents.isLoading()) return true;
+      if (this.pageLoading(contents)) return true;
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const busy = await Promise.race([
-          contents.executeJavaScript(pageOperationScript({ kind: 'activity' })).then(value => pageOperationResult<ActivitySnapshot>(value).busy),
+          executePageScript(contents, pageOperationScript({ kind: 'activity' })).then(value => pageOperationResult<ActivitySnapshot>(value).busy),
           new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(true), 3000); })
         ]);
         if (busy) return true;
@@ -541,10 +750,12 @@ export class BrowserRuntime {
     return false;
   }
   private async waitUntilLoaded(id: string): Promise<void> {
-    const contents = this.views.get(id)?.webContents;
-    if (!contents || contents.isDestroyed()) throw new AppError('会话页面已中断，请重新打开');
     const deadline = Date.now() + 30000;
-    while (contents.isLoading()) {
+    while (true) {
+      // Recovery can replace the contents while this navigation is waiting.
+      const contents = this.views.get(id)?.webContents;
+      if (!contents || contents.isDestroyed()) throw new AppError('会话页面已中断，请重新打开');
+      if (!this.pageLoading(contents)) return;
       if (Date.now() >= deadline) throw new AppError('会话加载超时，请检查页面');
       await new Promise(resolve => setTimeout(resolve, 100));
     }
@@ -570,9 +781,9 @@ export class BrowserRuntime {
     }
     const contents = this.openView(id).webContents;
     if (action === 'reload') {
-      if (contents.isLoading() || this.errors.has(id) || !isChatUrl(contents.getURL())) {
-        contents.stop();
-        void contents.loadURL(this.owners.get(id)?.url ?? HOME_URL).catch(() => { /* did-fail-load reports the error. */ });
+      if (this.pageLoading(contents) || this.errors.has(id) || contents.isCrashed() || !isChatUrl(contents.getURL())) {
+        const view = this.views.get(id)!;
+        void this.recoverPage(id, view, 'manual').catch(error => this.recoveryFailed(id, view, error));
       } else contents.reload();
     }
     else if (action === 'back' && contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
@@ -597,6 +808,8 @@ export class BrowserRuntime {
     this.redirectingDuplicates.delete(id);
     this.destroyView(id);
     this.owners.delete(id); this.errors.delete(id);
+    this.recoveries.delete(id);
+    this.deferredRecoveries.delete(id);
     for (const [taskId, pageId] of this.taskPages) if (pageId === id) this.taskPages.delete(taskId);
     if (owner && this.selected.get(owner.accountId) === id) {
       const next = [...this.owners].find(([, item]) => item.accountId === owner.accountId)?.[0];
@@ -608,6 +821,10 @@ export class BrowserRuntime {
     const loadTimer = this.loadTimers.get(id);
     if (loadTimer) clearTimeout(loadTimer);
     this.loadTimers.delete(id);
+    const recovery = this.recoveries.get(id);
+    clearTimeout(recovery?.timer);
+    if (recovery) recovery.timer = undefined;
+    this.observing.delete(id);
     this.previews.delete(id);
     this.previewAwaken.delete(id);
     this.previewStale.delete(id);
@@ -639,7 +856,7 @@ export class BrowserRuntime {
     const idleMs = this.backgrounded() ? this.hiddenIdlePageMs : this.idlePageMs;
     if (!owner || this.views.get(id) !== view || this.activeId === id && !this.backgrounded() || this.isLocked(id) || this.redirectingDuplicates.has(id) || this.observing.has(id) ||
       owner.hasDraft || owner.busy || !owner.hibernationReady || Date.now() - owner.idleSince < idleMs ||
-      !contents || contents.isDestroyed() || contents.isLoading() || !isChatUrl(contents.getURL())) return;
+      !contents || contents.isDestroyed() || this.pageLoading(contents) || !isChatUrl(contents.getURL())) return;
     this.destroyView(id);
     this.changed();
   }
@@ -679,17 +896,18 @@ export class BrowserRuntime {
     try {
       // Retry the fixed conversation, never another selected tab. Reload only
       // a stalled, empty, idle page; preserve human drafts and active replies.
-      if (task.retryCount && conversation?.binding !== 'uncertain' && !contents.isLoading()) {
+      if (task.retryCount && conversation?.binding !== 'uncertain' && !this.pageLoading(contents)) {
         let safeToReload = false;
         try {
-          const page = pageOperationResult<Page>(await contents.executeJavaScript(pageOperationScript({ kind: 'inspect' })));
+          const page = pageOperationResult<Page>(await executePageScript(contents, pageOperationScript({ kind: 'inspect' })));
           safeToReload = !page.busy && !page.draft.trim() && page.readiness !== 'login_required' && page.readiness !== 'verification_required' &&
             (!task.sendIntentAt || page.readiness === 'loading');
         } catch { safeToReload = contents.isCrashed(); }
         if (safeToReload) await contents.loadURL(conversation?.url ?? task.targetUrl ?? HOME_URL);
       }
       const result = await new ChatGPTAdapter(contents, signal, context, this.conversations,
-        () => this.activeId === pageId && this.visible && !this.backgrounded() ? 250 : 2000).execute(input);
+        () => this.activeId === pageId && this.visible && !this.backgrounded() ? 250 : 2000,
+        () => this.pageLoading(contents)).execute(input);
       signal.throwIfAborted();
       if (input.type === 'prompt' && input.submit && result && typeof result === 'object' && 'url' in result && 'replyToken' in result && typeof result.url === 'string' && typeof result.replyToken === 'string') {
         this.notifications.complete(id, result.url, this.title(id, result.url, contents.getTitle()), result.replyToken);

@@ -25,6 +25,13 @@ export function pageOperationResult<T>(result: unknown): T {
   throw new Error('PAGE_SCRIPT_FAILED: missing page result');
 }
 
+export function executePageScript(contents: WebContents, script: string, userGesture = false): Promise<unknown> {
+  // WebContents.executeJavaScript waits for main-frame resource loading to end.
+  // Address the live document directly so a pending image cannot stall a ready composer.
+  const frame = contents.mainFrame;
+  return frame ? frame.executeJavaScript(script, userGesture) : contents.executeJavaScript(script, userGesture);
+}
+
 // During the first send ChatGPT may retain model/UI query parameters and a
 // trailing slash while assigning its conversation URL. They are not identity.
 // Keep explicit API targets strict; normalize only this observed reply route.
@@ -323,7 +330,8 @@ export class ChatGPTAdapter {
   private readonly pending = new Set<Promise<unknown>>();
   constructor(private readonly contents: WebContents, private readonly signal: AbortSignal,
     private readonly context: ExecutionContext, private readonly conversations: ConversationManager,
-    private readonly pollingInterval: () => number = () => 250) {}
+    private readonly pollingInterval: () => number = () => 250,
+    private readonly pageLoading: () => boolean = () => contents.isLoading()) {}
   private async wait<T>(promise: Promise<T>): Promise<T> {
     this.signal.throwIfAborted();
     return new Promise<T>((resolve, reject) => {
@@ -340,7 +348,7 @@ export class ChatGPTAdapter {
   }
   private async evaluate<T>(operation: Operation): Promise<T> {
     this.signal.throwIfAborted();
-    return pageOperationResult<T>(await this.track(this.contents.executeJavaScript(pageOperationScript(operation), true)));
+    return pageOperationResult<T>(await this.track(executePageScript(this.contents, pageOperationScript(operation), true)));
   }
   private inspect(): Promise<Page> { return this.evaluate<Page>({ kind: 'inspect' }); }
   private async clearConfirmedDraft(page: Page, value: string): Promise<void> {
@@ -349,7 +357,7 @@ export class ChatGPTAdapter {
     finally { this.context.releaseExecution?.(); }
   }
   private anchor(page: Page): string { return JSON.stringify(page.messages.filter(message => message.role === 'user').map(message => [message.id, message.text])); }
-  private async loaded(): Promise<void> { while (this.contents.isLoading()) await this.delay(); }
+  private async loaded(): Promise<void> { while (this.pageLoading()) await this.delay(); }
   private async idle(): Promise<Page> {
     this.context.stage('waiting_idle', this.context.task().idleTimeoutMs);
     this.context.releaseExecution?.();

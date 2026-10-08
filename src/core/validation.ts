@@ -1,3 +1,6 @@
+import { isHttpsWebUrl } from '../shared/accountNavigation';
+export { isAccountNavigation, isAccountLoginUrl } from '../shared/accountNavigation';
+
 export class AppError extends Error {
   constructor(message: string, public readonly status = 400) { super(message); }
 }
@@ -28,12 +31,8 @@ export function chatUrl(value: unknown): string {
   if (!isChatUrl(url)) throw new AppError('Only https://chatgpt.com URLs are supported');
   return new URL(url).href;
 }
-// OAuth remains inside the same profile; external links require user confirmation.
-export function isAccountNavigation(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return url.protocol === 'https:' && !url.username && !url.password && !url.port &&
-      ['chatgpt.com', 'auth.openai.com', 'auth0.openai.com', 'accounts.google.com',
-        'login.microsoftonline.com', 'login.live.com', 'appleid.apple.com'].includes(url.hostname);
-  } catch { return false; }
+export function webLink(value: unknown): string {
+  const url = text(value, '链接', 16384);
+  if (!isHttpsWebUrl(url)) throw new AppError('请输入完整的 https:// 登录或授权链接');
+  return new URL(url).href;
 }

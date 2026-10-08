@@ -99,8 +99,11 @@ h1 { font-size: 16px; font-weight: 600; margin-top: 5px; letter-spacing: .3px; }
 .toolbar button:hover:not(:disabled) { color: var(--pine); background: #eaf0e5; }
 .toolbar .new-chat { margin-left: 5px; color: #4d674a; }
 .toolbar-note { display: flex; align-items: center; gap: 8px; color: #74816d; font-size: 13px; }
-.page-url { flex: 1; display: flex; align-items: center; gap: 8px; overflow: hidden; border: 1px solid #e5e9df; background: #fffefa; border-radius: 6px; padding: 5px 10px; color: #7d8977; font-size: 13px; }
-.page-url > span { white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.page-url { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; border: 1px solid #e5e9df; background: #fffefa; border-radius: 6px; padding: 2px 3px 2px 10px; color: #7d8977; font-size: 13px; }
+.page-url:focus-within { outline: 2px solid #719783; outline-offset: 1px; }
+.page-url input { flex: 1; width: 100%; min-width: 0; padding: 4px 0; border: 0; outline: 0; background: transparent; color: #435e4e; font: inherit; text-overflow: ellipsis; }
+.page-url input::placeholder { color: #7d8977; }
+.toolbar .page-url button { width: 24px; height: 24px; padding: 4px; }
 .has-error { color: #ac4545; background: #fff0ed; }
 .has-error > span { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .browser-slot { position:relative; overflow:hidden; flex: 1; min-height: 0; margin: 12px 14px 14px; background: white; border-radius: 8px; }

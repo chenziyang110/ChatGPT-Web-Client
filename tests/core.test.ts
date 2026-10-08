@@ -9,7 +9,8 @@ import { SessionManager } from '../src/core/session/SessionManager';
 import { ConversationManager } from '../src/core/conversation/ConversationManager';
 import { AgentGateway, parseTask } from '../src/core/agent/AgentGateway';
 import { Workspace, type BrowserAdapter } from '../src/core/Workspace';
-import { chatUrl, isAccountNavigation } from '../src/core/validation';
+import { chatUrl, webLink, isAccountNavigation, isAccountLoginUrl } from '../src/core/validation';
+import { authorizationCallback, isAuthorizationCallback, hasAuthorizationParameters } from '../src/shared/accountNavigation';
 
 async function eventually(check: () => boolean): Promise<void> {
   const deadline = Date.now() + 3000;
@@ -80,6 +81,63 @@ test('validation rejects account traversal, bad names and untrusted URLs', () =>
   for (let i = 0; i < 20; i++) accounts.create(`Account ${i}`);
   assert.throws(() => accounts.create('Too many'));
   db.close();
+});
+
+test('interactive login exemption is restricted to exact trusted HTTPS login origins', () => {
+  for (const url of ['https://accounts.google.com/v3/signin/accountchooser?state=private',
+    'https://auth.openai.com/authorize', 'https://appleid.apple.com/auth/authorize',
+    'https://chatgpt.com/api/auth/callback/google?code=private&state=private', 'https://chatgpt.com/auth/login'])
+    assert.equal(isAccountLoginUrl(url), true, url);
+  for (const url of ['https://chatgpt.com/c/queue', 'https://accounts.google.com.evil.test/',
+    'http://accounts.google.com/', 'https://accounts.google.com:8443/',
+    'https://user:pass@accounts.google.com/', 'https://chatgpt.com/author/article', 'file:///signin', 'not a URL'])
+    assert.equal(isAccountLoginUrl(url), false, url);
+});
+
+test('manual account links allow HTTPS and only their declared loopback callback', () => {
+  assert.equal(webLink(' https://custom.example:8443/authorize?state=private '), 'https://custom.example:8443/authorize?state=private');
+  for (const url of ['http://localhost:3210/', 'https://user:pass@custom.example/', 'javascript:alert(1)', 'file:///signin', 'not a URL', 'https://example.com/' + 'a'.repeat(16384)])
+    assert.throws(() => webLink(url), url.slice(0, 80));
+  for (const host of ['127.0.0.1', 'localhost', '[::1]']) {
+    const callback = `http://${host}:3210/callback?fixed=yes`;
+    const link = `https://custom.example/authorize?redirect_uri=${encodeURIComponent(callback)}`;
+    assert.equal(authorizationCallback(link), callback);
+    assert.equal(isAuthorizationCallback(callback + '&code=private', callback), true);
+    for (const url of [callback.replace(':3210', ':3211'), callback.replace('/callback', '/other'), callback.replace('fixed=yes', 'fixed=no'), callback + '#code=private'])
+      assert.equal(isAuthorizationCallback(url, callback), false);
+  }
+  for (const target of ['http://example.com/callback', 'http://localhost.evil.test/callback', 'http://user:pass@localhost/callback', 'http://localhost/callback#token', 'https://custom.example/callback'])
+    assert.equal(authorizationCallback('https://custom.example/?redirect_uri=' + encodeURIComponent(target)), undefined);
+  assert.throws(() => authorizationCallback('https://custom.example/?redirect_uri=http%3A%2F%2Flocalhost%2Fa&redirect_uri=http%3A%2F%2Flocalhost%2Fb'));
+  for (const key of ['code', 'state', 'access_token', 'id_token', 'oauth_token', 'oauth_verifier']) {
+    assert.equal(hasAuthorizationParameters(`https://chatgpt.com/?${key}=private`), true);
+    assert.equal(hasAuthorizationParameters(`https://chatgpt.com/#${key}=private`), true);
+  }
+  assert.equal(hasAuthorizationParameters('https://chatgpt.com/c/ordinary'), false);
+});
+
+test('opening a manual link validates the account and URL without adding queue work', async () => {
+  const db = new Database(':memory:');
+  const accounts = new AccountManager(db), conversations = new ConversationManager(db);
+  const account = accounts.create('Link account'); accounts.setAlias(account.id, 'link-account');
+  const opened: Array<{ id: string; url: string }> = [];
+  const browser: BrowserAdapter = {
+    activate: () => {}, remove: async () => {}, navigate: async () => {}, control: () => {}, page: () => null,
+    openLink: (id, url) => { opened.push({ id, url }); return { id: 'auth-tab', accountId: id, url, title: 'Authorization', selected: true, locked: false }; }
+  };
+  const gateway = new AgentGateway(db, async () => ({}), () => {});
+  const workspace = new Workspace(accounts, gateway, browser, () => {}, () => ({ enabled: false, endpoint: null, discoveryFile: '' }), conversations);
+  try {
+    const url = 'https://custom.example/authorize?state=private';
+    const page = await workspace.call('browser.openLink', { accountId: 'link-account', url: ' ' + url + ' ' });
+    assert.deepEqual(opened, [{ id: account.id, url }]);
+    assert.equal((page as { id: string }).id, 'auth-tab');
+    await assert.rejects(workspace.call('browser.openLink', { accountId: 'missing', url }));
+    await assert.rejects(workspace.call('browser.openLink', { accountId: account.id, url: 'http://custom.example' }));
+    assert.equal(opened.length, 1);
+    assert.deepEqual(gateway.listTasks(), []);
+    assert.deepEqual(conversations.list(account.id), []);
+  } finally { await gateway.stop(); db.close(); }
 });
 
 test('prompt submission is opt-in and the task protocol does not accept arbitrary code', () => {

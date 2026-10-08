@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { BrowserWindow, WebContentsView, session, dialog, shell, type WebContents } from 'electron';
 import { AccountManager } from '../core/account/AccountManager';
 import { SessionManager } from '../core/session/SessionManager';
-import { AppError, HOME_URL, chatUrl, isAccountNavigation, isChatUrl } from '../core/validation';
+import { AppError, HOME_URL, chatUrl, webLink, isAccountNavigation, isAccountLoginUrl, isChatUrl } from '../core/validation';
+import { authorizationCallback, hasAuthorizationParameters, isAuthorizationCallback, isHttpsWebUrl } from '../shared/accountNavigation';
 import type { AgentTask, BrowserBounds, BrowserDiagnostics, BrowserPreview, BrowserPage, Conversation, PageState, TaskInput, TaskResponse } from '../shared/types';
 import { bindShortcuts } from './shortcuts';
 import { ChatGPTAdapter, executePageScript, pageOperationScript, pageOperationResult, replyPageUrl, type Page } from './adapters/ChatGPTAdapter';
@@ -25,6 +26,8 @@ interface PageOwner {
   busy: boolean;
   hibernationReady: boolean;
   activityKey?: string;
+  customLink?: boolean;
+  callbackUrl?: string;
 }
 
 const DEFAULT_PAGE_IDLE_MS = 60_000;
@@ -133,9 +136,13 @@ export class BrowserRuntime {
     if (this.closing) return;
     this.restoredTabAccounts.add(accountId);
     this.sessions.saveTabs(accountId, { selectedId: this.selected.get(accountId),
-      pages: [...this.owners].filter(([, owner]) => owner.accountId === accountId).map(([id, owner]) => ({
-        id, url: isChatUrl(owner.url) ? owner.url : HOME_URL, title: owner.title, conversationId: owner.conversationId
-      })) });
+      pages: [...this.owners].filter(([, owner]) => owner.accountId === accountId).map(([id, owner]) => {
+        const contents = this.views.get(id)?.webContents;
+        const liveUrl = contents && !contents.isDestroyed() ? contents.getURL() : owner.url;
+        const temporary = owner.customLink || isAccountLoginUrl(liveUrl) || hasAuthorizationParameters(liveUrl);
+        const savedUrl = !owner.customLink && isChatUrl(owner.url) && !isAccountLoginUrl(owner.url) && !hasAuthorizationParameters(owner.url) ? owner.url : HOME_URL;
+        return { id, url: savedUrl, title: temporary ? '授权页面' : owner.title, conversationId: owner.conversationId };
+      }) });
   }
   private async observe(id: string, view: WebContentsView): Promise<void> {
     const contents = view.webContents;
@@ -143,9 +150,13 @@ export class BrowserRuntime {
     const owner = this.owners.get(id); if (!owner) return;
     if (this.redirectingDuplicates.has(id)) return;
     const url = contents.getURL();
+    if (!isChatUrl(url) || isAccountLoginUrl(url) || hasAuthorizationParameters(url) || owner.customLink) {
+      if (owner.lastUrl) this.observer.disconnected(owner.accountId, owner.lastUrl);
+      owner.lastUrl = undefined; owner.hibernationReady = false;
+      return;
+    }
     if (owner.lastUrl && owner.lastUrl !== url) this.observer.disconnected(owner.accountId, owner.lastUrl);
     owner.lastUrl = url; owner.url = url;
-    if (!isChatUrl(url)) { owner.hibernationReady = false; return; }
     this.observing.set(id, view);
     try {
       const snapshot = pageOperationResult<ActivitySnapshot>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'activity' }))));
@@ -170,6 +181,15 @@ export class BrowserRuntime {
   private pageLoading(contents: WebContents): boolean {
     return contents.isLoading() && !this.usableContents.has(contents);
   }
+  private async loginDocumentReady(id: string, contents: WebContents): Promise<boolean> {
+    const url = contents.getURL();
+    if (!isAccountLoginUrl(url) && !(this.owners.get(id)?.customLink && this.allowedPageNavigation(id, url))) return false;
+    // OAuth has no ChatGPT composer. Inspect document readiness without reading
+    // credentials or waiting for a provider's images and embedded resources.
+    const ready = await boundedPageOperation(executePageScript(contents,
+      'document.readyState !== "loading" && !document.documentURI.startsWith("chrome-error:") && !!document.body?.children.length'));
+    return ready === true && !contents.isDestroyed() && contents.getURL() === url;
+  }
   private pageHealthy(id: string): void {
     const recovery = this.recoveries.get(id);
     if (!recovery || this.errors.has(id)) return;
@@ -182,6 +202,17 @@ export class BrowserRuntime {
     const contents = view.webContents;
     const current = () => this.views.get(id) === view && this.loadGenerations.get(view) === generation;
     if (!contents || !current() || contents.isDestroyed() || !this.pageLoading(contents)) return;
+    if ((isAccountLoginUrl(contents.getURL()) || this.owners.get(id)?.customLink) && !contents.isWaitingForResponse()) {
+      try {
+        const ready = await this.loginDocumentReady(id, contents);
+        if (!current() || contents.isDestroyed()) return;
+        if (ready) {
+          this.usableContents.add(contents); this.errors.delete(id); this.pageHealthy(id);
+          this.diagnostics?.record('login_resource_load_pending');
+          this.layout(); this.changed(); return;
+        }
+      } catch { /* A genuinely stalled login document can still be recovered. */ }
+    }
     // isLoading() includes images and iframes. A usable composer must remain visible
     // and queueable even if an unrelated resource never finishes loading.
     if (isChatUrl(contents.getURL()) && !contents.isWaitingForResponse()) {
@@ -266,6 +297,11 @@ export class BrowserRuntime {
       if (!current()) return false;
       if (reason === 'manual' || !contents || contents.isDestroyed() || contents.isCrashed() || contents.isWaitingForResponse()) return true;
       try {
+        if (await this.loginDocumentReady(id, contents)) {
+          if (!current()) return false;
+          this.usableContents.add(contents); this.errors.delete(id); this.pageHealthy(id);
+          this.layout(); this.changed(); return false;
+        }
         const page = pageOperationResult<Page>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'inspect' }))));
         if (!current()) return false;
         if (page.editor && page.readiness === 'ready') {
@@ -300,12 +336,20 @@ export class BrowserRuntime {
     const selected = this.accounts.activeId() === owner.accountId && this.selected.get(owner.accountId) === id;
     // Preserve a user's requested conversation if its main-frame response never
     // arrives. Agent-locked pages always retain their original pinned destination.
-    if (!this.isLocked(id)) owner.url = this.pendingNavigations.get(view) ?? owner.url;
+    const pendingUrl = this.pendingNavigations.get(view);
+    // OAuth URLs may contain state or authorization parameters. Keep the active
+    // login destination only in memory; never overwrite persisted conversation URLs.
+    const currentUrl = contents && !contents.isDestroyed() ? contents.getURL() : undefined;
+    const navigationUrl = pendingUrl && this.allowedPageNavigation(id, pendingUrl) ? pendingUrl : undefined;
+    const transientUrl = navigationUrl
+      ? this.isLocked(id) && !isAccountLoginUrl(navigationUrl) ? undefined : navigationUrl
+      : currentUrl && (isAccountLoginUrl(currentUrl) || owner.customLink && this.allowedPageNavigation(id, currentUrl)) ? currentUrl : undefined;
+    if (!owner.customLink && !this.isLocked(id) && navigationUrl && replyPageUrl(navigationUrl) && !hasAuthorizationParameters(navigationUrl)) owner.url = navigationUrl;
     // Replace only the native page. Owner, tab, conversation and persisted send
     // receipts survive, so a submitted message is read back rather than replayed.
     this.destroyView(id);
     this.errors.delete(id);
-    this.openView(id);
+    this.openView(id, transientUrl);
     if (selected) this.activate(owner.accountId, id);
     this.layout(); this.changed();
     this.diagnostics?.record('page_recovery_recreated', { reason });
@@ -335,31 +379,44 @@ export class BrowserRuntime {
       if (answer.response === 1) await shell.openExternal(parsed.href);
     } catch { /* Invalid or unavailable external destinations are not opened. */ }
   }
-  private secure(contents: WebContents, accountId: string, partition: string): void {
-    contents.on('before-input-event', event => { if (this.isLocked(accountId)) event.preventDefault(); });
-    contents.on('before-mouse-event', event => { if (this.isLocked(accountId)) event.preventDefault(); });
+  private secure(contents: WebContents, pageId: string, partition: string): void {
+    contents.on('before-input-event', event => { if (this.isInteractionLocked(pageId, contents)) event.preventDefault(); });
+    contents.on('before-mouse-event', event => { if (this.isInteractionLocked(pageId, contents)) event.preventDefault(); });
     contents.on('will-navigate', (event, url) => {
-      if (!isAccountNavigation(url)) { event.preventDefault(); void this.external(url); }
+      if (!this.allowedPageNavigation(pageId, url)) { event.preventDefault(); void this.external(url); }
     });
-    contents.on('will-redirect', (event, url) => { if (!isAccountNavigation(url)) event.preventDefault(); });
+    contents.on('will-redirect', (event, url) => { if (!this.allowedPageNavigation(pageId, url)) event.preventDefault(); });
     contents.on('will-attach-webview', event => event.preventDefault());
     contents.setWindowOpenHandler(({ url }) => {
-      if (!isAccountNavigation(url)) { void this.external(url); return { action: 'deny' }; }
+      const blank = url === 'about:blank' && this.owners.get(pageId)?.customLink;
+      if (!blank && !this.allowedPageNavigation(pageId, url)) { void this.external(url); return { action: 'deny' }; }
       return { action: 'allow', overrideBrowserWindowOptions: {
         width: 560, height: 760, parent: this.window, autoHideMenuBar: true,
         webPreferences: { partition, nodeIntegration: false, contextIsolation: true, sandbox: true, webviewTag: false, preload: undefined }
       } };
     });
     contents.on('did-create-window', popup => {
-      const windows = this.popups.get(accountId) ?? new Set<BrowserWindow>();
-      windows.add(popup); this.popups.set(accountId, windows);
-      this.secure(popup.webContents, accountId, partition);
-      if (this.isLocked(accountId)) popup.hide();
+      const windows = this.popups.get(pageId) ?? new Set<BrowserWindow>();
+      windows.add(popup); this.popups.set(pageId, windows);
+      this.secure(popup.webContents, pageId, partition);
+      const syncVisibility = () => {
+        if (popup.isDestroyed()) return;
+        if (this.isInteractionLocked(pageId, popup.webContents) || this.backgrounded() || this.activeId !== pageId) popup.hide();
+        else popup.show();
+      };
+      popup.webContents.on('did-navigate', syncVisibility).on('did-navigate-in-page', syncVisibility);
+      syncVisibility();
       popup.on('closed', () => windows.delete(popup));
     });
   }
   private savePage(id: string, url: string): void {
     const owner = this.owners.get(id); if (!owner) return;
+    if (isAccountLoginUrl(url) || hasAuthorizationParameters(url)) return;
+    if (owner.customLink) {
+      // Only a committed ChatGPT destination finishes the temporary browser mode.
+      // The original authorization link and loopback exception never reach storage.
+      owner.customLink = false; owner.callbackUrl = undefined; owner.title = 'ChatGPT';
+    }
     if (this.redirectingDuplicates.has(id) && url !== owner.url) return;
     const target = replyPageUrl(url);
     if (target && target !== HOME_URL && !this.redirectingDuplicates.has(id)) {
@@ -402,17 +459,18 @@ export class BrowserRuntime {
     }
     this.saveTabs(owner.accountId);
   }
-  private createView(accountId: string, url: string, conversationId?: string): string {
+  private createView(accountId: string, url: string, conversationId?: string, customLink = false): string {
     if ([...this.owners.values()].filter(owner => owner.accountId === accountId).length >= 20) throw new AppError('此账号已打开 20 个会话，请关闭不再使用的会话后继续', 409);
     const id = randomUUID();
     this.accounts.get(accountId);
-    this.owners.set(id, { accountId, conversationId, url, title: '新会话', idleSince: Date.now(),
+    const callbackUrl = customLink ? authorizationCallback(url) : undefined;
+    this.owners.set(id, { accountId, conversationId, url, title: customLink ? '授权页面' : '新会话', customLink, callbackUrl, idleSince: Date.now(),
       hasDraft: false, busy: false, hibernationReady: false });
     this.openView(id);
     this.saveTabs(accountId);
     return id;
   }
-  private openView(id: string): WebContentsView {
+  private openView(id: string, initialUrl?: string): WebContentsView {
     const existing = this.views.get(id);
     const existingContents = existing?.webContents;
     if (existingContents && !existingContents.isDestroyed()) return existing!;
@@ -428,6 +486,13 @@ export class BrowserRuntime {
     bindShortcuts(view.webContents, this.window, this.shortcuts);
     this.secure(view.webContents, id, account.partition);
     const update = () => { if (this.views.get(id) === view && view.webContents && !view.webContents.isDestroyed()) { this.layout(); this.changed(); } };
+    const updateTitle = (title: string) => {
+      const url = view.webContents.getURL();
+      // Login/result pages can include authorization codes in document.title.
+      // Keep a neutral title so it cannot survive the subsequent ChatGPT commit.
+      owner.title = owner.customLink || isAccountLoginUrl(url) || hasAuthorizationParameters(url) ? '授权页面' : title || owner.title;
+      this.saveTabs(owner.accountId);
+    };
     const clearLoadTimer = () => {
       if (this.views.get(id) !== view) return;
       const timer = this.loadTimers.get(id);
@@ -455,7 +520,9 @@ export class BrowserRuntime {
     view.webContents.on('did-start-navigation', details => {
       if (this.views.get(id) !== view || !details.isMainFrame || details.isSameDocument) return;
       this.pendingNavigations.delete(view);
-      if (replyPageUrl(details.url)) this.pendingNavigations.set(view, details.url);
+      if (replyPageUrl(details.url) || isAccountLoginUrl(details.url) || owner.customLink && this.allowedPageNavigation(id, details.url)) {
+        this.pendingNavigations.set(view, details.url);
+      }
       startLoad();
     });
     view.webContents.on('did-stop-loading', () => {
@@ -464,11 +531,11 @@ export class BrowserRuntime {
       if (this.errors.get(id) === PAGE_LOAD_TIMEOUT_ERROR) this.errors.delete(id);
       const recovery = this.recoveries.get(id);
       if (!this.errors.has(id) && recovery?.timer) { clearTimeout(recovery.timer); recovery.timer = undefined; }
-      owner.title = view.webContents?.getTitle() || owner.title; this.saveTabs(owner.accountId); update();
+      updateTitle(view.webContents.getTitle()); update();
     });
     view.webContents.on('page-title-updated', (_event, title) => {
       if (this.closing || this.views.get(id) !== view) return;
-      owner.title = title || owner.title; this.saveTabs(owner.accountId); update();
+      updateTitle(title); update();
     });
     const save = (url: string) => { if (!this.closing && this.views.get(id) === view && isChatUrl(url)) this.savePage(id, url); update(); };
     view.webContents.on('did-navigate', (_event, url) => { this.pendingNavigations.delete(view); save(url); });
@@ -521,7 +588,7 @@ export class BrowserRuntime {
         this.changed();
       });
     });
-    void view.webContents.loadURL(owner.url).catch(() => { /* did-fail-load reports the error to the UI. */ });
+    void view.webContents.loadURL(initialUrl ?? owner.url).catch(() => { /* did-fail-load reports the error to the UI. */ });
     return view;
   }
   private pageId(accountId: string): string | undefined { return this.selected.get(accountId); }
@@ -535,6 +602,14 @@ export class BrowserRuntime {
   private isLocked(id: string): boolean {
     const owner = this.owners.get(id); if (!owner) return false;
     return this.locks.some(task => task.accountId === owner.accountId && (this.taskPage(task) === id || !!task.conversationId && task.conversationId === owner.conversationId));
+  }
+  private isInteractionLocked(id: string, contents?: WebContents): boolean {
+    const page = contents ?? this.views.get(id)?.webContents;
+    return this.isLocked(id) && !(page && !page.isDestroyed() && isAccountLoginUrl(page.getURL()));
+  }
+  private allowedPageNavigation(id: string, url: string): boolean {
+    const owner = this.owners.get(id);
+    return isAccountNavigation(url) || !!owner?.customLink && (isHttpsWebUrl(url) || isAuthorizationCallback(url, owner.callbackUrl));
   }
   pages(): BrowserPage[] {
     return [...this.owners].map(([id, owner]) => {
@@ -565,10 +640,11 @@ export class BrowserRuntime {
     this.selected.set(accountId, id); this.activeId = id;
     this.saveTabs(accountId);
     if (!this.window.contentView.children.includes(view)) this.window.contentView.addChildView(view);
-    for (const popup of this.popups.get(id) ?? []) { if (!this.isLocked(id) && this.visible) popup.show(); }
-    if (isChatUrl(view.webContents.getURL())) this.sessions.save(accountId, view.webContents.getURL());
+    for (const popup of this.popups.get(id) ?? []) { if (!this.isInteractionLocked(id, popup.webContents) && this.visible) popup.show(); }
+    const url = view.webContents.getURL();
+    if (!this.owners.get(id)?.customLink && isChatUrl(url) && !isAccountLoginUrl(url) && !hasAuthorizationParameters(url)) this.sessions.save(accountId, url);
     this.layout();
-    if (restoreFocus && this.visible && !this.isLocked(id)) view.webContents.focus();
+    if (restoreFocus && this.visible && !this.isInteractionLocked(id)) view.webContents.focus();
     this.changed();
   }
   select(accountId: string, pageId: string): void { this.activate(accountId, pageId); }
@@ -624,7 +700,7 @@ export class BrowserRuntime {
     if (this.closing || this.activeId || this.backgrounded()) return;
     const accountId = this.accounts.activeId();
     const id = accountId ? this.selected.get(accountId) : undefined;
-    if (accountId && id && this.owners.has(id) && !this.isLocked(id)) this.activate(accountId, id);
+    if (accountId && id && this.owners.has(id) && !this.isInteractionLocked(id)) this.activate(accountId, id);
   }
   private updateVisibility(): void {
     if (!this.backgrounded()) this.restoreSelectedView();
@@ -643,7 +719,7 @@ export class BrowserRuntime {
     const y = Math.min(height, Math.round(bounds.y));
     view.setBounds({ x, y, width: Math.max(0, Math.min(Math.round(bounds.width), width - x)),
       height: Math.max(0, Math.min(Math.round(bounds.height), height - y)) });
-    view.setVisible(!this.isLocked(this.activeId) && !this.backgrounded() && bounds.width > 0 && bounds.height > 0 && !this.errors.has(this.activeId));
+    view.setVisible(!this.isInteractionLocked(this.activeId) && !this.backgrounded() && bounds.width > 0 && bounds.height > 0 && !this.errors.has(this.activeId));
     this.markViewed(this.activeId);
   }
   page(): PageState | null {
@@ -771,9 +847,16 @@ export class BrowserRuntime {
     const id = this.createView(accountId, HOME_URL);
     this.activate(accountId, id);
   }
+  openLink(accountId: string, value: string): BrowserPage {
+    const url = webLink(value);
+    const id = this.createView(accountId, url, undefined, true);
+    this.accounts.activate(accountId);
+    this.activate(accountId, id);
+    return this.pages().find(page => page.id === id)!;
+  }
   control(accountId: string, action: string): void {
     const id = this.pageId(accountId); if (!id) return;
-    if (this.isLocked(id)) throw new AppError('请先接管当前会话');
+    if (this.isInteractionLocked(id)) throw new AppError('请先接管当前会话');
     const selectedContents = this.views.get(id)?.webContents;
     if (action === 'reload' && (this.activeId !== id || !selectedContents || selectedContents.isDestroyed())) {
       this.activate(accountId, id);
@@ -781,7 +864,7 @@ export class BrowserRuntime {
     }
     const contents = this.openView(id).webContents;
     if (action === 'reload') {
-      if (this.pageLoading(contents) || this.errors.has(id) || contents.isCrashed() || !isChatUrl(contents.getURL())) {
+      if (this.pageLoading(contents) || this.errors.has(id) || contents.isCrashed() || !this.allowedPageNavigation(id, contents.getURL())) {
         const view = this.views.get(id)!;
         void this.recoverPage(id, view, 'manual').catch(error => this.recoveryFailed(id, view, error));
       } else contents.reload();
@@ -872,9 +955,9 @@ export class BrowserRuntime {
     for (const id of this.previewFrames.keys()) if (!this.isLocked(id)) {
       this.previewFrames.delete(id); this.previewStale.delete(id); this.previewAwaken.delete(id);
     }
-    if (this.activeId && this.isLocked(this.activeId) && this.views.get(this.activeId)?.webContents?.isFocused()) this.window.webContents.focus();
+    if (this.activeId && this.isInteractionLocked(this.activeId) && this.views.get(this.activeId)?.webContents?.isFocused()) this.window.webContents.focus();
     for (const [id, popups] of this.popups) for (const popup of popups) {
-      if (this.isLocked(id) || !this.visible || this.activeId !== id) popup.hide(); else popup.show();
+      if (this.isInteractionLocked(id, popup.webContents) || !this.visible || this.activeId !== id) popup.hide(); else popup.show();
     }
     this.restoreSelectedView();
     this.layout();

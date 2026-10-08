@@ -35,6 +35,7 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 签名及公证；首次打�
 | 多账号独立登录 | 最多 20 个账号，各自保存 Cookie、存储和会话，支持重命名与删除 |
 | 恢复工作空间 | 重启后恢复每个账号打开的会话标签、选中项和窗口状态 |
 | 快速切换账号 | 每个账号当前选中的网页保持打开，切换时直接显示；其他闲置标签可安全休眠以节省内存 |
+| 打开登录或授权链接 | 在地址栏粘贴 HTTPS 链接，按 Enter 或点击箭头，在当前账号的新标签页打开 |
 | 老板键 | 在系统全局用 `Ctrl+Shift+S`（macOS 为 `⌘+Shift+S`）隐藏或唤回窗口 |
 | 系统托盘 | 点击窗口 × 默认隐藏到托盘，队列继续运行；单击托盘图标恢复，托盘菜单可完全退出 |
 | 专注模式 | 隐藏侧栏，保留账号切换和网页工具栏；快捷键可自定义 |
@@ -64,6 +65,14 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 签名及公证；首次打�
 队列输入框支持 **Enter 加入队列、Shift+Enter 换行**，也可用 Ctrl / Command + Enter。中文输入法选词时的回车不会提交，按住回车不会重复入队。编辑已有消息时 Ctrl / Command + Enter 保存、Esc 取消；Esc 优先收起消息操作，再关闭队列面板并保留未入队草稿。
 
 队列消息保存在本机。等待上一轮和等待本条回复各有 60 分钟预算，按网页完成状态接续，而非固定 30 分钟定时发送。观看模式自动跟随最新回复；抓图卡住会重试，内容更新但画面停住时会唤醒页面重新抓图。接管后可自由浏览。点击窗口 × 只隐藏到托盘，队列继续运行；从托盘明确退出后队列停止，重启后未手动暂停的后台队列自动恢复，已提交的消息继续观察原回复，不重发。聊天、工作和 Your dot 的短回复已在真实页面验证，30+ 分钟边界通过模拟时间测试；真实长回复和所有后台工具场景未穷尽验证。验证见 [Work / Your dot 队列](docs/validation/work-dot-queues-2026-09-30.md)，接口详见 [API](docs/API.md)。
+
+### 打开登录或授权链接
+
+在网页上方的地址栏粘贴完整的 **HTTPS 登录或授权链接**，按 **Enter** 或点击右侧箭头，会在当前账号下打开独立标签页，使用该账号的登录资料。此操作不新增队列任务，也不替换现有会话或队列；其他会话继续运行。
+
+授权标签页可在 HTTPS 页面之间跳转。若初始链接的 `redirect_uri` 明确指定 HTTP 本机回调，只允许返回该地址的主机、端口和路径。临时授权地址与网页标题不写入工作空间数据库或诊断日志；未完成的授权标签页在重启后回到 ChatGPT 首页。回到稳定的 ChatGPT 页面后，恢复普通网页的导航限制。
+
+登录页可直接人工操作。若原会话已有队列任务，登录操作不会解除其任务锁或将该会话交给手动控制。
 
 ### 设置、快捷键与版本更新
 
@@ -107,6 +116,8 @@ npm start
 ```sh
 node dist-electron/cli.cjs accounts
 node dist-electron/cli.cjs browser inspect --account <account-id>
+node dist-electron/cli.cjs open-link <account-id> "https://auth.example/authorize"
+node dist-electron/cli.cjs open-link --account <account-id> --url "https://auth.example/authorize"
 node dist-electron/cli.cjs snapshot <account-id>
 node dist-electron/cli.cjs conversations add --account <account-id> --url https://chatgpt.com/c/<id> --alias daily
 node dist-electron/cli.cjs prompt --account <account-id> --conversation daily --text "总结当前主题" --submit --wait --idempotency-key summary-001

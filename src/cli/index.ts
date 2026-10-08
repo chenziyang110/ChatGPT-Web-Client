@@ -19,6 +19,7 @@ const help = `ChatGPT Web Client — local agent CLI
   account-switch ID                   Activate an account
   account-remove ID CONFIRM_NAME      Delete account and local login data
   navigate ID URL                     Open a ChatGPT URL
+  open-link ID URL                    Open an authorization link in a new account tab
   snapshot ID                         Read visible page text
   browser inspect --account ID        Diagnose page readiness without queueing or sending
   prompt ID TEXT [--submit] [--wait]   Prepare draft, or explicitly submit
@@ -115,6 +116,7 @@ async function main(): Promise<void> {
     case 'account-switch': result = await call('accounts.switch', { id: requireArg(id, 'ID') }); break;
     case 'account-remove': result = await call('accounts.remove', { id: requireArg(id, 'ID'), confirmName: requireArg(value, 'confirmation name') }); break;
     case 'navigate': result = await create({ type: 'navigate', url: requireArg(options.url ?? value, 'URL') }); shouldWait = true; break;
+    case 'open-link': result = await call('browser.openLink', { accountId: account(), url: requireArg(options.url ?? value, 'URL') }); break;
     case 'snapshot': result = await create({ type: 'snapshot' }); shouldWait = true; break;
     case 'prompt': result = await create({ type: 'prompt', prompt: promptText(), submit: options.submit === true }); shouldWait = options.wait === true; break;
     case 'agent-prompt':

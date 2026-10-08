@@ -280,8 +280,25 @@ try {
   await page.keyboard.type('must not reach the page');
   assert.equal(await accountScript(work, "document.querySelector('textarea').value"), '');
   await accountScript(work, "document.querySelector('h1').textContent = 'Preview updated while locked'");
-  const updatedPreview = await rpc('browser.preview', { accountId: work.id });
+  // DOM execution can finish before the hidden page's compositor submits a new
+  // frame, and preview may share a capture already in flight. Observe the update
+  // within a deadline rather than requiring the very next capture to be fresh.
+  const previewDeadline = Date.now() + 10000;
+  let updatedPreview;
+  while (Date.now() < previewDeadline) {
+    updatedPreview = await rpc('browser.preview', { accountId: work.id });
+    if (updatedPreview?.image && updatedPreview.image !== previewImage.image) break;
+    await page.waitForTimeout(100);
+  }
+  assert.ok(updatedPreview?.image && updatedPreview.image !== previewImage.image,
+    'Preview must present the live update within 10 seconds while the page stays hidden');
   assert.notEqual(updatedPreview.image, previewImage.image, 'Preview captures live updates while page stays hidden');
+  assert.equal(await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children[0].getVisible()), false,
+    'Capturing updated previews keeps the running account page hidden');
+  assert.equal((await rpc('workspace.status')).pages.find(item => item.id === previewImage.pageId)?.locked, true,
+    'Capturing updated previews keeps the conversation locked');
+  assert.equal(await accountScript(work, "document.querySelector('textarea').value"), '',
+    'Preview keyboard input cannot reach the page after its frame updates');
   await page.screenshot({ path: 'test-results/agent-live-preview.png', animations: 'disabled' });
   await shortcut('T', [mod, 'alt']);
   await terminalTask(held, 'uncertain');

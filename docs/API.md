@@ -118,8 +118,9 @@ Success is `{ok:true,result:...}`. Errors use `{ok:false,error:"..."}` and non-2
 | `queues.move` | `{accountId,conversation,id,expectedUpdatedAt,neighborId,expectedNeighborUpdatedAt}` | Swap two adjacent pending items without sending the whole queue |
 | `queues.status/pause/resume/takeover` | `{}`, `{accountId,conversation?}`, `{accountId,conversation?,acknowledged?}`, `{accountId,conversation?}` | Account-wide or conversation-specific queue controls |
 | `browser.navigate` | `{accountId,url}` | Queued navigation; rejected with outstanding account work |
+| `browser.openLink` | `{accountId,url}` | Open a separate tab in the account and return its `BrowserPage`; does not create a task or replace a conversation queue |
 | `browser.inspect` | `{accountId,pageId?}` | Read-only page readiness, URL/title, editor presence, draft length, busy flag and structural DOM diagnostics; bypasses the sending queue without resuming it |
-| `browser.control` | `{accountId,action}` | Manual `reload/back/forward`; locked during execution |
+| `browser.control` | `{accountId,action}` | Manual `reload/back/forward`; locked during execution except on recognized account login pages |
 
 The trusted renderer additionally exposes `ui.bounds`, `ui.visibility`, `window.state/control`, `settings.api`, `agent.prompt.copy`, `browser.preview` and `tasks.decide`. HTTP cannot call those methods. Update operations (`updates.status/check/configure/open/download/cancel/install`) are also trusted IPC only. Downloads are explicit, architecture-specific and hash-verified. Normal installation refuses running tasks or webpage replies; an explicit trusted-UI `updates.install` request with `{ "force": true }` shuts down after persisting state and pausing queues. Interrupted sent tasks need human review and are never resent automatically. `agent.prompt.copy` accepts the same target parameters and writes the generated prompt to the system clipboard; ordinary `agent.prompt` only returns data.
 
@@ -139,6 +140,21 @@ Low-level click means the click ran; it does not promise a ChatGPT reply. Use su
 Editing, removal and reordering require the latest `updatedAt` from task reads. Full reordering must provide every pending item exactly once; `queues.move` accepts just two adjacent items. Both leave started tasks untouched. A changed version, started item or stale pending set returns 409 `QUEUE_CHANGED`; reread before offering another change. Editing preserves the original creation key and request hash: retrying the original creation returns the edited existing task instead of sending a duplicate. All these methods also work through `node dist-electron/cli.cjs rpc METHOD JSON`.
 
 ## External tools / AnythingCLI
+
+### Open a login or authorization link
+
+The desktop address bar accepts a pasted HTTPS URL. Press Enter or click its arrow to open a new tab in the current account. The equivalent IPC and authenticated HTTP method is `browser.openLink({accountId,url})`; the Node CLI supports both forms:
+
+```sh
+node dist-electron/cli.cjs open-link ACCOUNT_ID "https://auth.example/authorize"
+node dist-electron/cli.cjs open-link --account ACCOUNT_ID --url "https://auth.example/authorize"
+```
+
+The initial URL must use HTTPS, contain no URL username/password, and be at most 16384 characters. This is a direct tab operation, not a queued `browser.navigate` task: it selects the new tab while keeping existing conversation queues and their targets unchanged. The tab and its sandboxed popups share only the selected account's isolated browser partition, with no Node, preload or workspace IPC access.
+
+During this tab's temporary authorization mode, HTTPS navigation and popups are allowed. An initial `redirect_uri` may additionally grant one HTTP loopback callback on `localhost`, `127.0.0.1` or `[::1]`; the callback must match its origin (including port), path and any specified query parameters. Distinct duplicate `redirect_uri` values are rejected. Other HTTP destinations remain blocked. Returning to a stable ChatGPT page ends this temporary mode and restores the ordinary navigation policy.
+
+Temporary authorization URLs, callback parameters and page titles remain in memory rather than workspace database or diagnostic logs. An unfinished authorization tab restores to ChatGPT home after restart. Recognized account login pages allow human input and manual reload without releasing an existing conversation task's underlying queue lock; returning to its conversation restores that lock's ordinary input restrictions.
 
 ### Generate a scoped Agent handoff
 

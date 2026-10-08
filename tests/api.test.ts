@@ -66,6 +66,34 @@ test('CLI uses private discovery and returns machine-readable JSON through the r
   } finally { await api.stop(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('CLI opens a link directly in an account tab without queueing a task', async () => {
+  const dir = mkdtempSync(path.resolve('.test-cli-link-'));
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const api = new LocalApi(path.join(dir, 'agent-runtime.json'), async (method, params) => {
+    calls.push({ method, params }); return { id: 'auth-tab', accountId: params.accountId };
+  });
+  const run = async (args: string[]) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', '--data-dir', dir, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '', errors = '';
+    child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { errors += chunk; });
+    const code = await new Promise(resolve => child.on('close', resolve));
+    return { code, output, errors };
+  };
+  try {
+    await api.start();
+    const url = 'https://custom.example/authorize?scope=openid&state=private';
+    for (const args of [['open-link', 'work', url], ['open-link', '--account', 'work', '--url', url]]) {
+      const result = await run(args);
+      assert.equal(result.code, 0, result.errors);
+      assert.equal(JSON.parse(result.output).id, 'auth-tab');
+      assert.equal(result.errors, '');
+    }
+    assert.deepEqual(calls, Array.from({ length: 2 }, () => ({ method: 'browser.openLink', params: { accountId: 'work', url } })));
+    assert.equal((await run(['open-link', 'work'])).code, 1);
+    assert.equal(calls.length, 2);
+  } finally { await api.stop(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('CLI targets account/conversation, returns the same task on retry, and client timeout does not cancel', async () => {
   const dir = mkdtempSync(path.resolve('.test-cli-routing-'));
   const requests: Array<{ method: string; params: Record<string, unknown> }> = [];

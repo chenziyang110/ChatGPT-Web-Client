@@ -281,6 +281,29 @@ try {
   }, 'Manual retry page was not selected before cap testing');
   const retryPage = (await rpc('workspace.status')).page;
   const retryOriginal = await requireWebContentsFor(first, retryUrl);
+  // A task may finish as soon as the composer mounts, before the original
+  // navigation's final native loading event. Start the fault on a settled
+  // document so that event cannot cancel the deliberately blocked reload.
+  await until(async () => {
+    const contents = await webContentsById(first, retryOriginal.id);
+    return !!contents && !contents.loading && !contents.waitingResponse && !contents.loadingMainFrame &&
+      await runInPageById(first, retryOriginal.id,
+        "document.readyState === 'complete' && !!document.querySelector('#prompt-textarea')");
+  }, 'Manual retry document must finish its original navigation before blocking reload');
+  await desktop.evaluate(({ session, webContents }, { partition, id }) => {
+    const contents = webContents.getAllWebContents().find(item => item.session === session.fromPartition(partition) && item.id === id);
+    if (!contents || contents.isDestroyed()) throw new Error(`Fixture WebContents missing: ${id}`);
+    const started = Date.now();
+    const record = (event, details = {}) => globalThis.pendingNavigationEvents.push({ phase: 'capped-reload', event, id,
+      elapsedMs: Date.now() - started, loading: contents.isDestroyed() ? undefined : contents.isLoading(),
+      waitingResponse: contents.isDestroyed() ? undefined : contents.isWaitingForResponse(),
+      loadingMainFrame: contents.isDestroyed() ? undefined : contents.isLoadingMainFrame(), ...details });
+    contents.on('did-start-navigation', details => record('did-start-navigation', { url: details.url, isMainFrame: details.isMainFrame, isSameDocument: details.isSameDocument }));
+    contents.on('did-start-loading', () => record('did-start-loading'));
+    contents.on('did-stop-loading', () => record('did-stop-loading'));
+    contents.on('did-fail-load', (_event, code, description, url, isMainFrame) => record('did-fail-load', { code, description, url, isMainFrame }));
+    contents.on('did-navigate', (_event, url) => record('did-navigate', { url }));
+  }, { partition: first.partition, id: retryOriginal.id });
   await desktop.evaluate((_electron, url) => { globalThis.blockedTargetUrls.add(url); globalThis.blockedTargetUrls.add(new URL(url).pathname); }, retryUrl);
   await rpc('browser.control', { accountId: first.id, action: 'reload' });
   await until(async () => (await desktop.evaluate(() => globalThis.blockedMainLoads)) >= 4,

@@ -121,33 +121,38 @@ const contentsById = (account, id) => desktop.evaluate(({ session, webContents }
   return { id: contents.id, url: contents.getURL(), title: contents.getTitle(), loading: contents.isLoading(),
     waitingResponse: contents.isWaitingForResponse(), loadingMainFrame: contents.isLoadingMainFrame() };
 }, { partition: account.partition, id });
-const clickSelector = (account, id, selector) => desktop.evaluate(async ({ app, BrowserWindow, session, webContents }, { partition, id, selector }) => {
-  const isolated = session.fromPartition(partition);
-  const contents = webContents.getAllWebContents().find(item => item.session === isolated && item.id === id);
-  if (!contents || contents.isDestroyed()) throw new Error(`Missing WebContents ${id}`);
-  const rect = await contents.mainFrame.executeJavaScript(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), text: el.textContent, disabled: !!el.disabled }; })()`);
-  if (!rect) throw new Error(`Missing selector ${selector} at ${contents.getURL()}`);
-  // Account WebContentsViews are children of the main window, whereas login
-  // popups own their WebContents. Focus the actual visible host in either case.
-  const host = BrowserWindow.fromWebContents(contents) ?? BrowserWindow.getAllWindows().find(window =>
-    !window.isDestroyed() && window.contentView.children.some(child => child.webContents === contents));
-  if (!host || host.isDestroyed() || !host.isVisible()) throw new Error(`Missing visible host for WebContents ${id}`);
-  if (process.platform === 'darwin') app.focus({ steal: true });
-  host.focus();
-  const focusDeadline = Date.now() + 3000;
-  contents.focus();
-  while (!host.isFocused() || !contents.isFocused()) {
-    if (host.isDestroyed() || contents.isDestroyed() || Date.now() >= focusDeadline)
-      throw new Error(`Native host/page did not focus for WebContents ${id}`);
-    if (!host.isFocused()) host.focus();
+const clickSelector = async (account, id, selector) => {
+  // A committed URL/title can precede the new document's body and handlers.
+  // Pending OAuth iframes may keep native isLoading true after DOM readiness.
+  await waitSelector(account, id, selector, `Click target ${selector} did not become interactive in WebContents ${id}`, true);
+  return desktop.evaluate(async ({ app, BrowserWindow, session, webContents }, { partition, id, selector }) => {
+    const isolated = session.fromPartition(partition);
+    const contents = webContents.getAllWebContents().find(item => item.session === isolated && item.id === id);
+    if (!contents || contents.isDestroyed()) throw new Error(`Missing WebContents ${id}`);
+    const rect = await contents.mainFrame.executeJavaScript(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), text: el.textContent, disabled: !!el.disabled }; })()`);
+    if (!rect) throw new Error(`Missing selector ${selector} at ${contents.getURL()}`);
+    // Account WebContentsViews are children of the main window, whereas login
+    // popups own their WebContents. Focus the actual visible host in either case.
+    const host = BrowserWindow.fromWebContents(contents) ?? BrowserWindow.getAllWindows().find(window =>
+      !window.isDestroyed() && window.contentView.children.some(child => child.webContents === contents));
+    if (!host || host.isDestroyed() || !host.isVisible()) throw new Error(`Missing visible host for WebContents ${id}`);
+    if (process.platform === 'darwin') app.focus({ steal: true });
+    host.focus();
+    const focusDeadline = Date.now() + 3000;
     contents.focus();
-    await new Promise(resolve => setTimeout(resolve, 25));
-  }
-  contents.sendInputEvent({ type: 'mouseMove', x: rect.x, y: rect.y });
-  contents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: rect.x, y: rect.y });
-  contents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: rect.x, y: rect.y });
-  return { url: contents.getURL(), rect };
-}, { partition: account.partition, id, selector });
+    while (!host.isFocused() || !contents.isFocused()) {
+      if (host.isDestroyed() || contents.isDestroyed() || Date.now() >= focusDeadline)
+        throw new Error(`Native host/page did not focus for WebContents ${id}`);
+      if (!host.isFocused()) host.focus();
+      contents.focus();
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    contents.sendInputEvent({ type: 'mouseMove', x: rect.x, y: rect.y });
+    contents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: rect.x, y: rect.y });
+    contents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: rect.x, y: rect.y });
+    return { url: contents.getURL(), rect };
+  }, { partition: account.partition, id, selector });
+};
 const scriptIn = (account, id, script) => desktop.evaluate(({ session, webContents }, { partition, id, script }) => {
   const isolated = session.fromPartition(partition);
   const contents = webContents.getAllWebContents().find(item => item.session === isolated && item.id === id);
@@ -177,10 +182,27 @@ const startPendingMainNavigationById = (account, id, url) => desktop.evaluate(({
     code: error.code, errno: error.errno, message: error.message }));
 }, { partition: account.partition, id, url });
 
-const waitSelector = (account, id, selector, label = `Selector ${selector} did not become ready`) => until(async () => {
-  const contents = await contentsById(account, id);
-  return !!contents && !contents.loading && await scriptIn(account, id, `!!document.querySelector(${JSON.stringify(selector)})`);
-}, label);
+const waitSelector = (account, id, selector, label = `Selector ${selector} did not become ready`, allowPendingResources = false) => until(() =>
+  desktop.evaluate(async ({ session, webContents }, { partition, id, selector, allowPendingResources }) => {
+    const contents = webContents.getAllWebContents().find(item => item.session === session.fromPartition(partition) && item.id === id);
+    if (!contents || contents.isDestroyed() || contents.isWaitingForResponse() || (!allowPendingResources && contents.isLoading())) return false;
+    const url = contents.getURL();
+    try {
+      const ready = await contents.mainFrame.executeJavaScript(`(() => {
+        if (document.documentURI !== ${JSON.stringify(url)} || document.readyState === 'loading') return false;
+        const element = document.querySelector(${JSON.stringify(selector)});
+        if (!element || element.disabled) return false;
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility === 'visible' && rect.width > 0 && rect.height > 0;
+      })()`);
+      return ready && !contents.isDestroyed() && contents.getURL() === url && !contents.isWaitingForResponse();
+    } catch (error) {
+      // Navigation can retire an execution context while this bounded poll runs.
+      if (contents.isDestroyed() || /context.*destroyed|frame.*disposed|frame.*destroyed/i.test(String(error))) return false;
+      throw error;
+    }
+  }, { partition: account.partition, id, selector, allowPendingResources }), label);
 
 const popupFor = account => desktop.evaluate(({ BrowserWindow, session }, partition) => {
   const isolated = session.fromPartition(partition);
@@ -234,6 +256,7 @@ try {
   await waitSelector(first, oauthHomeContents.id, '#google-login', 'Google login button did not become ready');
   await clickSelector(first, oauthHomeContents.id, '#google-login');
   await until(async () => (await contentsById(first, oauthHomeContents.id))?.url.startsWith('https://auth.openai.com/'), 'ChatGPT login click did not navigate to OpenAI auth');
+  await waitSelector(first, oauthHomeContents.id, '#continue-google', 'OpenAI auth document did not become ready');
   await clickSelector(first, oauthHomeContents.id, '#continue-google');
   await until(async () => (await contentsById(first, oauthHomeContents.id))?.url.startsWith('https://accounts.google.com/'), 'OpenAI auth did not navigate to Google');
   await waitSelector(first, oauthHomeContents.id, '#account-choice', 'Google account choice did not become ready');
@@ -249,7 +272,7 @@ try {
     void contents.loadURL('https://accounts.google.com/o/oauth2/v2/auth?pending=1&redirect_uri=' + encodeURIComponent('https://auth.openai.com/callback')).catch(() => {});
   }, { partition: first.partition, id: pendingGoogleContents.id });
   await until(async () => (await contentsById(first, pendingGoogleContents.id))?.url.startsWith('https://accounts.google.com/'), 'Pending Google page did not load');
-  await until(async () => await scriptIn(first, pendingGoogleContents.id, "!!document.querySelector('#account-choice')"), 'Pending Google page DOM did not become interactive');
+  await waitSelector(first, pendingGoogleContents.id, '#account-choice', 'Pending Google page DOM did not become interactive', true);
   const pendingGoogleBefore = await contentsById(first, pendingGoogleContents.id);
   await new Promise(resolve => setTimeout(resolve, 1800));
   const pendingGoogleAfter = await contentsById(first, pendingGoogleContents.id);
@@ -312,6 +335,7 @@ try {
     void contents.loadURL('https://auth.openai.com/login?connection=google&return_to=https%3A%2F%2Fchatgpt.com%2Fc%2Flocked-queue').catch(() => {});
   }, { partition: first.partition, id: lockedContents.id });
   await until(async () => (await contentsById(first, lockedContents.id))?.url.startsWith('https://auth.openai.com/'), 'Locked page did not reach auth');
+  await waitSelector(first, lockedContents.id, '#continue-google', 'Locked OpenAI auth document did not become ready');
   await clickSelector(first, lockedContents.id, '#continue-google');
   await until(async () => (await contentsById(first, lockedContents.id))?.url.startsWith('https://accounts.google.com/'), 'Locked auth page could not click through to Google');
   await waitSelector(first, lockedContents.id, '#account-choice', 'Locked Google account choice did not become ready');
@@ -338,6 +362,7 @@ try {
     void contents.loadURL('https://auth.openai.com/login?post=1').catch(() => {});
   }, { partition: first.partition, id: postContents.id });
   await until(async () => (await contentsById(first, postContents.id))?.url.startsWith('https://auth.openai.com/'), 'POST test did not reach auth');
+  await waitSelector(first, postContents.id, '#post-callback-button', 'POST auth document did not become ready');
   await clickSelector(first, postContents.id, '#post-callback-button');
   await until(async () => (await contentsById(first, postContents.id))?.url.startsWith('https://chatgpt.com/'), 'POST callback did not return to ChatGPT');
   assert.ok(await desktop.evaluate(() => globalThis.oauthRequests.some(request => request.method === 'POST' && request.url.startsWith('https://auth.openai.com/callback'))), 'OAuth callback POST was not observed');

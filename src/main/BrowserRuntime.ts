@@ -36,6 +36,7 @@ const MONITOR_INTERVAL_MS = 1_500;
 const PREVIEW_TIMEOUT_MS = 5_000;
 const DEFAULT_PAGE_LOAD_TIMEOUT_MS = 20_000;
 const PAGE_LOAD_TIMEOUT_ERROR = '网页加载时间过长，请检查网络或点击“恢复页面”重试';
+const PAGE_NAVIGATION_INCOMPLETE_ERROR = '网页导航未完成，正在自动恢复';
 const PAGE_PROBE_TIMEOUT_MS = 2_000;
 const MAX_PAGE_RECOVERIES = 3;
 type RecoveryReason = 'load_timeout' | 'load_failed' | 'renderer_gone' | 'unresponsive' | 'manual';
@@ -169,7 +170,16 @@ export class BrowserRuntime {
         busy: snapshot.busy, hibernationReady: snapshot.editor && !snapshot.error, activityKey });
       this.observer.observe(owner.accountId, snapshot);
       this.markViewed(id, snapshot.url);
-      if (snapshot.editor && !snapshot.error) this.pageHealthy(id);
+      if (this.hasUncommittedNavigation(view)) {
+        // A draft can keep the old responsive document resident after a failed
+        // navigation. Resume its destination once that draft is cleared, without
+        // moving the draft into a different conversation or interrupting a reply.
+        if (!snapshot.hasDraft && !snapshot.busy) {
+          this.errors.set(id, PAGE_NAVIGATION_INCOMPLETE_ERROR);
+          this.scheduleRecovery(id, view, 'load_failed');
+          this.layout(); this.changed();
+        }
+      } else if (snapshot.editor && !snapshot.error) this.pageHealthy(id);
     } catch {
       if (!this.closing && this.views.get(id) === view) {
         owner.hibernationReady = false;
@@ -180,6 +190,11 @@ export class BrowserRuntime {
   }
   private pageLoading(contents: WebContents): boolean {
     return contents.isLoading() && !this.usableContents.has(contents);
+  }
+  private hasUncommittedNavigation(view: WebContentsView): boolean {
+    const target = this.pendingNavigations.get(view);
+    const contents = view.webContents;
+    return !!target && !!contents && !contents.isDestroyed() && contents.getURL() !== target;
   }
   private async loginDocumentReady(id: string, contents: WebContents): Promise<boolean> {
     const url = contents.getURL();
@@ -202,7 +217,7 @@ export class BrowserRuntime {
     const contents = view.webContents;
     const current = () => this.views.get(id) === view && this.loadGenerations.get(view) === generation;
     if (!contents || !current() || contents.isDestroyed() || !this.pageLoading(contents)) return;
-    if ((isAccountLoginUrl(contents.getURL()) || this.owners.get(id)?.customLink) && !contents.isWaitingForResponse()) {
+    if ((isAccountLoginUrl(contents.getURL()) || this.owners.get(id)?.customLink) && !contents.isWaitingForResponse() && !this.hasUncommittedNavigation(view)) {
       try {
         const ready = await this.loginDocumentReady(id, contents);
         if (!current() || contents.isDestroyed()) return;
@@ -215,7 +230,7 @@ export class BrowserRuntime {
     }
     // isLoading() includes images and iframes. A usable composer must remain visible
     // and queueable even if an unrelated resource never finishes loading.
-    if (isChatUrl(contents.getURL()) && !contents.isWaitingForResponse()) {
+    if (isChatUrl(contents.getURL()) && !contents.isWaitingForResponse() && !this.hasUncommittedNavigation(view)) {
       try {
         const page = pageOperationResult<Page>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'inspect' }))));
         if (!current() || contents.isDestroyed()) return;
@@ -248,7 +263,7 @@ export class BrowserRuntime {
     // crashed pages have no usable document to preserve.
     const owner = this.owners.get(id);
     const contents = view.webContents;
-    if (owner?.hasDraft && contents && !contents.isDestroyed() && !contents.isCrashed() && !this.pageLoading(contents)) return;
+    if (owner?.hasDraft && contents && !contents.isDestroyed() && !contents.isCrashed() && !this.pageLoading(contents) && !this.hasUncommittedNavigation(view)) return;
     const generation = this.loadGenerations.get(view);
     state.timer = setTimeout(() => {
       state.timer = undefined;
@@ -295,7 +310,35 @@ export class BrowserRuntime {
     const contents = view.webContents;
     const stillDamaged = async () => {
       if (!current()) return false;
-      if (reason === 'manual' || !contents || contents.isDestroyed() || contents.isCrashed() || contents.isWaitingForResponse()) return true;
+      if (reason === 'manual' || !contents || contents.isDestroyed() || contents.isCrashed()) return true;
+      if (this.hasUncommittedNavigation(view)) {
+        // The previous document can still accept a draft or start a reply while
+        // navigation waits. Preserve either in place; a ready old document cannot cancel
+        // recovery of the requested destination. Never inspect provider forms.
+        const previousUrl = contents.getURL();
+        if (isChatUrl(previousUrl) && !isAccountLoginUrl(previousUrl) && !hasAuthorizationParameters(previousUrl) && !owner.customLink) {
+          try {
+            const page = pageOperationResult<Page>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'inspect' }))));
+            if (!current()) return false;
+            if (contents.getURL() === previousUrl && this.hasUncommittedNavigation(view) && page.editor) {
+              Object.assign(owner, { hasDraft: !!page.draft.trim(), busy: page.busy });
+              if (owner.hasDraft || owner.busy) {
+                this.usableContents.add(contents); this.errors.delete(id);
+                this.layout(); this.changed(); return false;
+              }
+            }
+          } catch {
+            // A failed probe must not discard a draft or reply observed in this
+            // document. A later observation can release the deferred navigation.
+            if (current() && (owner.hasDraft || owner.busy)) {
+              this.usableContents.add(contents); this.errors.delete(id);
+              this.layout(); this.changed(); return false;
+            }
+          }
+        }
+        return current() && this.hasUncommittedNavigation(view);
+      }
+      if (contents.isWaitingForResponse()) return true;
       try {
         if (await this.loginDocumentReady(id, contents)) {
           if (!current()) return false;
@@ -528,7 +571,16 @@ export class BrowserRuntime {
     view.webContents.on('did-stop-loading', () => {
       if (this.views.get(id) !== view) return;
       clearLoadTimer();
-      if (this.errors.get(id) === PAGE_LOAD_TIMEOUT_ERROR) this.errors.delete(id);
+      // Chromium can reject a navigation without did-fail-load, leaving the old
+      // document visible. Its usable composer does not mean the requested page
+      // loaded, and must not cancel the pending destination's recovery.
+      if (this.hasUncommittedNavigation(view)) {
+        this.errors.set(id, PAGE_NAVIGATION_INCOMPLETE_ERROR);
+        this.diagnostics?.record('page_navigation_incomplete');
+        this.scheduleRecovery(id, view, 'load_failed');
+        update(); return;
+      }
+      if ([PAGE_LOAD_TIMEOUT_ERROR, PAGE_NAVIGATION_INCOMPLETE_ERROR].includes(this.errors.get(id) ?? '')) this.errors.delete(id);
       const recovery = this.recoveries.get(id);
       if (!this.errors.has(id) && recovery?.timer) { clearTimeout(recovery.timer); recovery.timer = undefined; }
       updateTitle(view.webContents.getTitle()); update();
@@ -538,8 +590,14 @@ export class BrowserRuntime {
       updateTitle(title); update();
     });
     const save = (url: string) => { if (!this.closing && this.views.get(id) === view && isChatUrl(url)) this.savePage(id, url); update(); };
-    view.webContents.on('did-navigate', (_event, url) => { this.pendingNavigations.delete(view); save(url); });
-    view.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => { if (isMainFrame) save(url); });
+    const navigationCommitted = () => {
+      this.pendingNavigations.delete(view);
+      if (this.views.get(id) === view && this.errors.get(id) === PAGE_NAVIGATION_INCOMPLETE_ERROR) this.errors.delete(id);
+    };
+    view.webContents.on('did-navigate', (_event, url) => { navigationCommitted(); save(url); });
+    view.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
+      if (isMainFrame) { navigationCommitted(); save(url); }
+    });
     view.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
       if (this.views.get(id) === view && isMainFrame && code !== -3) {
         clearLoadTimer(); this.errors.set(id, `${description} (${code})`); update();

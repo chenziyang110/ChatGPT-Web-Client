@@ -7,6 +7,7 @@ import { fixture } from './chatgpt-fixture.mjs';
 const root = path.resolve('.');
 const directory = await mkdtemp(path.join(root, '.test-stuck-view-recovery-'));
 const bootstrap = path.join(directory, 'fixture.cjs');
+const mainEntry = process.env.WORKSPACE_TEST_MAIN_CJS || path.join(root, 'dist-electron/main.cjs');
 const slowResourceFixture = fixture.replace('</main>', '<iframe id="stuck-subresource" src="/slow-resource" hidden></iframe></main>');
 assert.notEqual(slowResourceFixture, fixture);
 
@@ -44,7 +45,7 @@ app.on('session-created', isolated => {
     return new Response(body, { headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' } });
   });
 });
-require(${JSON.stringify(path.join(root, 'dist-electron/main.cjs'))});`);
+require(${JSON.stringify(mainEntry)});`);
 
 const env = { ...process.env, WORKSPACE_USER_DATA: directory, WORKSPACE_PAGE_LOAD_TIMEOUT_MS: '300',
   WORKSPACE_PAGE_IDLE_MS: '3600000', WORKSPACE_HIDDEN_PAGE_IDLE_MS: '3600000' };
@@ -372,10 +373,17 @@ try {
     const pendingMain = await webContentsById(first, usableResetOriginal.id);
     return !!pendingMain?.loading && pendingMain.waitingResponse && pendingMain.loadingMainFrame;
   }, 'Real main navigation after a usable iframe must wait for a main-frame response');
+  // Interrupt the real request before a document commits. Chromium keeps the
+  // old composer visible; it must not be mistaken for the requested page.
+  await desktop.evaluate(({ session, webContents }, { partition, id }) => {
+    const contents = webContents.getAllWebContents().find(item => item.session === session.fromPartition(partition) && item.id === id);
+    if (!contents || contents.isDestroyed()) throw new Error(`Fixture WebContents missing: ${id}`);
+    contents.stop();
+  }, { partition: first.partition, id: usableResetOriginal.id });
   let sawMainRecoveryState = false;
   await until(async () => {
     const pageError = (await rpc('workspace.status')).page?.error ?? '';
-    sawMainRecoveryState ||= /加载超时|恢复/.test(pageError);
+    sawMainRecoveryState ||= /加载超时|导航未完成|恢复/.test(pageError);
     const contents = await webContentsFor(first, usableResetDestinationUrl);
     return sawMainRecoveryState || !!contents && contents.id !== usableResetOriginal.id;
   }, 'Real pending main navigation did not enter recovery or recreate the WebContents', 5000);
@@ -387,10 +395,125 @@ try {
   assert.equal(usableResetRestored?.url, usableResetDestinationUrl, 'Main navigation recovery keeps the requested conversation URL');
   assert.equal(usableResetRestored?.conversationId, usableResetPage.conversationId, 'Main navigation recovery preserves the conversation binding');
   assert.equal((await rpc('workspace.status')).page?.id, usableResetPage.id, 'Main navigation recovery preserves the selected tab');
+
+  const draftStartUrl = 'https://chatgpt.com/c/draft-guard-start';
+  const draftDestinationUrl = 'https://chatgpt.com/c/draft-guard-next';
+  const draftNav = await rpc('browser.navigate', { accountId: first.id, url: draftStartUrl });
+  await until(async () => (await rpc('tasks.get', { id: draftNav.id })).status === 'done',
+    'Draft guard start page did not open');
+  const draftPage = (await rpc('workspace.status')).page;
+  const draftOriginal = await requireWebContentsFor(first, draftStartUrl);
+  const humanDraft = 'keep this human draft on its original conversation';
+  await startPendingMainNavigationById(first, draftOriginal.id, draftDestinationUrl);
+  await until(async () => {
+    const pendingMain = await webContentsById(first, draftOriginal.id);
+    return !!pendingMain?.loading && pendingMain.waitingResponse && pendingMain.loadingMainFrame;
+  }, 'Draft guard fixture must start a real pending main-frame navigation');
+  await runInPageById(first, draftOriginal.id,
+    `(() => { const composer = document.querySelector('#prompt-textarea'); composer.value = ${JSON.stringify(humanDraft)}; composer.dispatchEvent(new Event('input', { bubbles: true })); })();`);
+  await desktop.evaluate(({ session, webContents }, { partition, id }) => {
+    const contents = webContents.getAllWebContents().find(item => item.session === session.fromPartition(partition) && item.id === id);
+    if (!contents || contents.isDestroyed()) throw new Error(`Fixture WebContents missing: ${id}`);
+    contents.stop();
+  }, { partition: first.partition, id: draftOriginal.id });
+  await new Promise(resolve => setTimeout(resolve, 2300));
+  assert.equal((await requireWebContentsFor(first, draftStartUrl)).id, draftOriginal.id,
+    'Interrupted navigation must preserve the original WebContents containing a human draft');
+  assert.equal(await runInPageById(first, draftOriginal.id, "document.querySelector('#prompt-textarea').value"), humanDraft,
+    'Interrupted navigation must preserve the human draft text in its original conversation');
+  const draftVisible = await desktop.evaluate(({ BrowserWindow, session }, { partition, id }) => {
+    const isolated = session.fromPartition(partition);
+    const window = BrowserWindow.getAllWindows().find(window => !window.isDestroyed() && window.webContents.getURL().startsWith('file:'));
+    const view = window?.contentView.children.find(view => view.webContents && !view.webContents.isDestroyed() && view.webContents.session === isolated && view.webContents.id === id);
+    if (!view) return false;
+    const bounds = view.getBounds();
+    return window.isVisible() && view.getVisible() && bounds.width > 0 && bounds.height > 0;
+  }, { partition: first.partition, id: draftOriginal.id });
+  assert.equal(draftVisible, true, 'The preserved draft page must remain attached and visible for editing');
+  const preservedDraftPage = (await rpc('workspace.status')).pages.find(page => page.id === draftPage.id);
+  assert.equal(preservedDraftPage?.url, draftStartUrl, 'A held draft must remain on its original conversation URL');
+  assert.equal(preservedDraftPage?.conversationId, draftPage.conversationId, 'A held draft must retain its original conversation binding');
+  assert.equal((await rpc('workspace.status')).page?.id, draftPage.id, 'Draft protection keeps the original tab selected');
+
+  await runInPageById(first, draftOriginal.id,
+    "(() => { const composer = document.querySelector('#prompt-textarea'); composer.value = ''; composer.dispatchEvent(new Event('input', { bubbles: true })); })();");
+  await until(async () => {
+    const contents = await webContentsFor(first, draftDestinationUrl);
+    return !!contents && contents.id !== draftOriginal.id && (await rpc('browser.inspect', { accountId: first.id, pageId: draftPage.id })).readiness === 'ready';
+  }, 'Clearing the draft must automatically restore the pending destination without a reload');
+  const draftRestored = (await rpc('workspace.status')).pages.find(page => page.id === draftPage.id);
+  assert.equal(draftRestored?.url, draftDestinationUrl, 'Draft release restores the requested destination');
+  assert.equal((await rpc('workspace.status')).page?.id, draftPage.id, 'Draft release preserves the selected tab');
+  assert.equal(await runInPage(first, draftDestinationUrl, "document.querySelector('#prompt-textarea').value"), '',
+    'Draft text must never be moved into another conversation');
+
+  const busyStartUrl = 'https://chatgpt.com/c/busy-guard-start';
+  const busyDestinationUrl = 'https://chatgpt.com/c/busy-guard-next';
+  const busyNav = await rpc('browser.navigate', { accountId: first.id, url: busyStartUrl });
+  await until(async () => (await rpc('tasks.get', { id: busyNav.id })).status === 'done',
+    'Busy guard start page did not open');
+  const busyPage = (await rpc('workspace.status')).page;
+  const busyOriginal = await requireWebContentsFor(first, busyStartUrl);
+  const heldPrompt = 'HOLD:keep this manual reply while navigation is pending';
+  await startPendingMainNavigationById(first, busyOriginal.id, busyDestinationUrl);
+  await until(async () => {
+    const pendingMain = await webContentsById(first, busyOriginal.id);
+    return !!pendingMain?.loading && pendingMain.waitingResponse && pendingMain.loadingMainFrame;
+  }, 'Busy guard fixture must start a real pending main-frame navigation');
+  await runInPageById(first, busyOriginal.id,
+    `(() => { const composer = document.querySelector('#prompt-textarea'); composer.value = ${JSON.stringify(heldPrompt)}; composer.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('[data-testid="send-button"]').click(); })();`);
+  const heldStart = await runInPageById(first, busyOriginal.id,
+    "({ draft: document.querySelector('#prompt-textarea').value, busy: !!document.querySelector('[data-testid=stop-button]'), sends: window.fixtureSendCount })");
+  assert.equal(heldStart.draft, '', 'The submitted human draft is empty while its reply is held');
+  assert.equal(heldStart.busy, true, 'The actual fixture send must start a held reply');
+  assert.equal(heldStart.sends, 1, 'The human prompt is submitted once before navigation interruption');
+  await desktop.evaluate(({ session, webContents }, { partition, id }) => {
+    const contents = webContents.getAllWebContents().find(item => item.session === session.fromPartition(partition) && item.id === id);
+    if (!contents || contents.isDestroyed()) throw new Error(`Fixture WebContents missing: ${id}`);
+    contents.stop();
+  }, { partition: first.partition, id: busyOriginal.id });
+  await new Promise(resolve => setTimeout(resolve, 2300));
+  assert.equal((await requireWebContentsFor(first, busyStartUrl)).id, busyOriginal.id,
+    'Interrupted navigation must preserve the original WebContents while its reply is busy');
+  assert.equal(await runInPageById(first, busyOriginal.id, "document.querySelector('#prompt-textarea').value"), '',
+    'Busy-only protection must work without a remaining draft');
+  assert.equal(await runInPageById(first, busyOriginal.id, "!!document.querySelector('[data-testid=stop-button]')"), true,
+    'The held reply must keep running in the original page');
+  const busyVisible = await desktop.evaluate(({ BrowserWindow, session }, { partition, id }) => {
+    const isolated = session.fromPartition(partition);
+    const window = BrowserWindow.getAllWindows().find(window => !window.isDestroyed() && window.webContents.getURL().startsWith('file:'));
+    const view = window?.contentView.children.find(view => view.webContents && !view.webContents.isDestroyed() && view.webContents.session === isolated && view.webContents.id === id);
+    if (!view) return false;
+    const bounds = view.getBounds();
+    return window.isVisible() && view.getVisible() && bounds.width > 0 && bounds.height > 0;
+  }, { partition: first.partition, id: busyOriginal.id });
+  assert.equal(busyVisible, true, 'The original reply remains attached and visible while the target is pending');
+  await runInPageById(first, busyOriginal.id, "messages.at(-1).text += ' [still working]'; render();");
+  await new Promise(resolve => setTimeout(resolve, 800));
+  assert.equal((await requireWebContentsFor(first, busyStartUrl)).id, busyOriginal.id,
+    'Reply progress must continue in the same original WebContents');
+  assert.equal(await runInPageById(first, busyOriginal.id,
+    "document.querySelector('[data-message-author-role=assistant]').textContent"), `Fixture reply: ${heldPrompt} [still working]`,
+  'The held reply continues updating before navigation resumes');
+  const preservedBusyPage = (await rpc('workspace.status')).pages.find(page => page.id === busyPage.id);
+  assert.equal(preservedBusyPage?.url, busyStartUrl, 'A running reply retains its original conversation URL');
+  assert.equal(preservedBusyPage?.conversationId, busyPage.conversationId, 'A running reply retains its original conversation binding');
+  assert.equal((await rpc('workspace.status')).page?.id, busyPage.id, 'Busy protection keeps the original tab selected');
+
+  await runInPageById(first, busyOriginal.id, 'window.fixtureFinish();');
+  await until(async () => {
+    const contents = await webContentsFor(first, busyDestinationUrl);
+    return !!contents && contents.id !== busyOriginal.id && (await rpc('browser.inspect', { accountId: first.id, pageId: busyPage.id })).readiness === 'ready';
+  }, 'Finishing the held reply must automatically restore the pending destination without a reload');
+  const busyRestored = (await rpc('workspace.status')).pages.find(page => page.id === busyPage.id);
+  assert.equal(busyRestored?.url, busyDestinationUrl, 'Reply completion restores the requested destination');
+  assert.equal((await rpc('workspace.status')).page?.id, busyPage.id, 'Reply completion preserves the selected tab');
+  assert.equal(await runInPage(first, busyDestinationUrl, 'window.fixtureSendCount || 0'), 0,
+    'The original human prompt must not be replayed into the new conversation');
   console.log(JSON.stringify({ pendingNavigationEvents: await desktop.evaluate(() => globalThis.pendingNavigationEvents) }));
 
   passed = true;
-  console.log('Stuck view recovery passed: damaged WebContents are recreated, queued messages survive and resume once, manual recovery resets exhausted retries, account switching stays responsive, ready pages with stuck subresources are not rebuilt, responsive pages cancel recovery timers, and usable pages reset on later main navigation stalls.');
+  console.log('Stuck view recovery passed: damaged WebContents are recreated, queued messages survive and resume once, manual recovery resets exhausted retries, account switching stays responsive, ready pages with stuck subresources are not rebuilt, responsive pages cancel recovery timers, interrupted main navigation restores its target, and human drafts or running replies stay visible until cleared or finished before automatic recovery.');
 } catch (error) {
   const runtimeLog = await readFile(path.join(directory, 'logs/runtime.jsonl'), 'utf8')
     .then(content => content.trim().split('\n').slice(-20).map(line => JSON.parse(line)))

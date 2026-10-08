@@ -40,11 +40,14 @@ await writeFile(bootstrap, `const { app, Notification, dialog, shell } = require
 Notification.isSupported = () => false;
 globalThis.oauthRequests = [];
 globalThis.externalOpenAttempts = [];
+globalThis.oneShotBlockedTargetUrls = new Set();
+globalThis.pendingNavigationEvents = [];
 dialog.showMessageBox = async (_window, options) => { globalThis.externalOpenAttempts.push({ kind: 'dialog', message: options.message, detail: options.detail }); return { response: 0 }; };
 shell.openExternal = async url => { globalThis.externalOpenAttempts.push({ kind: 'openExternal', url }); };
 app.on('browser-window-created', (_, win) => { win.webContents.setBackgroundThrottling(false); win.setSkipTaskbar(true); if (process.platform === 'win32') win.setPosition(-20000, -20000); });
 app.on('session-created', isolated => isolated.protocol.handle('https', async request => {
   const url = new URL(request.url); globalThis.oauthRequests.push({ url: request.url, method: request.method });
+  if (globalThis.oneShotBlockedTargetUrls.delete(request.url)) await new Promise(() => {});
   if (url.hostname === 'chatgpt.com') return new Response(${JSON.stringify(chatPage)}, { headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' } });
   if (url.hostname === 'auth.openai.com' || url.hostname === 'auth0.openai.com') {
     if (url.pathname.includes('callback')) {
@@ -104,18 +107,19 @@ const openNewConversationContents = async (account, label) => {
   return { page, contents };
 };
 
-const selectedWebContents = account => desktop.evaluate(({ session, webContents }, partition) => {
+const selectedWebContents = account => desktop.evaluate(({ BrowserWindow, session }, partition) => {
   const isolated = session.fromPartition(partition);
-  const candidates = webContents.getAllWebContents().filter(item => item.session === isolated && !item.isDestroyed());
-  const visible = candidates.find(item => item.isFocused()) ?? candidates.at(-1);
+  const window = BrowserWindow.getAllWindows().find(window => !window.isDestroyed() && window.webContents.getURL().startsWith('file:'));
+  const visible = window?.contentView.children.find(view => view.webContents && !view.webContents.isDestroyed() && view.webContents.session === isolated)?.webContents;
   if (!visible) return null;
-  return { id: visible.id, url: visible.getURL(), title: visible.getTitle() };
+  return { id: visible.id, url: visible.getURL(), title: visible.getTitle(), loading: visible.isLoading() };
 }, account.partition);
 const contentsById = (account, id) => desktop.evaluate(({ session, webContents }, { partition, id }) => {
   const isolated = session.fromPartition(partition);
   const contents = webContents.getAllWebContents().find(item => item.session === isolated && item.id === id);
   if (!contents || contents.isDestroyed()) return null;
-  return { id: contents.id, url: contents.getURL(), title: contents.getTitle(), loading: contents.isLoading() };
+  return { id: contents.id, url: contents.getURL(), title: contents.getTitle(), loading: contents.isLoading(),
+    waitingResponse: contents.isWaitingForResponse(), loadingMainFrame: contents.isLoadingMainFrame() };
 }, { partition: account.partition, id });
 const clickSelector = (account, id, selector) => desktop.evaluate(async ({ app, BrowserWindow, session, webContents }, { partition, id, selector }) => {
   const isolated = session.fromPartition(partition);
@@ -151,15 +155,26 @@ const scriptIn = (account, id, script) => desktop.evaluate(({ session, webConten
   return contents.mainFrame.executeJavaScript(script);
 }, { partition: account.partition, id, script });
 
-const simulatePendingMainNavigationById = (account, id, url) => desktop.evaluate(({ session, webContents }, { partition, id, url }) => {
+const startPendingMainNavigationById = (account, id, url) => desktop.evaluate(({ session, webContents }, { partition, id, url }) => {
   const isolated = session.fromPartition(partition);
   const contents = webContents.getAllWebContents().find(item => item.session === isolated && item.id === id);
   if (!contents || contents.isDestroyed()) throw new Error(`Missing WebContents ${id}`);
-  contents.isLoading = () => true;
-  contents.isLoadingMainFrame = () => true;
-  contents.isWaitingForResponse = () => true;
-  contents.emit('did-start-navigation', { url, isMainFrame: true, isSameDocument: false });
-  return { id: contents.id, url: contents.getURL(), loading: contents.isLoading(), waitingResponse: contents.isWaitingForResponse(), loadingMainFrame: contents.isLoadingMainFrame() };
+  const started = Date.now();
+  const record = (event, details = {}) => globalThis.pendingNavigationEvents.push({ event, id,
+    elapsedMs: Date.now() - started, loading: contents.isDestroyed() ? undefined : contents.isLoading(),
+    waitingResponse: contents.isDestroyed() ? undefined : contents.isWaitingForResponse(),
+    loadingMainFrame: contents.isDestroyed() ? undefined : contents.isLoadingMainFrame(), ...details });
+  contents.on('did-start-navigation', details => record('did-start-navigation', {
+    url: details.url, isMainFrame: details.isMainFrame, isSameDocument: details.isSameDocument }));
+  contents.on('did-start-loading', () => record('did-start-loading'));
+  contents.on('did-stop-loading', () => record('did-stop-loading'));
+  contents.on('did-fail-load', (_event, code, description, validatedUrl, isMainFrame) => record('did-fail-load', {
+    code, description, url: validatedUrl, isMainFrame }));
+  contents.on('did-navigate', (_event, committedUrl) => record('did-navigate', { url: committedUrl }));
+  globalThis.oneShotBlockedTargetUrls.add(url);
+  record('loadURL-start', { url });
+  void contents.loadURL(url).then(() => record('loadURL-resolved'), error => record('loadURL-rejected', {
+    code: error.code, errno: error.errno, message: error.message }));
 }, { partition: account.partition, id, url });
 
 const waitSelector = (account, id, selector, label = `Selector ${selector} did not become ready`) => until(async () => {
@@ -250,16 +265,23 @@ try {
     void contents.loadURL('https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=' + encodeURIComponent('https://auth.openai.com/callback')).catch(() => {});
   }, { partition: first.partition, id: pendingMainContents.id });
   await until(async () => (await contentsById(first, pendingMainContents.id))?.url.startsWith('https://accounts.google.com/'), 'Pending main Google page did not load');
+  await waitSelector(first, pendingMainContents.id, '#account-choice', 'Pending main Google page must finish its original document load');
   const chatCallbackUrl = 'https://chatgpt.com/?code=syntheticsecret&state=pending-main';
-  const injected = await simulatePendingMainNavigationById(first, pendingMainContents.id, chatCallbackUrl);
-  assert.equal(injected.loading, true, 'Synthetic callback main navigation must leave the old OAuth WebContents loading');
+  await startPendingMainNavigationById(first, pendingMainContents.id, chatCallbackUrl);
+  await until(async () => {
+    const pendingMain = await contentsById(first, pendingMainContents.id);
+    return !!pendingMain?.loading && pendingMain.waitingResponse && pendingMain.loadingMainFrame;
+  }, 'Real callback navigation must wait for a main-frame response');
   await until(async () => {
     const page = (await rpc('workspace.status')).pages.find(page => page.id === pendingMainPage.id);
-    return !!page && page.url.startsWith('https://chatgpt.com/');
-  }, 'Pending ChatGPT callback navigation should prefer a ChatGPT target rather than the old Google URL');
+    const restored = await selectedWebContents(first);
+    return !!page && page.url === chatCallbackUrl && !!restored && restored.id !== pendingMainContents.id && restored.url === chatCallbackUrl && !restored.loading;
+  }, 'Pending ChatGPT callback navigation should recreate the same tab at the requested target rather than the old Google URL');
   const pendingMainRestored = (await rpc('workspace.status')).pages.find(page => page.id === pendingMainPage.id);
   assert.equal(pendingMainRestored?.url.startsWith('https://accounts.google.com/'), false,
     'Pending ChatGPT callback navigation must not restore the old Google URL');
+  assert.equal((await rpc('workspace.status')).page?.id, pendingMainPage.id, 'Callback recovery preserves the selected tab');
+  assert.equal((await rpc('tasks.get', { id: lockedTask.id })).status, 'running', 'Callback recovery preserves the sibling queue');
 
   const apiCallbackUrl = 'https://chatgpt.com/api/auth/callback?code=syntheticsecret&state=leak-check';
   const { page: callbackLeakPage, contents: callbackLeakContents } = await openNewConversationContents(first, 'Callback leak tab');
@@ -340,11 +362,13 @@ try {
     if (contents && !contents.isDestroyed()) void contents.executeJavaScript('window.fixtureFinish && window.fixtureFinish()');
   }, { partition: first.partition, id: lockedContents.id });
   passed = true;
+  console.log(JSON.stringify({ pendingNavigationEvents: await desktop.evaluate(() => globalThis.pendingNavigationEvents) }));
   console.log('OAuth interaction passed: queued sibling pages stay locked, independent and locked OAuth pages accept mouse account selection, popup login remains visible, callback POST returns, external hosts are denied, and account partitions remain isolated.');
 } catch (error) {
   const diagnostic = await desktop?.evaluate(({ BrowserWindow, session, webContents }, partition) => {
     const isolated = partition ? session.fromPartition(partition) : null;
     return { requests: globalThis.oauthRequests?.slice(-30), externalOpenAttempts: globalThis.externalOpenAttempts,
+      pendingNavigationEvents: globalThis.pendingNavigationEvents,
       accountWebContents: isolated ? webContents.getAllWebContents().filter(item => item.session === isolated).map(item => ({ id: item.id, type: item.getType(), url: item.getURL(), title: item.getTitle(), loading: item.isLoading(), destroyed: item.isDestroyed() })) : [],
       windows: BrowserWindow.getAllWindows().map(window => ({ id: window.webContents.id, url: window.webContents.getURL(), visible: window.isVisible(), destroyed: window.isDestroyed(), title: window.webContents.getTitle() })) };
   }, primaryAccount?.partition).catch(error => ({ error: String(error) }));

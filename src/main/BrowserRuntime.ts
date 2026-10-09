@@ -3,7 +3,8 @@ import { BrowserWindow, WebContentsView, session, dialog, shell, type WebContent
 import { AccountManager } from '../core/account/AccountManager';
 import { SessionManager } from '../core/session/SessionManager';
 import { AppError, HOME_URL, chatUrl, webLink, isAccountNavigation, isAccountLoginUrl, isChatUrl } from '../core/validation';
-import { authorizationCallback, hasAuthorizationParameters, isAuthorizationCallback, isHttpsWebUrl } from '../shared/accountNavigation';
+import { authorizationCallback, hasAuthorizationParameters, isAuthorizationCallback, isAuthorizationSuccess,
+  isCodexAppUrl, isHttpsWebUrl, isNativeAppAuthorizationSource } from '../shared/accountNavigation';
 import type { AgentTask, BrowserBounds, BrowserDiagnostics, BrowserPreview, BrowserPage, Conversation, PageState, TaskInput, TaskResponse } from '../shared/types';
 import { bindShortcuts } from './shortcuts';
 import { ChatGPTAdapter, executePageScript, pageOperationScript, pageOperationResult, replyPageUrl, type Page } from './adapters/ChatGPTAdapter';
@@ -93,6 +94,9 @@ export class BrowserRuntime {
   private readonly usableContents = new WeakSet<WebContents>();
   private readonly loadGenerations = new WeakMap<WebContentsView, number>();
   private readonly pendingNavigations = new WeakMap<WebContentsView, string>();
+  private readonly authorizationNavigations = new WeakMap<WebContents, string>();
+  private readonly externalAppRequests = new Map<string, Set<string>>();
+  private readonly lastAppLaunch = new Map<string, { url: string; time: number }>();
   private readonly recoveries = new Map<string, RecoveryState>();
   private readonly recovering = new Map<string, Promise<void>>();
   private readonly deferredRecoveries = new Map<string, { view: WebContentsView; generation?: number; reason: RecoveryReason }>();
@@ -532,17 +536,119 @@ export class BrowserRuntime {
       if (answer.response === 1) await shell.openExternal(parsed.href);
     } catch { /* Invalid or unavailable external destinations are not opened. */ }
   }
+  private rememberAuthorization(contents: WebContents, pageId: string, url: string): void {
+    const owner = this.owners.get(pageId);
+    if (!owner) return;
+    // Providers may expose redirect_uri only after the initial pasted link.
+    // Keep it in memory; never replace it with an unrelated provider's callback.
+    if (isNativeAppAuthorizationSource(url)) {
+      try { owner.callbackUrl = authorizationCallback(url) ?? owner.callbackUrl; }
+      catch { /* Ambiguous callbacks receive no new navigation exception. */ }
+    }
+    if (this.allowedPageNavigation(pageId, url)) this.authorizationNavigations.set(contents, url);
+  }
+  private cancelAppNavigation(contents: WebContents, pageId: string): void {
+    const view = this.views.get(pageId);
+    if (!view || view.webContents !== contents) return;
+    // Allowing or rejecting an OS handoff intentionally cancels Chromium's main navigation.
+    // It must not be mistaken for a stalled callback and replayed by recovery.
+    this.pendingNavigations.delete(view);
+    clearTimeout(this.loadTimers.get(pageId)); this.loadTimers.delete(pageId);
+    this.loadGenerations.set(view, (this.loadGenerations.get(view) ?? 0) + 1);
+    if ([PAGE_NAVIGATION_INCOMPLETE_ERROR, PAGE_LOAD_TIMEOUT_ERROR].includes(this.errors.get(pageId) ?? '')) {
+      this.errors.delete(pageId);
+      const recovery = this.recoveries.get(pageId);
+      clearTimeout(recovery?.timer);
+      if (recovery) recovery.timer = undefined;
+    }
+    this.changed();
+  }
+  private async externalApp(contents: WebContents, pageId: string, url: string, source: string): Promise<void> {
+    if (!isCodexAppUrl(url) || contents.isDestroyed()) return;
+    const owner = this.owners.get(pageId), callback = owner?.callbackUrl, documentUrl = contents.getURL();
+    const target = new URL(url);
+    const openCodex = target.hostname === 'threads' && target.pathname === '/new' && !target.search && !target.hash;
+    if (!openCodex && !isAuthorizationCallback(url, callback)) return;
+    const current = () => !!owner && this.owners.get(pageId) === owner && owner.callbackUrl === callback &&
+      !this.closing && !this.window.isDestroyed() && !contents.isDestroyed() && contents.getURL() === documentUrl &&
+      this.activeId === pageId && this.accounts.activeId() === owner.accountId && !this.backgrounded() &&
+      !this.isInteractionLocked(pageId, contents) &&
+      (this.views.get(pageId)?.webContents === contents || [...this.popups.get(pageId) ?? []].some(popup =>
+        !popup.isDestroyed() && popup.webContents === contents && popup.isVisible()));
+    if (!current() || !isNativeAppAuthorizationSource(source, callback)) return;
+    const requests = this.externalAppRequests.get(pageId) ?? new Set<string>();
+    const previous = this.lastAppLaunch.get(pageId);
+    if (requests.has(url) || previous?.url === url && Date.now() - previous.time < 3000) return;
+    requests.add(url); this.externalAppRequests.set(pageId, requests);
+    try {
+      const answer = await dialog.showMessageBox(this.window, { type: 'question', title: '打开 Codex',
+        message: '在 Codex 中继续？', detail: '此授权页面请求打开已安装的 Codex 客户端。',
+        buttons: ['取消', '打开 Codex'], defaultId: 0, cancelId: 0 });
+      if (answer.response !== 1 || !current()) return;
+      try {
+        await shell.openExternal(url);
+        this.lastAppLaunch.set(pageId, { url, time: Date.now() });
+      } catch {
+        // OS errors can echo the callback's secret query parameters.
+        if (current()) await dialog.showMessageBox(this.window, { type: 'info', title: '无法打开 Codex',
+          message: '未能打开 Codex，请确认已安装 Codex 后重试。', buttons: ['知道了'] });
+      }
+    } catch { /* Closing the host during a prompt must not crash the runtime. */ }
+    finally { requests.delete(url); if (!requests.size) this.externalAppRequests.delete(pageId); }
+  }
   private secure(contents: WebContents, pageId: string, partition: string): void {
     contents.on('before-input-event', event => { if (this.isInteractionLocked(pageId, contents)) event.preventDefault(); });
     contents.on('before-mouse-event', event => { if (this.isInteractionLocked(pageId, contents)) event.preventDefault(); });
-    contents.on('will-navigate', (event, url) => {
-      if (!this.allowedPageNavigation(pageId, url)) { event.preventDefault(); void this.external(url); }
+    contents.on('did-start-navigation', details => {
+      if (details.isMainFrame && !details.isSameDocument) this.rememberAuthorization(contents, pageId, details.url);
     });
-    contents.on('will-redirect', (event, url) => { if (!this.allowedPageNavigation(pageId, url)) event.preventDefault(); });
+    contents.on('did-navigate', () => this.authorizationNavigations.delete(contents));
+    contents.on('did-stop-loading', () => this.authorizationNavigations.delete(contents));
+    contents.on('will-frame-navigate', event => {
+      if (!event.isMainFrame && isCodexAppUrl(event.url)) event.preventDefault();
+    });
+    contents.on('will-navigate', event => {
+      const url = event.url;
+      if (this.allowedPageNavigation(pageId, url)) return;
+      event.preventDefault();
+      if (isCodexAppUrl(url)) {
+        this.cancelAppNavigation(contents, pageId);
+        if (!event.initiator || event.initiator === contents.mainFrame)
+          void this.externalApp(contents, pageId, url, contents.getURL());
+      } else void this.external(url);
+    });
+    contents.on('will-redirect', event => {
+      if (event.isMainFrame) this.rememberAuthorization(contents, pageId, event.url);
+      if (this.allowedPageNavigation(pageId, event.url)) return;
+      event.preventDefault();
+      if (event.isMainFrame) this.cancelAppNavigation(contents, pageId);
+      if (event.isMainFrame && isCodexAppUrl(event.url)) {
+        const source = this.authorizationNavigations.get(contents) ?? contents.getURL();
+        if (!event.initiator || event.initiator === contents.mainFrame)
+          void this.externalApp(contents, pageId, event.url, source);
+      }
+    });
     contents.on('will-attach-webview', event => event.preventDefault());
-    contents.setWindowOpenHandler(({ url }) => {
+    contents.setWindowOpenHandler(({ url, referrer }) => {
       const blank = url === 'about:blank' && this.owners.get(pageId)?.customLink;
-      if (!blank && !this.allowedPageNavigation(pageId, url)) { void this.external(url); return { action: 'deny' }; }
+      if (!blank && !this.allowedPageNavigation(pageId, url)) {
+        if (isCodexAppUrl(url)) {
+          try {
+            const source = contents.getURL();
+            const origin = new URL(source).origin;
+            // Chromium omits referrers for some non-HTTP window.open calls.
+            // Without an initiating frame, accept only a same-origin frame tree.
+            const main = contents.mainFrame;
+            const sameSource = referrer.url ? new URL(referrer.url).origin === origin :
+              !!main.origin && main.origin !== 'null' && main.framesInSubtree.every(frame =>
+                !frame.isDestroyed() && !frame.detached && frame.origin === main.origin);
+            if (sameSource &&
+              isNativeAppAuthorizationSource(source, this.owners.get(pageId)?.callbackUrl))
+              void this.externalApp(contents, pageId, url, source);
+          } catch { /* A missing or cross-origin popup referrer cannot launch an app. */ }
+        } else void this.external(url);
+        return { action: 'deny' };
+      }
       return { action: 'allow', overrideBrowserWindowOptions: {
         width: 560, height: 760, parent: this.window, autoHideMenuBar: true,
         webPreferences: { partition, nodeIntegration: false, contextIsolation: true, sandbox: true, webviewTag: false, preload: undefined }
@@ -565,7 +671,7 @@ export class BrowserRuntime {
   private savePage(id: string, url: string): void {
     const owner = this.owners.get(id); if (!owner) return;
     if (isAccountLoginUrl(url) || hasAuthorizationParameters(url)) return;
-    if (owner.customLink) {
+    if (owner.customLink || owner.callbackUrl) {
       // Only a committed ChatGPT destination finishes the temporary browser mode.
       // The original authorization link and loopback exception never reach storage.
       owner.customLink = false; owner.callbackUrl = undefined; owner.title = 'ChatGPT';
@@ -643,7 +749,7 @@ export class BrowserRuntime {
       const url = view.webContents.getURL();
       // Login/result pages can include authorization codes in document.title.
       // Keep a neutral title so it cannot survive the subsequent ChatGPT commit.
-      owner.title = owner.customLink || isAccountLoginUrl(url) || hasAuthorizationParameters(url) ? '授权页面' : title || owner.title;
+      owner.title = owner.customLink || owner.callbackUrl || isAccountLoginUrl(url) || hasAuthorizationParameters(url) ? '授权页面' : title || owner.title;
       this.saveTabs(owner.accountId);
     };
     const clearLoadTimer = () => {
@@ -779,14 +885,17 @@ export class BrowserRuntime {
   }
   private allowedPageNavigation(id: string, url: string): boolean {
     const owner = this.owners.get(id);
-    return isAccountNavigation(url) || !!owner?.customLink && (isHttpsWebUrl(url) || isAuthorizationCallback(url, owner.callbackUrl));
+    return isAccountNavigation(url) || !!owner?.customLink && isHttpsWebUrl(url) ||
+      !isCodexAppUrl(url) && (isAuthorizationCallback(url, owner?.callbackUrl) || isAuthorizationSuccess(url, owner?.callbackUrl));
   }
   pages(): BrowserPage[] {
     return [...this.owners].map(([id, owner]) => {
       const contents = this.views.get(id)?.webContents;
       const live = contents && !contents.isDestroyed();
+      const liveUrl = live ? contents.getURL() || owner.url : owner.url;
+      const authorization = owner.customLink || owner.callbackUrl || isAccountLoginUrl(liveUrl) || hasAuthorizationParameters(liveUrl);
       return { id, accountId: owner.accountId, conversationId: owner.conversationId,
-        url: live ? contents.getURL() || owner.url : owner.url, title: live ? contents.getTitle() || owner.title : owner.title,
+        url: liveUrl, title: authorization ? '授权页面' : live ? contents.getTitle() || owner.title : owner.title,
         selected: this.selected.get(owner.accountId) === id, locked: this.isLocked(id), sleeping: !live,
         taskId: this.locks.find(task => this.taskPage(task) === id)?.id };
     });
@@ -895,7 +1004,9 @@ export class BrowserRuntime {
   page(): PageState | null {
     const contents = this.activeId ? this.views.get(this.activeId)?.webContents : undefined;
     if (!contents || contents.isDestroyed()) return null;
-    return { id: this.activeId!, conversationId: this.owners.get(this.activeId!)?.conversationId, url: contents.getURL(), title: contents.getTitle(), loading: this.pageLoading(contents),
+    const owner = this.owners.get(this.activeId!), url = contents.getURL();
+    const authorization = owner?.customLink || owner?.callbackUrl || isAccountLoginUrl(url) || hasAuthorizationParameters(url);
+    return { id: this.activeId!, conversationId: owner?.conversationId, url, title: authorization ? '授权页面' : contents.getTitle(), loading: this.pageLoading(contents),
       canGoBack: contents.navigationHistory.canGoBack(), canGoForward: contents.navigationHistory.canGoForward(),
       error: this.errors.get(this.activeId!) };
   }
@@ -1064,6 +1175,7 @@ export class BrowserRuntime {
     this.redirectingDuplicates.delete(id);
     this.destroyView(id);
     this.owners.delete(id); this.errors.delete(id);
+    this.externalAppRequests.delete(id); this.lastAppLaunch.delete(id);
     this.recoveries.delete(id);
     this.deferredRecoveries.delete(id);
     for (const [taskId, pageId] of this.taskPages) if (pageId === id) this.taskPages.delete(taskId);

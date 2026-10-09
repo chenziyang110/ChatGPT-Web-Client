@@ -12,13 +12,13 @@
 
 ## 下载与开始
 
-**当前正式版 v1.4.14**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，按下表选择系统和 CPU 对应的安装包。
+**当前正式版 v1.4.27**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，按下表选择系统和 CPU 对应的安装包。
 
 1. 添加账号，在独立的 ChatGPT 网页中自行登录。
 2. 添加其他账号，在侧栏随时切换；各账号的登录状态互相隔离。
 3. 在任务中心准备提示词，或通过 **Agent 协作** 让本机 Agent 获取网页回复。
 
-Windows 安装包尚未配置发布者签名，可能显示未知发布者提示。请核对来源与 Release 附带的 SHA-256。v1.4.14 提供以下六种系统 / CPU 组合的安装包。
+Windows 安装包尚未配置发布者签名，可能显示未知发布者提示。请核对来源与 Release 附带的 SHA-256。v1.4.27 提供以下六种系统 / CPU 组合的安装包。
 
 | 系统 | x64（Intel / AMD） | ARM64 | 安装包 |
 | --- | --- | --- | --- |

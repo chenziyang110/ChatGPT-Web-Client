@@ -108,7 +108,7 @@ else void app.whenReady().then(async () => {
   browser = new BrowserRuntime(win, accounts, sessions, changed, conversations, shortcuts, notifications, diagnostics);
   diagnostics.record('browser_initialized', { accounts: accounts.list().length, tabs: browser.pages().length });
   const tasks = new AgentGateway(db, (id, input, signal, context) => browser.execute(id, input, signal, context), () => {
-    browser.setLocked(tasks.lockedTasks()); changed();
+    browser.setLocked(tasks.lockedTasks(), tasks.automaticRecoveryTasks()); changed();
   });
   const discoveryFile = path.join(userData, 'agent-runtime.json');
   diagnostics.record('queues_initialized');
@@ -265,7 +265,7 @@ else void app.whenReady().then(async () => {
   });
   await win.loadURL(trustedUrl);
   const activeId = accounts.activeId() ?? accounts.list()[0]?.id;
-  browser.setLocked(tasks.lockedTasks());
+  browser.setLocked(tasks.lockedTasks(), tasks.automaticRecoveryTasks());
   if (activeId) { accounts.activate(activeId); browser.activate(activeId); }
   diagnostics.record('ready', { accounts: accounts.list().length, tabs: browser.pages().length, api: api.endpoint !== null });
 }).catch(error => {

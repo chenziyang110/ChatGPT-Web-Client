@@ -18,9 +18,14 @@ const restoredUrl = 'https://chatgpt.com/c/6ac8a40d-feb0-83ee-90f1-9fe754214771'
 const soleUrl = 'https://chatgpt.com/c/6ac8a40d-feb0-83ee-90f1-9fe754214772';
 const compoundUrl = 'https://chatgpt.com/c/6ac8a40d-feb0-83ee-90f1-9fe754214773';
 const cappedNativeUrl = 'https://chatgpt.com/c/6ac8a40d-feb0-83ee-90f1-9fe754214774';
+const canceledUrl = 'https://chatgpt.com/c/6ac8a40d-feb0-83ee-90f1-9fe754214775';
+const pausedUrl = 'https://chatgpt.com/c/6ac8a40d-feb0-83ee-90f1-9fe754214776';
+const plainPendingUrl = 'https://chatgpt.com/c/6ac8a40d-feb0-83ee-90f1-9fe754214777';
 const errorCard = '<div id="conversation-load-error"><p>无法加载此 ChatGPT 对话</p><button onclick="location.reload()">重试</button></div>';
 const failureFixture = `<!doctype html><html><head><meta charset="utf-8"><title>ChatGPT</title></head><body>
 <aside><a href="/">新聊天</a></aside><main>${errorCard}</main></body></html>`;
+const pendingFailureFixture = `<!doctype html><html><head><meta charset="utf-8"><title>ChatGPT</title></head><body>
+<aside><a href="/">新聊天</a></aside><main>${errorCard}</main><iframe src="/pending-conversation-resource"></iframe></body></html>`;
 const healthyFixture = fixture
   .replace('window.fixtureSendCount = (window.fixtureSendCount || 0) + 1;',
     `window.fixtureSendCount = (window.fixtureSendCount || 0) + 1;
@@ -41,6 +46,7 @@ const mainEntry = process.env.WORKSPACE_TEST_MAIN_CJS || path.join(root, 'dist-e
 await writeFile(bootstrap, `const { app, Notification } = require('electron');
 Notification.isSupported = () => false;
 globalThis.fixtureRequests = [];
+globalThis.pendingConversationStreams = [];
 globalThis.fixtureInitialFailureSent = false;
 globalThis.fixtureConnectionResets = new WeakMap();
 app.on('browser-window-created', (_, win) => {
@@ -56,6 +62,16 @@ app.on('session-created', isolated => {
   };
   isolated.protocol.handle('https', async request => {
   globalThis.fixtureRequests.push(request.url);
+  if (request.url === 'https://chatgpt.com/pending-conversation-resource') {
+    const stream = new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode('<!doctype html><html><body>pending conversation resource'));
+      globalThis.pendingConversationStreams.push(controller);
+    } });
+    return new Response(stream, { headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' } });
+  }
+  if (request.url === ${JSON.stringify(plainPendingUrl)})
+    return new Response(${JSON.stringify(pendingFailureFixture)},
+      { headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' } });
   const initialFailure = request.url === ${JSON.stringify(initialUrl)} && !globalThis.fixtureInitialFailureSent;
   if (initialFailure) globalThis.fixtureInitialFailureSent = true;
   const repeatedFailure = request.url === ${JSON.stringify(repeatedUrl)} &&
@@ -70,7 +86,8 @@ app.on('session-created', isolated => {
 });
 require(${JSON.stringify(mainEntry)});`);
 const env = { ...process.env, WORKSPACE_USER_DATA: directory,
-  WORKSPACE_PAGE_IDLE_MS: '3600000', WORKSPACE_HIDDEN_PAGE_IDLE_MS: '3600000' };
+  WORKSPACE_PAGE_IDLE_MS: '3600000', WORKSPACE_HIDDEN_PAGE_IDLE_MS: '3600000',
+  ...(process.argv.includes('--plain-pending-only') ? { WORKSPACE_PAGE_LOAD_TIMEOUT_MS: '1200' } : {}) };
 delete env.ELECTRON_RUN_AS_NODE;
 delete env.WORKSPACE_DEV_URL;
 let desktop, shell, desktopPid;
@@ -97,6 +114,11 @@ const nativeFor = (account, url) => desktop.evaluate(({ session, webContents }, 
   if (!contents) return null;
   return { id: contents.id, url: contents.getURL(), loading: contents.isLoading(), waitingResponse: contents.isWaitingForResponse() };
 }, { partition: account.partition, url });
+const visibleFor = nativeId => desktop.evaluate(({ BrowserWindow }, nativeId) => {
+  const native = BrowserWindow.getAllWindows().flatMap(window => window.contentView.children)
+    .find(view => view.webContents?.id === nativeId);
+  return native?.getVisible();
+}, nativeId);
 const inPage = (account, url, script) => desktop.evaluate(async ({ session, webContents }, { partition, url, script }) => {
   const isolated = session.fromPartition(partition);
   const contents = webContents.getAllWebContents().find(item => item.session === isolated && item.getURL() === url);
@@ -140,6 +162,8 @@ const ready = (account, pageId, label, ms) => until(async () =>
   (await inspect(account, pageId)).readiness === 'ready', label, ms);
 const sends = (account, url) => inPage(account, url,
   "Number(localStorage.getItem('fixture-total-sends:' + location.pathname) || 0)");
+const addTask = (account, conversation, prompt) => rpc('tasks.create', { accountId: account.id, conversation: conversation.id,
+  background: true, input: { type: 'prompt', prompt, submit: true } });
 const settled = (account, url) => until(async () => {
   const native = await nativeFor(account, url);
   return native && !native.loading && !native.waitingResponse &&
@@ -185,44 +209,101 @@ try {
     return !!native && !native.loading && !native.waitingResponse &&
       await inPage(account, initialUrl, "document.readyState === 'complete' && !!document.querySelector('#conversation-load-error') && !document.querySelector('#prompt-textarea')");
   }, 'Fixture must reproduce a completed native load with the visible conversation error', 5000);
+  const currentNative = await nativeFor(account, initialUrl);
   assert.equal(await requestCount(initialUrl), 1, 'Initial response contains the semantic error, not a network failure');
-  await ready(account, current.page.id,
-    'A current conversation load error must recover automatically without a queue or a manual reload', 10000);
-  assert.equal(await requestCount(initialUrl), 2, 'Successful automatic recovery retries only the same conversation once');
+  await new Promise(resolve => setTimeout(resolve, 4500));
+  assert.equal(await requestCount(initialUrl), 1,
+    'A normal conversation load error without its own queue must not auto-reload');
+  assert.equal((await nativeFor(account, initialUrl)).id, currentNative.id,
+    'A normal conversation load error keeps the original WebContents visible');
+  assert.equal(await visibleFor(currentNative.id), true,
+    'A normal conversation load error keeps the original WebContentsView visible');
   const currentState = (await rpc('workspace.status')).page;
-  assert.equal(currentState.id, current.page.id, 'Automatic retry retains the selected logical tab');
+  assert.equal(currentState.id, current.page.id, 'The selected logical tab stays visible');
   assert.equal(currentState.conversationId, current.conversation.id);
   assert.equal(currentState.url, initialUrl);
-  assert.equal(currentState.error, undefined, 'Successful automatic recovery clears its warning');
-  assert.equal(await sends(account, initialUrl), 0, 'A nonqueued conversation retry must not send anything');
+  assert.equal(currentState.error, undefined, 'A normal conversation load error is not covered by a client page error');
+  assert.equal((await inspect(account, current.page.id)).loadFailure, 'conversation',
+    'Diagnostics still expose the site-level conversation load failure');
+  assert.equal(await inPage(account, initialUrl, "!!document.querySelector('#conversation-load-error button')"), true,
+    'The site Retry control remains clickable for a normal conversation');
+  assert.equal(await inPage(account, initialUrl,
+    "!!document.querySelector('#conversation-load-error button')?.getClientRects().length"), true,
+  'The site Retry control remains visible for a normal conversation');
+  assert.equal(await sends(account, initialUrl), 0, 'A nonqueued conversation failure must not send anything');
   assert.equal((await nativeFor(account, siblingUrl)).id, siblingNative.id,
-    'Recovery must not replace a healthy sibling WebContents');
+    'Another same-account queue must not authorize recovery of this normal conversation');
   assert.equal((await rpc('tasks.get', { id: siblingTask.id })).status, 'running');
+  await inPage(account, initialUrl, "document.querySelector('#conversation-load-error button').click(); true");
+  await ready(account, current.page.id, 'The site Retry button can manually recover the normal conversation', 10000);
+  assert.equal(await requestCount(initialUrl), 2, 'Manual site Retry performs the only reload for a normal conversation');
+  assert.equal((await rpc('workspace.status')).page?.error, undefined);
 
-  if (process.argv.includes('--initial-only')) {
+  const assertPlainPendingGuard = async () => {
+    const pendingPlain = await open(account, plainPendingUrl);
+    await until(async () => {
+      const native = await nativeFor(account, plainPendingUrl);
+      return !!native && native.loading &&
+        await inPage(account, plainPendingUrl, "document.readyState !== 'loading' && !!document.querySelector('#conversation-load-error button')");
+    }, 'Pending-resource conversation error fixture must show the site Retry while native loading stays pending', 8000);
+    const pendingNative = await nativeFor(account, plainPendingUrl);
+    const pendingRequests = await requestCount(plainPendingUrl);
+    // Cross the native load watchdog as well as the ordinary DOM monitor.
+    await new Promise(resolve => setTimeout(resolve, process.argv.includes('--plain-pending-only') ? 3500 : 23000));
+    assert.equal(await requestCount(plainPendingUrl), pendingRequests,
+      'A normal conversation error with a pending subresource must not auto-reload after the native watchdog fires');
+    assert.equal((await nativeFor(account, plainPendingUrl)).id, pendingNative.id,
+      'A normal pending-resource error keeps the original WebContents visible');
+    assert.equal(await visibleFor(pendingNative.id), true,
+      'A normal pending-resource error keeps the original WebContentsView visible');
+    const pendingPage = (await rpc('workspace.status')).page;
+    assert.equal(pendingPage?.id, pendingPlain.page.id,
+      'The pending-resource guard checks the active PageState for the normal conversation');
+    assert.equal(pendingPage?.error, undefined,
+      'A normal pending-resource error is not covered by a client page error');
+    assert.equal(await inPage(account, plainPendingUrl, "!!document.querySelector('#conversation-load-error button')"), true,
+      'The site Retry control remains available while the subresource is pending');
+    assert.equal(await inPage(account, plainPendingUrl,
+      "!!document.querySelector('#conversation-load-error button')?.getClientRects().length"), true,
+    'The site Retry control remains visible while the subresource is pending');
+    assert.equal((await nativeFor(account, siblingUrl)).id, siblingNative.id,
+      'Another same-account queue still must not authorize pending-resource recovery');
+  };
+
+  if (process.argv.includes('--plain-pending-only')) {
+    await assertPlainPendingGuard();
+    passed = true;
+    console.log('Pending-resource conversation load guard passed: a normal visible site error with native loading still pending is not rebuilt without its own queue.');
+  } else if (process.argv.includes('--initial-only')) {
     assert.equal((await nativeFor(other, 'https://chatgpt.com/')).id, otherNative.id,
-      'Initial semantic recovery retains the independent profile document');
+      'Initial semantic failure retains the independent profile document');
     assert.equal(await inPage(other, 'https://chatgpt.com/', "localStorage.getItem('fixture-profile-marker')"), 'retained');
     const cookies = await desktop.evaluate(({ session }, partition) =>
       session.fromPartition(partition).cookies.get({ name: 'fixture-profile' }), other.partition);
     assert.equal(cookies[0]?.value, 'retained');
     passed = true;
-    console.log('Initial conversation load recovery passed: one settled semantic failure reconnects the original logical tab without sending, clearing profiles, or replacing a healthy sibling.');
+    console.log('Initial conversation load guard passed: a normal semantic failure stays visible until site Retry, does not send, and does not disturb another queued sibling or profile.');
   } else {
+  await assertPlainPendingGuard();
   const skeleton = await open(account, skeletonUrl);
   await ready(account, skeleton.page.id, 'Skeleton fixture did not load');
   await settled(account, skeletonUrl);
+  const skeletonHead = await addTask(account, skeleton.conversation, 'HOLD:skeleton queued turn before conversation load error');
+  const skeletonNext = await addTask(account, skeleton.conversation, 'next after skeleton conversation retry');
+  await until(async () => !!(await rpc('tasks.get', { id: skeletonHead.id })).submittedAt,
+    'Skeleton queue head must have a confirmed receipt before recovery');
   const skeletonRequests = await requestCount(skeletonUrl);
   await inPage(account, skeletonUrl, 'window.fixtureConversationLoadError();');
   await faultObserved(skeleton.page.id);
   await inPage(account, skeletonUrl,
     "document.querySelector('main').innerHTML = '<div role=\"status\">正在加载对话…</div>';");
-  await ready(account, skeleton.page.id,
-    'A failed conversation whose Retry only leaves a loading skeleton must continue automatic recovery', 10000);
+  await until(async () => (await rpc('tasks.get', { id: skeletonNext.id })).status === 'done',
+    'A queued conversation whose Retry only leaves a loading skeleton must continue automatic recovery', 30000);
   assert.equal(await requestCount(skeletonUrl), skeletonRequests + 1,
-    'An asynchronous skeleton is not healthy until the same conversation has an editor again');
+    'An asynchronous skeleton is not healthy until the queued conversation has an editor again');
   assert.equal((await rpc('workspace.status')).page?.id, skeleton.page.id);
-  assert.equal(await sends(account, skeletonUrl), 0);
+  assert.equal(await sends(account, skeletonUrl), 2,
+    'Queued skeleton recovery sends the recorded head and successor exactly once');
 
   const restored = await open(account, restoredUrl);
   await ready(account, restored.page.id, 'Restored-draft fixture did not load');
@@ -231,26 +312,24 @@ try {
   const restoredRequests = await requestCount(restoredUrl);
   await inPage(account, restoredUrl,
     "window.fixtureOriginalMainNodes = [...document.querySelector('main').childNodes]; window.fixtureConversationLoadError();");
-  await faultObserved(restored.page.id);
+  await new Promise(resolve => setTimeout(resolve, 4500));
+  assert.equal((await nativeFor(account, restoredUrl)).id, restoredNative.id,
+    'A normal restored page without its own queue is not rebuilt by semantic recovery');
+  assert.equal(await requestCount(restoredUrl), restoredRequests,
+    'A normal restored page without its own queue is not reloaded');
   const humanDraft = 'human draft entered after the site recovered';
   await inPage(account, restoredUrl, `
     document.querySelector('main').replaceChildren(...window.fixtureOriginalMainNodes);
     document.querySelector('#prompt-textarea').value = ${JSON.stringify(humanDraft)};
     document.querySelector('#prompt-textarea').dispatchEvent(new Event('input', { bubbles: true }));
   `);
-  await new Promise(resolve => setTimeout(resolve, 4500));
-  assert.equal((await nativeFor(account, restoredUrl)).id, restoredNative.id,
-    'A site-restored editor cancels the deferred rebuild and retains its native document');
-  assert.equal(await requestCount(restoredUrl), restoredRequests);
   assert.equal(await inPage(account, restoredUrl, "document.querySelector('#prompt-textarea').value"), humanDraft,
-    'A human draft entered after the site restored itself must survive deferred recovery');
+    'A human draft entered after the site restored itself must survive without deferred recovery');
   assert.equal((await rpc('workspace.status')).page?.error, undefined);
 
   const queued = await rpc('conversations.register', { accountId: account.id, url: queuedUrl });
-  const add = prompt => rpc('tasks.create', { accountId: account.id, conversation: queued.id,
-    background: true, input: { type: 'prompt', prompt, submit: true } });
-  const head = await add('HOLD:confirmed send before conversation load error');
-  const next = await add('next after automatic conversation retry');
+  const head = await addTask(account, queued, 'HOLD:confirmed send before conversation load error');
+  const next = await addTask(account, queued, 'next after automatic conversation retry');
   await until(async () => !!(await rpc('tasks.get', { id: head.id })).submittedAt,
     'The queue head must have a confirmed receipt before its conversation fails');
   const headReceipt = await rpc('tasks.get', { id: head.id });
@@ -286,14 +365,53 @@ try {
     session.fromPartition(partition).cookies.get({ name: 'fixture-profile' }), other.partition);
   assert.equal(cookies[0]?.value, 'retained', 'Automatic recovery must not clear account cookies');
 
+  const canceled = await open(account, canceledUrl);
+  await ready(account, canceled.page.id, 'Canceled-recovery fixture did not load');
+  await settled(account, canceledUrl);
+  const canceledHead = await addTask(account, canceled.conversation, 'HOLD:canceled before semantic recovery fires');
+  const canceledNext = await addTask(account, canceled.conversation, 'must not send after canceled recovery');
+  await until(async () => !!(await rpc('tasks.get', { id: canceledHead.id })).submittedAt,
+    'Canceled-recovery queue head must have a receipt before the fault');
+  const canceledRequests = await requestCount(canceledUrl);
+  const canceledNative = await nativeFor(account, canceledUrl);
+  await inPage(account, canceledUrl, 'window.fixtureConversationLoadError();');
+  await faultObserved(canceled.page.id);
+  await rpc('tasks.cancel', { id: canceledHead.id });
+  await rpc('tasks.cancel', { id: canceledNext.id });
+  await new Promise(resolve => setTimeout(resolve, 4500));
+  assert.equal(await requestCount(canceledUrl), canceledRequests,
+    'Canceling the queued tasks after a semantic fault cancels the pending recovery timer');
+  assert.equal((await nativeFor(account, canceledUrl)).id, canceledNative.id,
+    'Canceled semantic recovery leaves the original page visible for manual handling');
+  assert.equal(await sends(account, canceledUrl), 1,
+    'Canceled semantic recovery does not submit the queued successor');
+
+  const paused = await open(account, pausedUrl);
+  await ready(account, paused.page.id, 'Paused-recovery fixture did not load');
+  await settled(account, pausedUrl);
+  const pausedHead = await addTask(account, paused.conversation, 'HOLD:paused before semantic recovery fires');
+  const pausedNext = await addTask(account, paused.conversation, 'must wait while semantic recovery is paused');
+  await until(async () => !!(await rpc('tasks.get', { id: pausedHead.id })).submittedAt,
+    'Paused-recovery queue head must have a receipt before the fault');
+  const pausedRequests = await requestCount(pausedUrl);
+  const pausedNative = await nativeFor(account, pausedUrl);
+  await inPage(account, pausedUrl, 'window.fixtureConversationLoadError();');
+  await faultObserved(paused.page.id);
+  await rpc('queues.pause', { accountId: account.id, conversation: paused.conversation.id });
+  await new Promise(resolve => setTimeout(resolve, 4500));
+  assert.equal(await requestCount(pausedUrl), pausedRequests,
+    'Pausing the conversation queue after a semantic fault cancels the pending recovery timer');
+  assert.equal((await nativeFor(account, pausedUrl)).id, pausedNative.id,
+    'Paused semantic recovery leaves the original page visible for manual handling');
+  assert.equal((await rpc('tasks.get', { id: pausedNext.id })).status, 'pending',
+    'Paused semantic recovery does not advance queued successors');
+
   const sole = await rpc('accounts.create', { name: 'Sole locked conversation' });
   await ready(sole, undefined, 'Sole-page fixture account did not load');
   const soleHome = (await rpc('workspace.status')).page;
   const soleConversation = await rpc('conversations.register', { accountId: sole.id, url: soleUrl });
-  const soleAdd = prompt => rpc('tasks.create', { accountId: sole.id, conversation: soleConversation.id,
-    background: true, input: { type: 'prompt', prompt, submit: true } });
-  const soleHead = await soleAdd('HOLD:confirmed receipt in sole live page');
-  const soleNext = await soleAdd('next after isolated connection reset');
+  const soleHead = await addTask(sole, soleConversation, 'HOLD:confirmed receipt in sole live page');
+  const soleNext = await addTask(sole, soleConversation, 'next after isolated connection reset');
   await until(async () => !!(await rpc('tasks.get', { id: soleHead.id })).submittedAt,
     'Sole queued page must hold a confirmed receipt before recovery');
   const soleReceipt = await rpc('tasks.get', { id: soleHead.id });
@@ -336,30 +454,44 @@ try {
   assert.equal((await rpc('workspace.status')).page?.error, undefined);
   assert.equal((await nativeFor(account, siblingUrl)).id, siblingNative.id);
 
-  const repeated = await open(account, repeatedUrl);
-  await ready(account, repeated.page.id,
-    'A recurring conversation load error must keep retrying beyond three failures without manual intervention', 45000);
+  const repeatedConversation = await rpc('conversations.register', { accountId: account.id, url: repeatedUrl });
+  const repeatedTask = await addTask(account, repeatedConversation, 'queued prompt after repeated conversation load errors');
+  await until(async () => (await rpc('tasks.get', { id: repeatedTask.id })).status === 'done',
+    'A queued recurring conversation load error must keep retrying beyond three failures without manual intervention', 45000);
+  const repeated = { conversation: repeatedConversation,
+    page: (await rpc('workspace.status')).pages.find(page => page.conversationId === repeatedConversation.id) };
+  assert.ok(repeated.page);
   assert.equal(await requestCount(repeatedUrl), 5,
     'Four semantic error responses are followed by one successful same-conversation retry');
+  await rpc('conversations.open', { accountId: account.id, conversation: repeated.conversation.id });
   const repeatedState = (await rpc('workspace.status')).page;
   assert.equal(repeatedState.id, repeated.page.id);
   assert.equal(repeatedState.url, repeatedUrl);
   assert.equal(repeatedState.conversationId, repeated.conversation.id);
   assert.equal(repeatedState.error, undefined);
-  assert.equal(await sends(account, repeatedUrl), 0, 'Repeated page recovery never submits a prompt');
+  assert.equal(await sends(account, repeatedUrl), 1, 'Queued repeated page recovery sends its prompt once');
   assert.equal((await nativeFor(account, siblingUrl)).id, siblingNative.id,
     'Repeated failures must not reset healthy sibling pages');
 
-  const compound = await open(account, compoundUrl);
-  await ready(account, compound.page.id,
-    'Four semantic failures followed by a native same-target load stall must continue automatic recovery', 100000);
-  assert.equal(await requestCount(compoundUrl), 6,
-    'The fifth native-stalled request is followed by a sixth healthy same-conversation request');
+  const compoundConversation = await rpc('conversations.register', { accountId: account.id, url: compoundUrl });
+  const compoundTask = await addTask(account, compoundConversation, 'queued prompt after compound conversation recovery');
+  await until(async () => (await rpc('tasks.get', { id: compoundTask.id })).status === 'done',
+    'Four queued semantic failures followed by a native same-target load stall must continue automatic recovery', 100000);
+  const compound = { conversation: compoundConversation,
+    page: (await rpc('workspace.status')).pages.find(page => page.conversationId === compoundConversation.id) };
+  assert.ok(compound.page);
+  const compoundRequests = await requestCount(compoundUrl);
+  assert.ok(compoundRequests >= 6,
+    'The queued compound recovery reaches a healthy same-conversation request after semantic failures and a native stall');
+  await rpc('conversations.open', { accountId: account.id, conversation: compound.conversation.id });
   const compoundState = (await rpc('workspace.status')).page;
   assert.equal(compoundState.id, compound.page.id);
   assert.equal(compoundState.url, compoundUrl);
   assert.equal(compoundState.error, undefined);
-  assert.equal(await sends(account, compoundUrl), 0);
+  assert.equal(await sends(account, compoundUrl), 1);
+  await new Promise(resolve => setTimeout(resolve, 2500));
+  assert.equal(await requestCount(compoundUrl), compoundRequests,
+    'A completed queued compound recovery stops retrying after the prompt is sent once');
   const compoundNative = await nativeFor(account, compoundUrl);
   await settled(account, compoundUrl);
   await desktop.evaluate(({ session, webContents }, { partition, id, url }) => {

@@ -80,6 +80,7 @@ export class BrowserRuntime {
   private readonly popups = new Map<string, Set<BrowserWindow>>();
   private activeId: string | null = null;
   private locks: AgentTask[] = [];
+  private automaticRecoveryTasks: AgentTask[] = [];
   private readonly owners = new Map<string, PageOwner>();
   private readonly selected = new Map<string, string>();
   private readonly restoredTabAccounts = new Set<string>();
@@ -168,15 +169,24 @@ export class BrowserRuntime {
     }
     if (owner.lastUrl && owner.lastUrl !== url) this.observer.disconnected(owner.accountId, owner.lastUrl);
     owner.lastUrl = url; owner.url = url;
+    const generation = this.loadGenerations.get(view);
     this.observing.set(id, view);
     try {
       const snapshot = pageOperationResult<ActivitySnapshot>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'activity' }))));
-      if (this.closing || this.views.get(id) !== view || contents.isDestroyed() || contents.getURL() !== url) return;
+      if (this.closing || this.views.get(id) !== view || contents.isDestroyed() || contents.getURL() !== url ||
+        this.loadGenerations.get(view) !== generation || this.pageLoading(contents)) return;
       if (snapshot.loadFailure) {
         // The website can finish its native load while its conversation request
         // failed. This says nothing about whether a submitted remote turn ended.
         // Reopen the same account/tab/URL and retain its persisted send receipt.
         owner.hibernationReady = false; owner.hasDraft = !!snapshot.hasDraft; owner.busy = snapshot.busy;
+        if (!this.hasAutomaticRecovery(id) && !this.hasUncommittedNavigation(view)) {
+          // A page-level site error is still an interactive document. Keep its
+          // Retry control visible unless this conversation has an active queue.
+          this.observer.disconnected(owner.accountId, url);
+          this.preserveSiteFailure(id, contents);
+          return;
+        }
         if (!this.hasUncommittedNavigation(view)) {
           const recovery = this.recoveries.get(id) ?? { attempts: 0 };
           const failedUrl = replyPageUrl(url);
@@ -268,13 +278,26 @@ export class BrowserRuntime {
     // A briefly visible page must not reset the budget of a repeatedly failing renderer.
     if (Date.now() - recovery.healthySince >= 60_000) recovery.attempts = 0;
   }
-  private endConversationRecovery(id: string): void {
+  private endConversationRecovery(id: string, recovered = true): void {
     const recovery = this.recoveries.get(id);
     if (!recovery) return;
     clearTimeout(recovery.timer); recovery.timer = undefined;
-    if (recovery.conversationUrl) this.diagnostics?.record(recovery.conversationFailure === 'reply_connection' ? 'reply_connection_recovered' : 'conversation_load_recovered');
+    if (recovered && recovery.conversationUrl) this.diagnostics?.record(recovery.conversationFailure === 'reply_connection' ? 'reply_connection_recovered' : 'conversation_load_recovered');
     recovery.conversationUrl = undefined; recovery.conversationAttempts = 0; recovery.conversationFailure = undefined;
     recovery.connectionKey = undefined; recovery.connectionSince = undefined;
+  }
+  private releaseConversationRecovery(id: string): void {
+    this.endConversationRecovery(id, false);
+    if ([CONVERSATION_LOAD_ERROR, REPLY_CONNECTION_ERROR].includes(this.errors.get(id) ?? '')) {
+      this.errors.delete(id); this.layout(); this.changed();
+    }
+  }
+  private preserveSiteFailure(id: string, contents: WebContents): void {
+    const hidden = this.errors.delete(id);
+    const loading = this.pageLoading(contents);
+    this.usableContents.add(contents);
+    this.endConversationRecovery(id, false);
+    if (hidden || loading) { this.layout(); this.changed(); }
   }
   private connectionFailureStable(recovery: RecoveryState, key: string | undefined): boolean {
     if (!key) return false;
@@ -305,6 +328,9 @@ export class BrowserRuntime {
       try {
         const page = pageOperationResult<Page>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'inspect' }))));
         if (!current() || contents.isDestroyed()) return;
+        if (page.loadFailure && !this.hasAutomaticRecovery(id)) {
+          this.preserveSiteFailure(id, contents); return;
+        }
         if (page.editor && page.readiness === 'ready') {
           this.usableContents.add(contents);
           this.errors.delete(id);
@@ -338,6 +364,9 @@ export class BrowserRuntime {
     // Keep the same conversation's recovery alive if its next fetch fails at
     // the transport layer. A different destination retains the native budget.
     if (state.conversationUrl && state.conversationUrl === target && ['load_failed', 'load_timeout'].includes(reason)) reason = 'conversation_load';
+    if (reason === 'conversation_load' && !this.hasAutomaticRecovery(id)) {
+      this.releaseConversationRecovery(id); return;
+    }
     state.healthySince = undefined;
     this.recoveries.set(id, state);
     if (state.timer || (reason !== 'conversation_load' && state.attempts >= MAX_PAGE_RECOVERIES)) return;
@@ -390,7 +419,8 @@ export class BrowserRuntime {
     if (this.closing || !owner || this.views.get(id) !== view) return;
     const generation = this.loadGenerations.get(view);
     const current = () => !this.closing && this.owners.get(id) === owner && this.views.get(id) === view &&
-      this.loadGenerations.get(view) === generation && (reason === 'manual' || this.errors.has(id));
+      this.loadGenerations.get(view) === generation && (reason === 'manual' || this.errors.has(id)) &&
+      (reason !== 'conversation_load' || this.hasAutomaticRecovery(id));
     const contents = view.webContents;
     const stillDamaged = async () => {
       if (!current()) return false;
@@ -437,6 +467,9 @@ export class BrowserRuntime {
         }
         const page = pageOperationResult<Page>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'inspect' }))));
         if (!current()) return false;
+        if (page.loadFailure && !this.hasAutomaticRecovery(id)) {
+          this.preserveSiteFailure(id, contents); return false;
+        }
         const recovery = this.recoveries.get(id);
         if (reason === 'conversation_load' && recovery?.conversationUrl && replyPageUrl(page.url) !== recovery.conversationUrl) {
           this.errors.delete(id); this.endConversationRecovery(id);
@@ -879,6 +912,11 @@ export class BrowserRuntime {
     const owner = this.owners.get(id); if (!owner) return false;
     return this.locks.some(task => task.accountId === owner.accountId && (this.taskPage(task) === id || !!task.conversationId && task.conversationId === owner.conversationId));
   }
+  private hasAutomaticRecovery(id: string): boolean {
+    const owner = this.owners.get(id);
+    return !!owner && this.automaticRecoveryTasks.some(task => task.accountId === owner.accountId &&
+      (this.taskPage(task) === id || !!task.conversationId && task.conversationId === owner.conversationId));
+  }
   private isInteractionLocked(id: string, contents?: WebContents): boolean {
     const page = contents ?? this.views.get(id)?.webContents;
     return this.isLocked(id) && !(page && !page.isDestroyed() && isAccountLoginUrl(page.getURL()));
@@ -1234,8 +1272,12 @@ export class BrowserRuntime {
     // An opening tab must never inherit the previous tab's persisted destination.
     return contents && !contents.isDestroyed() ? contents.getURL() || owner?.url : owner?.url;
   }
-  setLocked(tasks: AgentTask[]): void {
+  setLocked(tasks: AgentTask[], automaticRecoveryTasks: AgentTask[] = []): void {
     this.locks = tasks;
+    this.automaticRecoveryTasks = automaticRecoveryTasks;
+    for (const [id, recovery] of this.recoveries) {
+      if (recovery.conversationUrl && !this.hasAutomaticRecovery(id)) this.releaseConversationRecovery(id);
+    }
     for (const taskId of this.taskPages.keys()) if (!tasks.some(task => task.id === taskId)) this.taskPages.delete(taskId);
     for (const id of this.previewFrames.keys()) if (!this.isLocked(id)) {
       this.previewFrames.delete(id); this.previewStale.delete(id); this.previewAwaken.delete(id);

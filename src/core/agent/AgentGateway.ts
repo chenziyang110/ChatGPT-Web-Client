@@ -187,6 +187,20 @@ export class AgentGateway {
     return this.listTasks().filter(task => active.has(task.id) || task.attention && !task.resolvedAt && ['waiting_user', 'uncertain'].includes(task.status) &&
       (this.db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.control ?? this.db.read<AccountQueue>('account_queues', task.accountId)?.control) !== 'human');
   }
+  automaticRecoveryTasks(): AgentTask[] {
+    if (this.stopped) return [];
+    const tasks = this.listTasks();
+    const blocked = new Set(tasks.filter(task => task.status === 'waiting_user' || task.status === 'uncertain' && !task.resolvedAt)
+      .map(task => queueKey(task.accountId, task.conversationId)));
+    const queues = new Map(this.db.records<AccountQueue>('account_queues').map(queue => [queueKey(queue.accountId, queue.conversationId), queue]));
+    return tasks.filter(task => {
+      if (!['pending', 'running'].includes(task.status) || task.input.type !== 'prompt' || !task.input.submit ||
+        blocked.has(queueKey(task.accountId, task.conversationId))) return false;
+      const account = queues.get(task.accountId);
+      const conversation = queues.get(queueKey(task.accountId, task.conversationId));
+      return !account?.paused && account?.control !== 'human' && !conversation?.paused && conversation?.control !== 'human';
+    });
+  }
   lockedAccounts(): string[] { return [...new Set(this.lockedTasks().map(task => task.accountId))]; }
   isRunning(accountId: string, conversationId?: string): boolean {
     return [...this.running.values()].some(slot => { const task = this.get(slot.id); return task.accountId === accountId && (!conversationId || task.conversationId === conversationId); });

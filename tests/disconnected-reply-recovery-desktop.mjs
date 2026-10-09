@@ -299,7 +299,10 @@ try {
   if (process.argv.includes('--draft-only')) {
     const draft = await open(account, 'human-draft-legacy');
     const humanDraft = 'Unsent human draft must remain editable during reconnect';
-    await contents(account, draft.url, "window.fixtureSend('HOLD:focused draft'); window.fixtureDisconnect(); window.fixtureSetDraft(" + JSON.stringify(humanDraft) + ')');
+    await contents(account, draft.url, "window.fixtureSend('HOLD:focused draft')");
+    const next = await add(account, draft.conversation, 'Next after queued draft-safe reconnect');
+    await until(async () => (await task(next.id)).phase === 'waiting_idle', 'Draft-held queue must wait behind the current reply');
+    await contents(account, draft.url, 'window.fixtureDisconnect(); window.fixtureSetDraft(' + JSON.stringify(humanDraft) + ')');
     await sleep(10500);
     await editableDraft(account, draft, humanDraft);
     await contents(account, draft.url, "window.fixtureSetDraft('')");
@@ -356,6 +359,24 @@ try {
       assert.equal(await requests(manual.url), 2, 'Successful reconnect runs once');
     }
 
+    const takeover = await open(account, 'takeover-cancels-recovery');
+    await contents(account, takeover.url, "window.fixtureSend('HOLD:takeover before reconnect')");
+    const takeoverNext = await add(account, takeover.conversation, 'must wait after human takeover');
+    await until(async () => (await task(takeoverNext.id)).phase === 'waiting_idle',
+      'Takeover scenario must have an automatic queue item waiting behind the current reply');
+    await contents(account, takeover.url, 'window.fixtureDisconnect()');
+    await exactDisconnect(account, takeover, 'legacy');
+    const takeoverRequests = await requests(takeover.url);
+    const takeoverNative = await contents(account, takeover.url);
+    await rpc('queues.takeover', { accountId: account.id, conversation: takeover.conversation.id });
+    await sleep(4500);
+    assert.equal(await requests(takeover.url), takeoverRequests,
+      'Human takeover after a disconnected reply cancels the pending automatic recovery timer');
+    assert.equal((await contents(account, takeover.url)).id, takeoverNative.id,
+      'Human takeover leaves the original disconnected page visible for manual handling');
+    assert.equal((await task(takeoverNext.id)).submittedAt, undefined,
+      'Human takeover does not submit the queued successor');
+
     for (const mode of ['legacy', 'modern']) await submittedRecovery(account, other, mode);
 
     // Start independent negative cases together, then give the real stability
@@ -384,9 +405,10 @@ try {
     await editableDraft(account, draft, humanDraft);
     assert.equal((await inspect(account, quoted.page.id)).loadFailure, undefined, 'Quoted/history cards are not current reply disconnections');
     await contents(account, draft.url, "window.fixtureSetDraft('')");
-    await until(async () => await requests(draft.url) === 2, 'Clearing the human draft allows the still disconnected reply to recover', 14000);
-    await until(() => reconnected(account, draft.url), 'Draft-safe recovery must mount the existing reply');
-    await retained(account, draft);
+    await sleep(4500);
+    assert.equal(await requests(draft.url), 1,
+      'Clearing a human draft on a normal disconnected reply still does not authorize automatic recovery without its own queue');
+    assert.equal((await contents(account, draft.url)).id, draft.native.id);
 
     const refresh = await open(account, 'refresh-modern');
     await contents(account, refresh.url, "window.fixtureSend('HOLD:refresh reconnects'); window.fixtureDisconnect()");
@@ -399,6 +421,9 @@ try {
 
     const repeated = await open(account, 'repeated-legacy');
     await contents(account, repeated.url, "window.fixtureSend('HOLD:repeated disconnect'); window.fixtureDisconnect(4)");
+    const repeatedNext = await add(account, repeated.conversation, 'Next after repeated queued reconnect');
+    await until(async () => (await task(repeatedNext.id)).phase === 'waiting_idle',
+      'Repeated disconnected reply must have an automatic queue item waiting behind the current reply');
     await until(async () => await requests(repeated.url) === 5 && await reconnected(account, repeated.url),
       'A disconnected reply must keep recovering beyond three attempts', 60000);
     await retained(account, repeated);

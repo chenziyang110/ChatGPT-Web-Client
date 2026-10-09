@@ -30,6 +30,8 @@
 | 新增授权策略测试 | 5 项通过，包含精确匹配、长度、编码控制字符和非法协议 |
 | 构建 / 类型检查 | 通过 |
 | native-app-auth-desktop | 通过 |
+| Windows 打包后的授权回归 | 通过，直接加载打包内的主程序 |
+| 加载恢复桌面回归 | 最终响应流场景在 Windows 通过 1 次，独立 Linux 环境连续通过 3 次 |
 | custom-link-desktop | 通过 |
 | oauth-interaction-desktop | 通过 |
 | npm audit | 0 项漏洞 |

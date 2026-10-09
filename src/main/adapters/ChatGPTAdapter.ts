@@ -158,7 +158,7 @@ export function pageOperation(operation: Operation): unknown {
         const raw = element.textContent?.trim() ?? '';
         if (raw.length > 160 || !/连接已中断|Connection interrupted/i.test(raw)) return false;
         const label = element.innerText.trim();
-        return label.length < 160 && /^(?:连接已中断[。.!！，,]?\s*正在等待完整回复|Connection interrupted[.!，,]?\s*Waiting for (?:a )?complete response)[。.!！…]*$/i.test(label);
+        return label.length < 160 && /^(?:连接已中断[。.!！，,]?\s*正在等待完整(?:回复|答复)|Connection interrupted[.!，,]?\s*Waiting for (?:a )?complete response)[。.!！…]*$/i.test(label);
       });
     const interrupted = connectionInterrupted && !stopVisible;
     // Keep Stop/busy truthful. Refresh a suspended connection before trying

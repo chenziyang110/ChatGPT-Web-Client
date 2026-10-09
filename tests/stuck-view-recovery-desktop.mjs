@@ -8,7 +8,10 @@ const root = path.resolve('.');
 const directory = await mkdtemp(path.join(root, '.test-stuck-view-recovery-'));
 const bootstrap = path.join(directory, 'fixture.cjs');
 const mainEntry = process.env.WORKSPACE_TEST_MAIN_CJS || path.join(root, 'dist-electron/main.cjs');
-const slowResourceFixture = fixture.replace('</main>', '<iframe id="stuck-subresource" src="/slow-resource" hidden></iframe></main>');
+// Commit the child document before holding its eager image request. A hidden
+// iframe waiting for its initial response does not reliably keep Chromium's
+// whole-WebContents loading state active on every desktop platform.
+const slowResourceFixture = fixture.replace('</main>', '<iframe id="stuck-subresource" src="/pending-resource-frame" loading="eager" width="1" height="1"></iframe></main>');
 assert.notEqual(slowResourceFixture, fixture);
 
 await writeFile(bootstrap, `const { app, Notification } = require('electron');
@@ -30,6 +33,10 @@ app.on('session-created', isolated => {
     globalThis.protocolRequests.push(request.url);
     if (url.pathname === '/__stuck__' || url.pathname === '/slow-resource') {
       await new Promise(() => {});
+    }
+    if (url.pathname === '/pending-resource-frame') {
+      return new Response('<!doctype html><html><body><img id="pending-image" src="/slow-resource' + url.search + '" loading="eager" width="1" height="1"></body></html>',
+        { headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' } });
     }
     const blockedByUrl = globalThis.blockedTargetUrls.has(request.url) || globalThis.blockedTargetUrls.has(url.pathname);
     const oneShotBlockedByUrl = globalThis.oneShotBlockedTargetUrls.has(request.url) || globalThis.oneShotBlockedTargetUrls.has(url.pathname);
@@ -333,6 +340,10 @@ try {
   await until(async () => (await rpc('tasks.get', { id: slowNav.id })).status === 'done',
     'Slow subresource page did not become usable');
   const slowPage = (await rpc('workspace.status')).page;
+  await until(() => desktop.evaluate(() => globalThis.protocolRequests.includes('https://chatgpt.com/slow-resource')),
+    'Slow subresource fixture must actually start its eager image request');
+  await until(async () => (await webContentsFor(first, slowUrl))?.loading === true,
+    'Slow subresource fixture did not start a real pending native load');
   const slowContents = await requireWebContentsFor(first, slowUrl);
   assert.equal(slowContents.loading, true, 'Fixture must keep native loading true for a pending subresource');
   assert.equal(slowContents.waitingResponse, false, 'Pending subresource is not a main-frame response stall');
@@ -340,6 +351,7 @@ try {
   const slowAfter = await requireWebContentsFor(first, slowUrl);
   const slowState = (await rpc('workspace.status')).pages.find(page => page.id === slowPage.id);
   assert.equal(slowAfter.id, slowContents.id, 'A permanently pending subresource must not recreate a ready composer page');
+  assert.equal(slowAfter.loading, true, 'The pending subresource must keep native loading true throughout the recovery timeout');
   assert.equal(slowState?.id, slowPage.id);
   assert.equal((await rpc('workspace.status')).page?.error, undefined, 'A ready composer page with a pending subresource must not be hidden behind recovery UI');
   assert.equal((await rpc('browser.inspect', { accountId: first.id, pageId: slowPage.id })).readiness, 'ready');
@@ -387,17 +399,20 @@ try {
   await waitSettledDocument(first, usableResetOriginal.id,
     'Usable reset original document must finish loading before adding its pending iframe');
   await runInPage(first, usableResetStartUrl,
-    "const iframe = document.createElement('iframe'); iframe.hidden = true; iframe.src = '/slow-resource?usable-reset'; document.body.append(iframe);");
+    "const iframe = document.createElement('iframe'); iframe.loading = 'eager'; iframe.width = 1; iframe.height = 1; iframe.src = '/pending-resource-frame?usable-reset'; document.body.append(iframe);");
   await until(() => desktop.evaluate(() => globalThis.protocolRequests.includes('https://chatgpt.com/slow-resource?usable-reset')),
-    'Usable reset fixture must actually start its new iframe request');
+    'Usable reset fixture must actually start its new eager image request');
   await until(async () => (await webContentsById(first, usableResetOriginal.id))?.loading === true,
     'Usable reset fixture did not keep loading true with a pending iframe');
   assert.equal(await runInPageById(first, usableResetOriginal.id,
     "!!document.querySelector('#prompt-textarea') && !document.querySelector('#prompt-textarea').disabled"), true,
   'The page DOM remains usable while the iframe keeps native loading true');
   await new Promise(resolve => setTimeout(resolve, 2800));
-  assert.equal((await requireWebContentsFor(first, usableResetStartUrl)).id, usableResetOriginal.id,
+  const usableResetPending = await requireWebContentsFor(first, usableResetStartUrl);
+  assert.equal(usableResetPending.id, usableResetOriginal.id,
     'Pending iframe marks the page usable without replacing it');
+  assert.equal(usableResetPending.loading, true, 'The pending resource must still keep native loading true before main navigation');
+  assert.equal(usableResetPending.waitingResponse, false, 'The pending resource must not stall the main-frame response');
   await startPendingMainNavigationById(first, usableResetOriginal.id, usableResetDestinationUrl);
   await until(async () => {
     const pendingMain = await webContentsById(first, usableResetOriginal.id);

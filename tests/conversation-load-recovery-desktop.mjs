@@ -89,8 +89,8 @@ const until = async (check, label, ms = 30000) => {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
 };
-const rpc = (method, params = {}) => bounded(shell.evaluate(({ method, params }) =>
-  window.workspace.call(method, params), { method, params }), method);
+const rpc = (method, params = {}, ms = 20000) => bounded(shell.evaluate(({ method, params }) =>
+  window.workspace.call(method, params), { method, params }), method, ms);
 const nativeFor = (account, url) => desktop.evaluate(({ session, webContents }, { partition, url }) => {
   const isolated = session.fromPartition(partition);
   const contents = webContents.getAllWebContents().find(item => item.session === isolated && item.getURL() === url);
@@ -105,7 +105,31 @@ const inPage = (account, url, script) => desktop.evaluate(async ({ session, webC
 }, { partition: account.partition, url, script });
 const requestCount = url => desktop.evaluate((_electron, url) =>
   globalThis.fixtureRequests.filter(request => request === url).length, url);
-const inspect = (account, pageId) => rpc('browser.inspect', { accountId: account.id, pageId });
+const inspect = async (account, pageId) => {
+  // A logical tab survives recovery while its native frame is replaced. Do not
+  // send diagnostics into a loading frame, and bound the narrow race between
+  // this native check and the actual RPC so one disposed-frame request cannot
+  // consume the readiness deadline without polling the replacement document.
+  const workspace = await rpc('workspace.status');
+  const page = workspace.pages.find(item => item.accountId === account.id &&
+    (pageId ? item.id === pageId : item.selected));
+  const native = page && await nativeFor(account, page.url);
+  if (!native || native.loading || native.waitingResponse) return { readiness: 'loading' };
+  try {
+    return await rpc('browser.inspect', { accountId: account.id, pageId }, 1500);
+  } catch (error) {
+    if (/Execution context was destroyed|Render frame was disposed|frame was disposed|Object has been destroyed/i.test(String(error))) {
+      return { readiness: 'loading' };
+    }
+    if (/browser\.inspect timed out/.test(String(error))) {
+      const current = await nativeFor(account, page.url);
+      if (!current || current.id !== native.id || current.loading || current.waitingResponse) {
+        return { readiness: 'loading' };
+      }
+    }
+    throw error;
+  }
+};
 const open = async (account, url) => {
   await rpc('accounts.switch', { id: account.id });
   const conversation = await rpc('conversations.register', { accountId: account.id, url });
@@ -175,6 +199,16 @@ try {
     'Recovery must not replace a healthy sibling WebContents');
   assert.equal((await rpc('tasks.get', { id: siblingTask.id })).status, 'running');
 
+  if (process.argv.includes('--initial-only')) {
+    assert.equal((await nativeFor(other, 'https://chatgpt.com/')).id, otherNative.id,
+      'Initial semantic recovery retains the independent profile document');
+    assert.equal(await inPage(other, 'https://chatgpt.com/', "localStorage.getItem('fixture-profile-marker')"), 'retained');
+    const cookies = await desktop.evaluate(({ session }, partition) =>
+      session.fromPartition(partition).cookies.get({ name: 'fixture-profile' }), other.partition);
+    assert.equal(cookies[0]?.value, 'retained');
+    passed = true;
+    console.log('Initial conversation load recovery passed: one settled semantic failure reconnects the original logical tab without sending, clearing profiles, or replacing a healthy sibling.');
+  } else {
   const skeleton = await open(account, skeletonUrl);
   await ready(account, skeleton.page.id, 'Skeleton fixture did not load');
   await settled(account, skeletonUrl);
@@ -351,6 +385,7 @@ try {
 
   passed = true;
   console.log('Conversation load recovery passed: settled semantic errors and async retry skeletons recover, restored drafts cancel deferred rebuilds, queued receipts survive page/isolated-connection recovery without replay, recurring failures and a same-target native stall continue automatically, a distinct native failure retains its normal cap, healthy profiles/siblings remain live, and quoted/sidebar/hidden errors are ignored.');
+  }
 } catch (error) {
   const state = await rpc('workspace.status').catch(failure => ({ error: String(failure) }));
   const runtimeLog = await readFile(path.join(directory, 'logs/runtime.jsonl'), 'utf8')

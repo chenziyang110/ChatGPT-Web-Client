@@ -8,7 +8,9 @@ import path from 'node:path';
 function fixtureDocument() {
   const modern = location.pathname.endsWith('-modern');
   const key = 'disconnected-reply:' + location.pathname;
-  const label = '连接已中断，正在等待完整回复';
+  // The live modern status uses 答复, with no streaming test attribute.
+  // Keep the older 回复 wording and data-is-streaming schema independently.
+  const label = modern ? '连接已中断，正在等待完整答复' : '连接已中断，正在等待完整回复';
   let state = JSON.parse(localStorage.getItem(key) || 'null') || {
     messages: [], sent: [], busy: false, disconnected: false, remaining: 0, stopClicks: 0,
   };
@@ -24,7 +26,13 @@ function fixtureDocument() {
   const setDraft = text => { if (modern) editor.textContent = text; else editor.value = text; control(); };
   function card() {
     const node = document.createElement('div');
-    node.id = 'fixture-disconnected'; node.dataset.isStreaming = 'true'; node.textContent = label;
+    node.id = 'fixture-disconnected';
+    if (modern) {
+      node.setAttribute('role', 'status');
+      const status = document.createElement('span'); status.textContent = label; node.append(status);
+    } else {
+      node.dataset.isStreaming = 'true'; node.textContent = label;
+    }
     return node;
   }
   function render() {
@@ -48,6 +56,7 @@ function fixtureDocument() {
         const quote = document.createElement('blockquote');
         const p = document.createElement('p'); p.textContent = label; quote.append(p); text.append(quote);
       }
+      if (message.userQuote) (modern ? text.querySelector('[data-user-message-bubble]') : text).append(card());
       turn.append(text);
       if (message.finished && message.role === 'assistant') {
         const actions = document.createElement('div'); actions.className = 'turn-action-controls';
@@ -121,12 +130,22 @@ function fixtureDocument() {
   window.fixtureQuoteAndHistory = () => {
     state.messages.unshift({ role: 'user', id: crypto.randomUUID(), text: 'Historical turn' },
       { role: 'assistant', id: crypto.randomUUID(), text: 'Historical answer', finished: true, historical: true });
+    state.messages.filter(message => message.role === 'user').at(-1).userQuote = true;
     state.messages.at(-1).quoted = true; render();
     const sidebar = document.createElement('aside'); sidebar.append(card()); document.body.append(sidebar);
     const hidden = card(); hidden.hidden = true; turns.append(hidden);
   };
-  window.fixtureState = () => ({ ...state, draft: draft(), marker: !!turns.querySelector('#fixture-disconnected'),
-    stop: !!controls.querySelector(modern ? 'button[aria-label="停止"]' : '[data-testid="stop-button"]') });
+  window.fixtureState = () => {
+    const marker = turns.querySelector('#fixture-disconnected');
+    const stop = controls.querySelector(modern ? 'button[aria-label="停止"]' : '[data-testid="stop-button"]');
+    return { ...state, draft: draft(), marker: !!marker, stop: !!stop,
+      fault: marker && { label: marker.textContent, role: marker.getAttribute('role'),
+        streaming: marker.getAttribute('data-is-streaming'), span: marker.querySelector('span')?.textContent ?? null,
+        inMessage: !!marker.closest('[data-message-author-role], [data-chatgpt-search-unit-key], [data-user-message-bubble]'),
+        inQuote: !!marker.closest('pre, code, blockquote'), hidden: !marker.getClientRects().length,
+        stopLabel: stop?.getAttribute('aria-label'), stopTestId: stop?.getAttribute('data-testid'),
+        stopVisible: !!stop?.getClientRects().length } };
+  };
 }
 const fixture = '<!doctype html><html><head><meta charset="utf-8"><title>Disconnected reply fixture</title>' +
   '<style>[data-message-author-role], [data-chatgpt-search-unit-key] { white-space: pre-wrap; }</style>' +
@@ -208,6 +227,16 @@ async function retained(account, original) {
   assert.equal(page?.url, original.url, 'Recovery retains the original URL');
   assert.equal((await state(account, original.url)).stopClicks, 0, 'Recovery never clicks Stop');
 }
+async function exactDisconnect(account, current, mode) {
+  const modern = mode === 'modern';
+  const label = modern ? '连接已中断，正在等待完整答复' : '连接已中断，正在等待完整回复';
+  const disconnected = await state(account, current.url);
+  assert.equal(disconnected.stop, true, 'The observed fault retains its visible Stop');
+  assert.deepEqual(disconnected.fault, { label, role: modern ? 'status' : null,
+    streaming: modern ? null : 'true', span: modern ? label : null, inMessage: false, inQuote: false,
+    hidden: false, stopLabel: '停止', stopTestId: modern ? null : 'stop-button', stopVisible: true },
+    'The fixture reproduces the exact status card and Stop controls before recovery');
+}
 async function editableDraft(account, current, humanDraft) {
   assert.equal(await requests(current.url), 1, 'A human draft defers native recovery');
   assert.equal((await contents(account, current.url)).id, current.native.id);
@@ -222,8 +251,8 @@ async function editableDraft(account, current, humanDraft) {
     return native?.getVisible();
   }, current.native.id), true, 'The selected native composer remains visible and accessible');
 }
-async function submittedRecovery(account, other) {
-  const submitted = await open(account, 'submitted-modern');
+async function submittedRecovery(account, other, mode) {
+  const submitted = await open(account, 'submitted-' + mode);
   const head = await add(account, submitted.conversation, 'HOLD:confirmed original queued turn');
   const next = await add(account, submitted.conversation, 'Successor after queued reconnect');
   await until(async () => !!(await task(head.id)).submittedAt, 'Queue head needs a send receipt');
@@ -234,6 +263,7 @@ async function submittedRecovery(account, other) {
   assert.ok(Array.isArray(receipt.sendReceipt.users));
   await rpc('accounts.switch', { id: other.id });
   await contents(account, submitted.url, 'window.fixtureDisconnect()');
+  await exactDisconnect(account, submitted, mode);
   await until(async () => await requests(submitted.url) === 2, 'A background submitted reply must automatically reconnect', 14000);
   await until(() => reconnected(account, submitted.url), 'Submitted head did not reconnect');
   assert.equal((await inspect(account, submitted.page.id)).busy, true, 'The reconnected submitted reply remains busy');
@@ -281,9 +311,9 @@ try {
   } else if (process.argv.includes('--receipt-only')) {
     const other = await rpc('accounts.create', { name: 'Independent receipt profile' });
     await until(async () => (await inspect(other)).readiness === 'ready', 'Independent profile did not load');
-    await submittedRecovery(account, other);
+    for (const mode of ['legacy', 'modern']) await submittedRecovery(account, other, mode);
     passed = true;
-    console.log('Disconnected reply receipt recovery passed: a nonempty original receipt survives native rebuild, actual busy holds the successor, and each prompt is sent once.');
+    console.log('Disconnected reply receipt recovery passed: legacy 完整回复 and modern 完整答复 status faults preserve original receipts across rebuild, actual busy holds successors, and each prompt is sent once.');
   } else {
     const other = await rpc('accounts.create', { name: 'Healthy independent profile' });
     await until(async () => (await inspect(other)).readiness === 'ready', 'Other account fixture did not load');
@@ -300,7 +330,7 @@ try {
       await until(async () => (await task(next.id)).phase === 'waiting_idle', 'Manual prior turn must hold the queue');
       await contents(account, manual.url, 'window.fixtureDisconnect()');
       if (mode === 'legacy') await contents(account, manual.url, 'window.fixtureVolatileTicker()');
-      assert.equal((await state(account, manual.url)).stop, true, 'Screenshot fault retains its visible Stop');
+      await exactDisconnect(account, manual, mode);
       const disconnected = await inspect(account, manual.page.id);
       assert.equal(disconnected.loadFailure, 'reply_connection', 'Reply disconnection is a recoverable page fault');
       assert.equal(disconnected.busy, true, 'Recognizing the fault does not force the reply idle');
@@ -326,7 +356,7 @@ try {
       assert.equal(await requests(manual.url), 2, 'Successful reconnect runs once');
     }
 
-    await submittedRecovery(account, other);
+    for (const mode of ['legacy', 'modern']) await submittedRecovery(account, other, mode);
 
     // Start independent negative cases together, then give the real stability
     // window time to expire. They retain their native documents and Stop controls.

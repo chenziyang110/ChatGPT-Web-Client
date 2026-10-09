@@ -2,12 +2,12 @@ import { createHash } from 'node:crypto';
 import type { Database } from '../storage/Database';
 import { conversationUrl } from '../conversation/ConversationManager';
 import { AppError } from '../validation';
-import type { ConversationNotice } from '../../shared/types';
+import type { BrowserReadiness, ConversationNotice } from '../../shared/types';
 
 export const COMPLETION_STABLE_MS = 6000;
 
 export interface ActivitySnapshot {
-  url: string; title: string; editor: boolean; busy: boolean; hasDraft?: boolean; error?: string;
+  url: string; title: string; editor: boolean; busy: boolean; hasDraft?: boolean; error?: string; loadFailure?: 'conversation' | 'reply_connection'; connectionKey?: string; readiness?: BrowserReadiness;
   user?: { id: string; text: string }; assistant?: { id: string; text: string; terminal: boolean; hasContent?: boolean }; lastRole?: string;
 }
 export function replyToken(user: { id: string; text: string }, assistant: { id: string; text: string }): string {

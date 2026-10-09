@@ -8,7 +8,7 @@ import type { AgentTask, BrowserBounds, BrowserDiagnostics, BrowserPreview, Brow
 import { bindShortcuts } from './shortcuts';
 import { ChatGPTAdapter, executePageScript, pageOperationScript, pageOperationResult, replyPageUrl, type Page } from './adapters/ChatGPTAdapter';
 import { ReplyReader } from './adapters/ReplyReader';
-import { ConversationActivityObserver, type ActivitySnapshot, type ConversationNotifications } from '../core/notifications/ConversationNotifications';
+import { COMPLETION_STABLE_MS, ConversationActivityObserver, type ActivitySnapshot, type ConversationNotifications } from '../core/notifications/ConversationNotifications';
 import type { ShortcutSettings } from '../core/settings/ShortcutSettings';
 import type { ExecutionContext } from '../core/agent/AgentGateway';
 import type { ConversationManager } from '../core/conversation/ConversationManager';
@@ -37,10 +37,16 @@ const PREVIEW_TIMEOUT_MS = 5_000;
 const DEFAULT_PAGE_LOAD_TIMEOUT_MS = 20_000;
 const PAGE_LOAD_TIMEOUT_ERROR = '网页加载时间过长，请检查网络或点击“恢复页面”重试';
 const PAGE_NAVIGATION_INCOMPLETE_ERROR = '网页导航未完成，正在自动恢复';
+const CONVERSATION_LOAD_ERROR = 'ChatGPT 会话暂时无法加载，正在自动重试';
+const REPLY_CONNECTION_ERROR = 'ChatGPT 连接已中断，正在自动重新连接';
 const PAGE_PROBE_TIMEOUT_MS = 2_000;
 const MAX_PAGE_RECOVERIES = 3;
-type RecoveryReason = 'load_timeout' | 'load_failed' | 'renderer_gone' | 'unresponsive' | 'manual';
-interface RecoveryState { attempts: number; healthySince?: number; timer?: ReturnType<typeof setTimeout> }
+type RecoveryReason = 'load_timeout' | 'load_failed' | 'conversation_load' | 'renderer_gone' | 'unresponsive' | 'manual';
+interface RecoveryState {
+  attempts: number; conversationAttempts?: number; conversationUrl?: string;
+  conversationFailure?: Page['loadFailure']; connectionKey?: string; connectionSince?: number;
+  healthySince?: number; timer?: ReturnType<typeof setTimeout>;
+}
 
 async function boundedPageOperation<T>(operation: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -162,6 +168,51 @@ export class BrowserRuntime {
     try {
       const snapshot = pageOperationResult<ActivitySnapshot>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'activity' }))));
       if (this.closing || this.views.get(id) !== view || contents.isDestroyed() || contents.getURL() !== url) return;
+      if (snapshot.loadFailure) {
+        // The website can finish its native load while its conversation request
+        // failed. This says nothing about whether a submitted remote turn ended.
+        // Reopen the same account/tab/URL and retain its persisted send receipt.
+        owner.hibernationReady = false; owner.hasDraft = !!snapshot.hasDraft; owner.busy = snapshot.busy;
+        if (!this.hasUncommittedNavigation(view)) {
+          const recovery = this.recoveries.get(id) ?? { attempts: 0 };
+          const failedUrl = replyPageUrl(url);
+          if (recovery.conversationUrl && recovery.conversationUrl !== failedUrl) {
+            clearTimeout(recovery.timer); recovery.timer = undefined;
+            recovery.conversationAttempts = 0;
+            recovery.connectionKey = undefined; recovery.connectionSince = undefined;
+          }
+          recovery.conversationUrl = failedUrl;
+          recovery.conversationFailure = snapshot.loadFailure;
+          this.recoveries.set(id, recovery);
+          // A transient reconnect banner or genuinely progressing reply must
+          // not cause a refresh. Only a stable current interruption may bypass
+          // the normal protection for an active Stop control.
+          if (snapshot.loadFailure === 'reply_connection' && (!this.connectionFailureStable(recovery, snapshot.connectionKey) || owner.hasDraft)) {
+            if (owner.hasDraft) { clearTimeout(recovery.timer); recovery.timer = undefined; }
+            if (this.errors.get(id) === REPLY_CONNECTION_ERROR) {
+              this.errors.delete(id); this.layout(); this.changed();
+            }
+            return;
+          }
+        }
+        this.observer.disconnected(owner.accountId, url);
+        const error = snapshot.loadFailure === 'reply_connection' ? REPLY_CONNECTION_ERROR : CONVERSATION_LOAD_ERROR;
+        if (this.errors.get(id) !== error) {
+          this.errors.set(id, error);
+          this.diagnostics?.record(snapshot.loadFailure === 'reply_connection' ? 'reply_connection_interrupted' : 'conversation_load_failed');
+          this.layout(); this.changed();
+        }
+        this.scheduleRecovery(id, view, this.hasUncommittedNavigation(view) ? 'load_failed' : 'conversation_load');
+        return;
+      }
+      if ((this.errors.get(id) === CONVERSATION_LOAD_ERROR || this.errors.get(id) === REPLY_CONNECTION_ERROR || this.recoveries.get(id)?.conversationUrl) && !this.hasUncommittedNavigation(view) &&
+        (snapshot.editor && !snapshot.error || snapshot.busy || snapshot.readiness === 'login_required' || snapshot.readiness === 'verification_required')) {
+        // The site's Retry action can recover before our deferred retry runs.
+        // Leave the current document and any newly entered draft in place.
+        this.errors.delete(id);
+        this.endConversationRecovery(id);
+        this.layout(); this.changed();
+      }
       snapshot.title = this.title(owner.accountId, snapshot.url, snapshot.title);
       const activityKey = JSON.stringify([snapshot.url, snapshot.busy, snapshot.hasDraft, snapshot.user?.id,
         snapshot.assistant?.id, snapshot.assistant?.text.length, snapshot.lastRole]);
@@ -213,6 +264,22 @@ export class BrowserRuntime {
     // A briefly visible page must not reset the budget of a repeatedly failing renderer.
     if (Date.now() - recovery.healthySince >= 60_000) recovery.attempts = 0;
   }
+  private endConversationRecovery(id: string): void {
+    const recovery = this.recoveries.get(id);
+    if (!recovery) return;
+    clearTimeout(recovery.timer); recovery.timer = undefined;
+    if (recovery.conversationUrl) this.diagnostics?.record(recovery.conversationFailure === 'reply_connection' ? 'reply_connection_recovered' : 'conversation_load_recovered');
+    recovery.conversationUrl = undefined; recovery.conversationAttempts = 0; recovery.conversationFailure = undefined;
+    recovery.connectionKey = undefined; recovery.connectionSince = undefined;
+  }
+  private connectionFailureStable(recovery: RecoveryState, key: string | undefined): boolean {
+    if (!key) return false;
+    if (recovery.connectionKey !== key) {
+      clearTimeout(recovery.timer); recovery.timer = undefined;
+      recovery.connectionKey = key; recovery.connectionSince = Date.now();
+    }
+    return Date.now() - (recovery.connectionSince ?? Date.now()) >= COMPLETION_STABLE_MS;
+  }
   private async checkStalledLoad(id: string, view: WebContentsView, generation: number): Promise<void> {
     const contents = view.webContents;
     const current = () => this.views.get(id) === view && this.loadGenerations.get(view) === generation;
@@ -256,20 +323,33 @@ export class BrowserRuntime {
       return;
     }
     const state = this.recoveries.get(id) ?? { attempts: 0 };
+    const contents = view.webContents;
+    const navigationTarget = this.pendingNavigations.get(view) ?? (contents && !contents.isDestroyed() ? contents.getURL() : '');
+    const target = replyPageUrl(navigationTarget || this.owners.get(id)?.url || '');
+    if (state.conversationUrl && state.conversationUrl !== target) {
+      clearTimeout(state.timer); state.timer = undefined;
+      state.conversationUrl = undefined; state.conversationAttempts = 0; state.conversationFailure = undefined;
+      state.connectionKey = undefined; state.connectionSince = undefined;
+    }
+    // Keep the same conversation's recovery alive if its next fetch fails at
+    // the transport layer. A different destination retains the native budget.
+    if (state.conversationUrl && state.conversationUrl === target && ['load_failed', 'load_timeout'].includes(reason)) reason = 'conversation_load';
     state.healthySince = undefined;
     this.recoveries.set(id, state);
-    if (state.timer || state.attempts >= MAX_PAGE_RECOVERIES) return;
+    if (state.timer || (reason !== 'conversation_load' && state.attempts >= MAX_PAGE_RECOVERIES)) return;
     // Preserve a known human draft on a responsive page. Main-frame loads and
     // crashed pages have no usable document to preserve.
     const owner = this.owners.get(id);
-    const contents = view.webContents;
     if (owner?.hasDraft && contents && !contents.isDestroyed() && !contents.isCrashed() && !this.pageLoading(contents) && !this.hasUncommittedNavigation(view)) return;
     const generation = this.loadGenerations.get(view);
+    const attempts = reason === 'conversation_load' ? state.conversationAttempts ?? 0 : state.attempts;
+    // A failed conversation fetch is commonly transient. Continue at a bounded
+    // low frequency instead of permanently requiring repeated manual refreshes.
     state.timer = setTimeout(() => {
       state.timer = undefined;
       if (this.closing || this.views.get(id) !== view || this.loadGenerations.get(view) !== generation || !this.errors.has(id)) return;
       void this.recoverPage(id, view, reason).catch(error => this.recoveryFailed(id, view, error));
-    }, 1000 * 2 ** state.attempts);
+    }, Math.min(30_000, 1000 * 2 ** Math.min(attempts, 5)));
   }
   private recoveryFailed(id: string, view: WebContentsView, error: unknown): void {
     this.diagnostics?.error('page_recovery_failed', error);
@@ -311,6 +391,12 @@ export class BrowserRuntime {
     const stillDamaged = async () => {
       if (!current()) return false;
       if (reason === 'manual' || !contents || contents.isDestroyed() || contents.isCrashed()) return true;
+      if (reason === 'conversation_load' && owner.hasDraft) {
+        if (this.errors.get(id) === REPLY_CONNECTION_ERROR) {
+          this.errors.delete(id); this.layout(); this.changed();
+        }
+        return false;
+      }
       if (this.hasUncommittedNavigation(view)) {
         // The previous document can still accept a draft or start a reply while
         // navigation waits. Preserve either in place; a ready old document cannot cancel
@@ -347,35 +433,59 @@ export class BrowserRuntime {
         }
         const page = pageOperationResult<Page>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'inspect' }))));
         if (!current()) return false;
+        const recovery = this.recoveries.get(id);
+        if (reason === 'conversation_load' && recovery?.conversationUrl && replyPageUrl(page.url) !== recovery.conversationUrl) {
+          this.errors.delete(id); this.endConversationRecovery(id);
+          this.layout(); this.changed(); return false;
+        }
+        if (reason === 'conversation_load' && page.loadFailure === 'reply_connection') {
+          Object.assign(owner, { hasDraft: !!page.draft.trim(), busy: page.busy });
+          return !owner.hasDraft && !!recovery && this.connectionFailureStable(recovery, page.connectionKey);
+        }
+        if (reason === 'conversation_load' && !page.loadFailure &&
+          (page.editor && page.readiness === 'ready' || page.busy || page.readiness === 'login_required' || page.readiness === 'verification_required')) {
+          this.errors.delete(id);
+          this.endConversationRecovery(id);
+          this.layout(); this.changed();
+          return false;
+        }
         if (page.editor && page.readiness === 'ready') {
           this.usableContents.add(contents); this.errors.delete(id);
           Object.assign(owner, { hasDraft: !!page.draft.trim(), busy: page.busy });
           this.pageHealthy(id); this.layout(); this.changed();
           return false;
         }
-      } catch { /* An unresponsive document cannot keep recovery pending forever. */ }
+      } catch {
+        // An observer can learn about a new human draft while a queued probe
+        // fails. Keep that responsive document instead of discarding its input.
+        if (reason === 'conversation_load' && owner.hasDraft) return false;
+      }
       return current();
     };
     if (!await stillDamaged()) return;
     const state = this.recoveries.get(id) ?? { attempts: 0 };
     clearTimeout(state.timer); state.timer = undefined; state.healthySince = undefined;
-    if (reason === 'manual') state.attempts = 0;
-    state.attempts++;
+    if (reason === 'manual') { state.attempts = 0; this.endConversationRecovery(id); }
+    if (reason === 'conversation_load') state.conversationAttempts = (state.conversationAttempts ?? 0) + 1;
+    else state.attempts++;
     this.recoveries.set(id, state);
     const isolated = session.fromPartition(this.accounts.get(owner.accountId).partition);
     // Closing the session's connection pool affects EVERY page in this account.
-    // Reset it only when this damaged page is its sole live page, with no task
-    // or login popup. Other accounts and healthy sibling replies remain untouched.
-    const canResetConnections = !this.isLocked(id) && ![...this.views].some(([otherId, other]) => {
+    // Reset only this damaged account's sole live page with no login popup.
+    // A locked conversation-fetch failure is safe: its send receipt survives,
+    // and other accounts and healthy sibling replies remain untouched.
+    const canResetConnections = (!this.isLocked(id) || reason === 'conversation_load') && ![...this.views].some(([otherId, other]) => {
       const otherContents = other.webContents;
       return otherId !== id && otherContents && !otherContents.isDestroyed() && otherContents.session === isolated;
     }) && ![...this.popups.values()].some(popups => [...popups].some(popup => !popup.isDestroyed() && popup.webContents.session === isolated));
-    this.diagnostics?.record('page_recovery_started', { reason, attempt: state.attempts, resetConnections: canResetConnections });
+    this.diagnostics?.record('page_recovery_started', { reason,
+      attempt: reason === 'conversation_load' ? state.conversationAttempts : state.attempts, resetConnections: canResetConnections });
     if (canResetConnections) {
       try { await boundedPageOperation(Promise.all([isolated.closeAllConnections(), isolated.clearHostResolverCache()])); }
       catch (error) { this.diagnostics?.error('page_connection_reset_failed', error); }
     }
     if (!current() || !await stillDamaged()) return;
+    state.connectionKey = undefined; state.connectionSince = undefined;
     const selected = this.accounts.activeId() === owner.accountId && this.selected.get(owner.accountId) === id;
     // Preserve a user's requested conversation if its main-frame response never
     // arrives. Agent-locked pages always retain their original pinned destination.
@@ -562,6 +672,8 @@ export class BrowserRuntime {
     // loading spinner active, without another did-start-loading event.
     view.webContents.on('did-start-navigation', details => {
       if (this.views.get(id) !== view || !details.isMainFrame || details.isSameDocument) return;
+      const recovery = this.recoveries.get(id);
+      if (recovery?.conversationUrl && replyPageUrl(details.url) !== recovery.conversationUrl) this.endConversationRecovery(id);
       this.pendingNavigations.delete(view);
       if (replyPageUrl(details.url) || isAccountLoginUrl(details.url) || owner.customLink && this.allowedPageNavigation(id, details.url)) {
         this.pendingNavigations.set(view, details.url);
@@ -811,8 +923,11 @@ export class BrowserRuntime {
       const detail = pageOperationResult<Omit<BrowserDiagnostics, 'accountId' | 'suggestion'>>(await executePageScript(contents, pageOperationScript({ kind: 'diagnose' })));
       const suggestions = { ready: detail.draftLength ? '页面已有草稿，请由人类处理后再继续任务' : detail.busy ? '网页正在回复，请等待完成' : '输入框已就绪；暂停的队列仍需明确恢复',
         loading: '输入框尚未就绪，请稍后再次诊断', verification_required: '请在此账号网页完成验证后继续原任务，不要重复提交',
-        login_required: '请在此账号网页完成登录', not_open: '请先打开此账号', unavailable: '页面不可用，请在客户端检查' };
-      return { ...detail, accountId, suggestion: suggestions[detail.readiness] };
+        login_required: '请在此账号网页完成登录', not_open: '请先打开此账号',
+        unavailable: detail.loadFailure === 'conversation' ? '会话加载失败，客户端正在自动重试；原消息和队列保留' : '页面不可用，请在客户端检查' };
+      return { ...detail, accountId, suggestion: detail.loadFailure === 'reply_connection'
+        ? detail.draftLength ? '网页连接已中断；保留现有草稿，清空后自动重新连接' : '网页连接已中断，客户端会自动重新连接；原消息和队列保留'
+        : suggestions[detail.readiness] };
     } catch (error) {
       return { ...base, readiness: contents.isDestroyed() ? 'unavailable' : 'loading', suggestion: '页面正在切换或不可用，请稍后再次诊断',
         error: error instanceof Error && error.message.startsWith('PAGE_SCRIPT_FAILED') ? error.message : undefined };

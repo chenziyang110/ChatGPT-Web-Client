@@ -8,7 +8,7 @@ import { COMPLETION_STABLE_MS, replyToken } from '../../core/notifications/Conve
 import { ReplyTurnTracker, type ConversationMessage } from './ReplyTurnTracker';
 
 type Message = ConversationMessage;
-export interface Page { url: string; title: string; readiness: BrowserReadiness; surface?: ConversationSurface; dotWork?: DotWorkState; editor: boolean; draft: string; busy: boolean; messages: Message[]; error?: string; failure?: 'thinking' | 'interrupted' }
+export interface Page { url: string; title: string; readiness: BrowserReadiness; surface?: ConversationSurface; dotWork?: DotWorkState; editor: boolean; draft: string; busy: boolean; messages: Message[]; error?: string; failure?: 'thinking' | 'interrupted'; loadFailure?: 'conversation' | 'reply_connection'; connectionKey?: string }
 interface Operation { kind: 'inspect' | 'diagnose' | 'activity' | 'follow_latest' | 'select_surface' | 'fill' | 'clear' | 'check_send' | 'send' | 'click' | 'snapshot'; url?: string; anchor?: string; value?: string; selector?: string; surface?: ConversationSurface }
 
 // Electron otherwise replaces page exceptions with an unhelpful "Script failed
@@ -132,7 +132,7 @@ export function pageOperation(operation: Operation): unknown {
     // is still initializing. Inspect those states without attempting a challenge.
     const verification = !visible(editor) && (!!document.querySelector('#challenge-running, #challenge-stage, #challenge-form, input[id^="cf-chl-widget-"], iframe[src*="challenges.cloudflare.com"]') || /^(请稍候|Just a moment)/i.test(document.title.trim()));
     const login = [...document.querySelectorAll('[data-testid="login-button"], a[href="/auth/login"], a[href^="https://auth.openai.com/"]')].some(visible);
-    const readiness: BrowserReadiness = verification ? 'verification_required' : login ? 'login_required' : visible(editor) ? 'ready' : 'loading';
+    let readiness: BrowserReadiness = verification ? 'verification_required' : login ? 'login_required' : visible(editor) ? 'ready' : 'loading';
     const lastUserElement = elements.filter(element => roleOf(element) === 'user' && visible(element)).at(-1);
     const afterLastUser = (element: Element) => !lastUserElement || !!(lastUserElement.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING);
     const currentAssistant = elements.filter(element => roleOf(element) === 'assistant' && visible(element) && afterLastUser(element)).at(-1);
@@ -148,14 +148,26 @@ export function pageOperation(operation: Operation): unknown {
       [...document.querySelectorAll('main [data-is-streaming="true"]')].some(element => visible(element) && afterLastUser(element));
     const ariaBusyVisible = !!currentTurn && (dot || !terminalAction(currentTurn)) &&
       (currentTurn.matches('[aria-busy="true"]') || [...currentTurn.querySelectorAll('[aria-busy="true"]')].some(visible));
-    const interrupted = !!lastUserElement && visible(editor) && !stopVisible &&
+    const connectionInterrupted = !!lastUserElement && visible(editor) && !terminalAction(currentTurn) &&
       [...document.querySelectorAll<HTMLElement>('main [role="alert"], main div, main p, main span')].some(element => {
-        if (!visible(element) || !afterLastUser(element) || element.closest(userSelector)) return false;
+        if (!visible(element) || getComputedStyle(element).visibility === 'hidden' || !afterLastUser(element) ||
+          element.closest(userSelector) || element.closest('pre, code, blockquote, [aria-hidden="true"]') ||
+          element.querySelector(`${messageSelector}, pre, code, blockquote`)) return false;
+        // A site status card must not turn quoted assistant prose into a failure.
+        if (element.closest(messageSelector) && !element.closest('[role="alert"], [data-testid="conversation-error"]')) return false;
         const raw = element.textContent?.trim() ?? '';
         if (raw.length > 160 || !/连接已中断|Connection interrupted/i.test(raw)) return false;
         const label = element.innerText.trim();
-        return label.length < 160 && /^(?:连接已中断[。.!！]?\s*正在等待完整回复|Connection interrupted[.!]?\s*Waiting for (?:a )?complete response)[。.!！…]*$/i.test(label);
+        return label.length < 160 && /^(?:连接已中断[。.!！，,]?\s*正在等待完整回复|Connection interrupted[.!，,]?\s*Waiting for (?:a )?complete response)[。.!！…]*$/i.test(label);
       });
+    const interrupted = connectionInterrupted && !stopVisible;
+    // Keep Stop/busy truthful. Refresh a suspended connection before trying
+    // to observe its actual end. Include reply progress to cancel stale retries.
+    const assistantBody = currentAssistant?.querySelector('[data-chatgpt-selection-message-id]') ?? currentAssistant;
+    const userBody = lastUserElement?.querySelector('[data-testid="collapsible-user-message-content"], [data-user-message-bubble]') ?? lastUserElement;
+    const connectionKey = connectionInterrupted && stopVisible ? JSON.stringify([lastUserElement?.dataset.messageId,
+      userBody?.textContent, currentAssistant?.dataset.messageId, assistantBody?.textContent?.length,
+      assistantBody?.textContent?.slice(-512)]) : undefined;
     // Dot can acknowledge a directive while its background agent keeps working.
     // The summary avatar exposes that agent's running/idle state independently
     // of message streaming. Ignore sidebar avatars and the standing Pause action.
@@ -179,12 +191,37 @@ export function pageOperation(operation: Operation): unknown {
         : activeStatus ? 'working' : idleStatus ? 'idle' : 'unknown';
     }
     const busy = stopVisible || !interrupted && (streamingVisible || ariaBusyVisible) || dot && dotWork !== 'idle';
+    // A committed ChatGPT document can show a conversation-fetch failure while
+    // Chromium reports a successful load. This is unavailable history, not a
+    // terminal reply. Require its own Retry card outside every message wrapper.
+    const conversationRoute = /^\/c\/[a-zA-Z0-9_-]{1,128}\/?$/.test(location.pathname) &&
+      !new URLSearchParams(location.search).getAll('temporary-chat').some(flag => flag !== 'false' && flag !== '0');
+    const loadFailureLabel = /^(?:无法加载此\s*ChatGPT\s*对话|Unable to load (?:this ChatGPT )?conversation|Could not load (?:this ChatGPT )?conversation)[.!。]?$/i;
+    const messageWrapper = '[data-message-author-role], [data-chatgpt-search-unit-key], [data-user-message-bubble], article, [data-testid^="conversation-turn-"], [data-turn-key]';
+    const visibleLoadElement = (element: HTMLElement) => visible(element) &&
+      getComputedStyle(element).visibility === 'visible' && !element.closest('[aria-hidden="true"]');
+    const conversationLoadFailure = conversationRoute && !login && !verification && !visible(editor) &&
+      !stopVisible && !streamingVisible && !ariaBusyVisible &&
+      [...document.querySelectorAll<HTMLElement>('main button, main [role="button"], main a')].some(control => {
+        if (!visibleLoadElement(control) || control.closest(`${messageWrapper}, aside, nav`) ||
+          !/^(重试|Retry|Try again)$/i.test((control.innerText || control.getAttribute('aria-label') || '').trim())) return false;
+        for (let card = control.parentElement, depth = 0; card && depth < 5 && !card.matches('main'); card = card.parentElement, depth++) {
+          if (!visibleLoadElement(card) || card.closest(`${messageWrapper}, aside, nav`) || card.querySelector(messageWrapper) || card.innerText.length > 240) continue;
+          const cardLabel = card.innerText.trim().replace(/\s+/g, ' ').replace(/\s*(?:重试|Retry|Try again)$/i, '').trim();
+          if (loadFailureLabel.test(cardLabel)) return true;
+          if ([card, ...card.querySelectorAll<HTMLElement>('p, span, div, h1, h2, h3, [role="alert"]')].some(label =>
+            visibleLoadElement(label) && loadFailureLabel.test(label.innerText.trim().replace(/\s+/g, ' ')))) return true;
+        }
+        return false;
+      }) ? 'conversation' : undefined;
+    const loadFailure = connectionKey ? 'reply_connection' : conversationLoadFailure;
+    if (conversationLoadFailure) readiness = 'unavailable';
     if (operation.kind === 'diagnose') {
       const send = sendButton();
       const messages = elements;
       const last = messages.at(-1);
       const turn = last && turnOf(last);
-      return { url: location.href, title: document.title.slice(0, 120), readiness, surface, dotWork,
+      return { url: location.href, title: document.title.slice(0, 120), readiness, surface, dotWork, loadFailure,
         editor: visible(editor), draftLength: draft.length, busy, documentReady: document.readyState,
         dom: { editorTag: editor?.tagName.toLowerCase() ?? null, contentEditable: !!editor?.isContentEditable,
           visibleEditorCount: [...document.querySelectorAll(editorSelector)].filter(visible).length,
@@ -254,17 +291,18 @@ export function pageOperation(operation: Operation): unknown {
         if (role === 'user' && !user) user = readMessage(elements[index], index);
         else if (role === 'assistant' && !assistant) assistant = readMessage(elements[index], index);
       }
-      return { url: location.href, title: document.title.slice(0, 120), surface, dotWork, editor: visible(editor), busy,
+      return { url: location.href, title: document.title.slice(0, 120), surface, dotWork, readiness, loadFailure, connectionKey, editor: visible(editor), busy,
         hasDraft: !!draft.trim(), error, user: user && { id: user.id, text: user.text.slice(0, 32000) },
         assistant: assistant && { ...assistant, text: assistant.text.slice(0, 64000) },
         lastRole: elements.length ? roleOf(elements.at(-1)!) : undefined };
     }
     const messages = elements.map(readMessage);
-    const page: Page = { url: location.href, title: document.title.slice(0, 120), surface, dotWork, readiness, editor: visible(editor), draft, busy, messages, error, failure };
+    const page: Page = { url: location.href, title: document.title.slice(0, 120), surface, dotWork, readiness, editor: visible(editor), draft, busy, messages, error, failure, loadFailure, connectionKey };
     if (operation.kind === 'inspect') return page;
     stage = 'verify_target';
     if (operation.url !== location.href) throw new Error('TARGET_CHANGED: page changed before action');
     if (operation.kind === 'snapshot') return { url: location.href, title: document.title, text: (document.querySelector('main') ?? document.body).innerText.slice(0, 64000) };
+    if (loadFailure) throw new Error('CONVERSATION_LOAD_FAILED: original conversation is unavailable');
     const anchor = JSON.stringify(messages.filter(message => message.role === 'user').map(message => [message.id, message.text]));
     if (operation.anchor !== anchor || busy) throw new Error('PAGE_CHANGED: conversation is no longer idle');
     if (operation.kind === 'select_surface') {
@@ -318,6 +356,7 @@ export function pageOperation(operation: Operation): unknown {
     // content. Preserve only our known guard messages and safe error names.
     const guards = ['LOGIN_REQUIRED: sign in to ChatGPT', 'TARGET_CHANGED: page changed before action',
       'PAGE_CHANGED: conversation is no longer idle', 'DRAFT_CHANGED: prompt was edited',
+      'CONVERSATION_LOAD_FAILED: original conversation is unavailable',
       'SEND_UNAVAILABLE: prompt remains a draft', 'Element unavailable', 'Password fields cannot be automated',
       'DRAFT_CONFLICT: clear or send the existing draft first', 'Element is not editable'];
     guards.push('SURFACE_CHANGED: cannot switch this conversation', 'SURFACE_UNAVAILABLE: waiting for conversation mode', 'SURFACE_CHANGED: conversation mode changed before action');

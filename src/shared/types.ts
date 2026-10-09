@@ -49,6 +49,7 @@ export interface ConversationNotice {
 }
 export type BrowserReadiness = 'ready' | 'loading' | 'verification_required' | 'login_required' | 'not_open' | 'unavailable';
 export interface BrowserDiagnostics {
+  loadFailure?: 'conversation' | 'reply_connection';
   surface?: ConversationSurface;
   dotWork?: DotWorkState;
   accountId: string; url: string; title: string; readiness: BrowserReadiness;

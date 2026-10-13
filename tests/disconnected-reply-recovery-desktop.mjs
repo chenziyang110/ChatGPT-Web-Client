@@ -477,7 +477,15 @@ async function sameDocumentNavigationEndsOutputRecovery() {
   await contents(account, current.url, "window.fixtureSend('HOLD:reply before SPA navigation'); window.fixtureProgress(); window.fixtureDisconnect(2)");
   // Let one confirmed reconnect establish its persistent original-turn state.
   // The next document is still disconnected; a draft then cancels its timer.
-  await until(async () => await requests(current.url) === 2 && (await state(account, current.url))?.remaining === 1,
+  await until(async () => {
+    if (await requests(current.url) !== 2) return false;
+    try { return (await state(account, current.url))?.remaining === 1; }
+    catch (error) {
+      // The request counter advances before the replacement native frame mounts.
+      if (/Fixture page missing|Fixture operation timed out|Execution context was destroyed|frame was disposed|Render frame was disposed|Object has been destroyed/i.test(String(error))) return false;
+      throw error;
+    }
+  },
     'SPA regression must first reconnect the still-running original turn', 16000);
   const heldNative = await contents(account, current.url);
   const humanDraft = 'Draft defers the next native reconnect';

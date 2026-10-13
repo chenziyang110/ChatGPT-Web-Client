@@ -13,7 +13,7 @@ export function Updates({ bridge, compact = false, openSettings }: { bridge?: Wo
     refresh(); const off = bridge.onChange(refresh);
     return () => { active = false; off(); };
   }, [bridge]);
-  useEffect(() => { if (state?.status !== 'downloaded') setConfirmForce(false); }, [state?.status]);
+  useEffect(() => { if (state?.status !== 'downloaded' && state?.status !== 'preparing') setConfirmForce(false); }, [state?.status]);
   const call = async (method: string, params = {}) => {
     setError('');
     try { await bridge?.call(method, params); }
@@ -21,17 +21,21 @@ export function Updates({ bridge, compact = false, openSettings }: { bridge?: Wo
   };
   if (!state) return null;
   const native = state.installMode === 'in-app';
-  const busy = ['checking', 'downloading', 'installing'].includes(state.status);
+  const busy = ['checking', 'downloading', 'preparing', 'installing'].includes(state.status);
+  const ready = state.status === 'downloaded' || state.status === 'preparing';
   const download = native && !!state.latest && ['available', 'error'].includes(state.status);
   const status = state.status === 'checking' ? '正在检查…'
     : state.status === 'downloading' ? `正在下载 ${state.progress ?? 0}%`
     : state.status === 'downloaded' ? `新版 ${state.latest} 已准备好`
+    : state.status === 'preparing' ? state.preparationStage === 'checking-replies'
+      ? '正在检查网页是否仍在回复…' : '正在等待本地操作完成并保存…'
     : state.status === 'installing' ? '正在安装，即将重启…'
     : state.status === 'available' ? `发现新版本 ${state.latest}`
     : state.status === 'current' ? '当前已是最新正式版本'
     : state.status === 'error' ? state.error ?? '暂时无法检查更新，请稍后重试。' : '尚未检查更新';
   if (compact) {
     if (state.status === 'downloaded') return <button className="nav" onClick={openSettings}>新版已就绪 · {state.latest}</button>;
+    if (state.status === 'preparing') return <button className="nav" onClick={openSettings}>{status}</button>;
     if (state.status === 'downloading' || state.status === 'installing') return <span className="nav" role="status">{status}</span>;
     if (state.status === 'available') return <button className="nav" onClick={openSettings}>更新到 {state.latest}</button>;
     return error ? <p className="hint" role="alert">{error}</p> : null;
@@ -44,15 +48,16 @@ export function Updates({ bridge, compact = false, openSettings }: { bridge?: Wo
     {state.status === 'downloading' && <progress aria-label="更新下载进度" max={100} value={state.progress ?? 0} />}
     <div className="update-actions">
     {download && <button className="primary" onClick={() => void call('updates.download')}>{state.status === 'error' ? '重试下载' : '下载更新'}</button>}
-    {state.status === 'downloaded' && <><button className="primary" onClick={() => void call('updates.install')}>安装并重启</button><button onClick={() => setConfirmForce(true)}>强制安装</button></>}
+    {ready && <><button className="primary" disabled={state.status === 'preparing'} onClick={() => void call('updates.install')}>{state.status === 'preparing' ? '等待安装条件…' : '安装并重启'}</button><button onClick={() => setConfirmForce(true)}>强制安装</button></>}
     {state.status === 'downloading' && <button onClick={() => void call('updates.cancel')}>取消下载</button>}
     <button disabled={busy || state.status === 'downloaded'} onClick={() => void call('updates.check')}>检查更新</button>
     <button onClick={() => void call('updates.open')}>前往官方下载 ↗</button>
     </div>
-    {state.status === 'downloaded' && confirmForce && <div role="group" aria-label="确认强制安装">
+    {state.status === 'preparing' && state.preparationStage === 'checking-replies' && <p className="hint">网页检查未完成时，可选择强制安装跳过检查。</p>}
+    {ready && confirmForce && <div role="group" aria-label="确认强制安装">
       <p className="hint">将关闭本地网页，未发送的草稿可能丢失；ChatGPT 端可能继续生成。队列会暂停，已发送消息不会自动重发。重启后请核对会话。</p>
       <div className="update-actions"><button className="danger" onClick={() => { setConfirmForce(false); void call('updates.install', { force: true }); }}>确认强制安装并重启</button><button onClick={() => setConfirmForce(false)}>取消</button></div>
     </div>}
-    {error && <p role="alert">{error}</p>}
+    {(error || (state.status === 'downloaded' && state.error)) && <p role="alert">{error || state.error}</p>}
   </div>;
 }

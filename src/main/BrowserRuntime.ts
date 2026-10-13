@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { BrowserWindow, WebContentsView, session, dialog, shell, type WebContents } from 'electron';
 import { AccountManager } from '../core/account/AccountManager';
 import { SessionManager } from '../core/session/SessionManager';
@@ -15,6 +15,8 @@ import type { ExecutionContext } from '../core/agent/AgentGateway';
 import type { ConversationManager } from '../core/conversation/ConversationManager';
 import { allowChatGptClipboardWrite } from './permissions';
 import type { RuntimeDiagnostics } from './RuntimeDiagnostics';
+import { boundedOperation as boundedPageOperation } from './BoundedOperation';
+import { ReplyStreamMonitor } from './ReplyStreamMonitor';
 
 interface PageOwner {
   accountId: string;
@@ -40,22 +42,13 @@ const PAGE_LOAD_TIMEOUT_ERROR = '网页加载时间过长，请检查网络或�
 const PAGE_NAVIGATION_INCOMPLETE_ERROR = '网页导航未完成，正在自动恢复';
 const CONVERSATION_LOAD_ERROR = 'ChatGPT 会话暂时无法加载，正在自动重试';
 const REPLY_CONNECTION_ERROR = 'ChatGPT 连接已中断，正在自动重新连接';
-const PAGE_PROBE_TIMEOUT_MS = 2_000;
 const MAX_PAGE_RECOVERIES = 3;
-type RecoveryReason = 'load_timeout' | 'load_failed' | 'conversation_load' | 'renderer_gone' | 'unresponsive' | 'manual';
+type RecoveryReason = 'load_timeout' | 'load_failed' | 'conversation_load' | 'reply_connection' | 'renderer_gone' | 'unresponsive' | 'manual';
 interface RecoveryState {
   attempts: number; conversationAttempts?: number; conversationUrl?: string;
   conversationFailure?: Page['loadFailure']; connectionKey?: string; connectionSince?: number;
+  outputReconnect?: boolean; outputUserKey?: string;
   healthySince?: number; timer?: ReturnType<typeof setTimeout>;
-}
-
-async function boundedPageOperation<T>(operation: Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([operation, new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error('PAGE_PROBE_TIMEOUT')), PAGE_PROBE_TIMEOUT_MS);
-    })]);
-  } finally { clearTimeout(timer); }
 }
 
 function pageLoadTimeoutMs(): number {
@@ -71,6 +64,12 @@ function pageIdleMs(): number {
 function hiddenPageIdleMs(): number {
   const value = Number(process.env.WORKSPACE_HIDDEN_PAGE_IDLE_MS);
   return Number.isSafeInteger(value) && value >= 100 && value <= 60 * 60 * 1000 ? value : DEFAULT_HIDDEN_PAGE_IDLE_MS;
+}
+
+function outputUserKey(user: ActivitySnapshot['user']): string | undefined {
+  if (!user) return;
+  const id = user.id.startsWith('position:') ? undefined : user.id;
+  return createHash('sha256').update(JSON.stringify([id, user.text.slice(0, 32000)])).digest('hex');
 }
 
 export class BrowserRuntime {
@@ -89,6 +88,7 @@ export class BrowserRuntime {
   private visible = true;
   private closing = false;
   private readonly configured = new Set<string>();
+  private readonly streamMonitors = new Map<string, ReplyStreamMonitor>();
   private bounds?: BrowserBounds;
   private readonly observer: ConversationActivityObserver;
   private readonly observing = new Map<string, WebContentsView>();
@@ -180,7 +180,14 @@ export class BrowserRuntime {
         // failed. This says nothing about whether a submitted remote turn ended.
         // Reopen the same account/tab/URL and retain its persisted send receipt.
         owner.hibernationReady = false; owner.hasDraft = !!snapshot.hasDraft; owner.busy = snapshot.busy;
-        if (!this.hasAutomaticRecovery(id) && !this.hasUncommittedNavigation(view)) {
+        // A first turn can still live at the homepage or an optimistic route.
+        // There is no stable remote destination to reopen yet; retain its output.
+        const failedUrl = replyPageUrl(url);
+        if (snapshot.loadFailure === 'reply_connection' && (!failedUrl || failedUrl === HOME_URL)) {
+          this.releaseConversationRecovery(id);
+          return;
+        }
+        if (snapshot.loadFailure !== 'reply_connection' && !this.canRecoverConversation(id, url) && !this.hasUncommittedNavigation(view)) {
           // A page-level site error is still an interactive document. Keep its
           // Retry control visible unless this conversation has an active queue.
           this.observer.disconnected(owner.accountId, url);
@@ -189,11 +196,12 @@ export class BrowserRuntime {
         }
         if (!this.hasUncommittedNavigation(view)) {
           const recovery = this.recoveries.get(id) ?? { attempts: 0 };
-          const failedUrl = replyPageUrl(url);
           if (recovery.conversationUrl && recovery.conversationUrl !== failedUrl) {
             clearTimeout(recovery.timer); recovery.timer = undefined;
             recovery.conversationAttempts = 0;
             recovery.connectionKey = undefined; recovery.connectionSince = undefined;
+            recovery.outputReconnect = undefined;
+            recovery.outputUserKey = undefined;
           }
           recovery.conversationUrl = failedUrl;
           recovery.conversationFailure = snapshot.loadFailure;
@@ -210,6 +218,17 @@ export class BrowserRuntime {
           }
         }
         this.observer.disconnected(owner.accountId, url);
+        if (snapshot.loadFailure === 'reply_connection' && !this.hasUncommittedNavigation(view)) {
+          // Keep the last output visible while reconnecting. Page recovery is
+          // independent of permission to send the next queued message.
+          const hidden = this.errors.delete(id);
+          this.recoveries.get(id)!.outputReconnect = true;
+          this.recoveries.get(id)!.outputUserKey ??= outputUserKey(snapshot.user);
+          if (hidden) this.layout();
+          this.scheduleRecovery(id, view, 'reply_connection');
+          this.changed();
+          return;
+        }
         const error = snapshot.loadFailure === 'reply_connection' ? REPLY_CONNECTION_ERROR : CONVERSATION_LOAD_ERROR;
         if (this.errors.get(id) !== error) {
           this.errors.set(id, error);
@@ -223,8 +242,18 @@ export class BrowserRuntime {
         (snapshot.editor && !snapshot.error || snapshot.busy || snapshot.readiness === 'login_required' || snapshot.readiness === 'verification_required')) {
         // The site's Retry action can recover before our deferred retry runs.
         // Leave the current document and any newly entered draft in place.
+        let outputRecovered = this.outputRecovered(id, snapshot);
+        if (!outputRecovered && snapshot.user) {
+          // A person may send a new directive in this same conversation while
+          // reconnection is deferred. Read back its order against the original
+          // turn; an earlier, partially loaded history is not a new directive.
+          const page = pageOperationResult<Page>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'inspect' }))));
+          if (this.closing || this.views.get(id) !== view || contents.isDestroyed() || contents.getURL() !== url ||
+            this.loadGenerations.get(view) !== generation || this.pageLoading(contents)) return;
+          outputRecovered = this.outputRecovered(id, snapshot, page.messages);
+        }
         this.errors.delete(id);
-        this.endConversationRecovery(id);
+        if (outputRecovered) this.endConversationRecovery(id);
         this.layout(); this.changed();
       }
       snapshot.title = this.title(owner.accountId, snapshot.url, snapshot.title);
@@ -256,6 +285,25 @@ export class BrowserRuntime {
   private pageLoading(contents: WebContents): boolean {
     return contents.isLoading() && !this.usableContents.has(contents);
   }
+  private canRecoverConversation(id: string, url?: string): boolean {
+    const recovery = this.recoveries.get(id);
+    return this.hasAutomaticRecovery(id) || !!recovery?.conversationUrl &&
+      (!url || replyPageUrl(url) === recovery.conversationUrl) &&
+      (recovery.outputReconnect === true || recovery.conversationFailure === 'reply_connection');
+  }
+  private outputRecovered(id: string, page: Pick<ActivitySnapshot, 'user' | 'assistant' | 'lastRole' | 'busy' | 'readiness'>,
+    history?: Page['messages']): boolean {
+    const recovery = this.recoveries.get(id);
+    if (!recovery?.outputReconnect || page.readiness === 'login_required' || page.readiness === 'verification_required') return true;
+    // A ready editor can precede the asynchronous history request. Retain the
+    // reconnect origin until the existing turn is actually read back, so a late
+    // history-load failure continues recovery instead of falling into manual mode.
+    const original = history?.findIndex(message => message.role === 'user' && outputUserKey(message) === recovery.outputUserKey) ?? -1;
+    const latest = history?.findLastIndex(message => message.role === 'user' && outputUserKey(message) === outputUserKey(page.user)) ?? -1;
+    const currentTurn = recovery.outputUserKey === outputUserKey(page.user) || original >= 0 && latest > original;
+    return !!recovery.outputUserKey && currentTurn &&
+      (page.busy || page.lastRole === 'assistant' && !!page.assistant && (!!page.assistant.text || !!page.assistant.hasContent));
+  }
   private hasUncommittedNavigation(view: WebContentsView): boolean {
     const target = this.pendingNavigations.get(view);
     const contents = view.webContents;
@@ -282,9 +330,11 @@ export class BrowserRuntime {
     const recovery = this.recoveries.get(id);
     if (!recovery) return;
     clearTimeout(recovery.timer); recovery.timer = undefined;
-    if (recovered && recovery.conversationUrl) this.diagnostics?.record(recovery.conversationFailure === 'reply_connection' ? 'reply_connection_recovered' : 'conversation_load_recovered');
+    if (recovered && recovery.conversationUrl) this.diagnostics?.record(recovery.outputReconnect || recovery.conversationFailure === 'reply_connection' ? 'reply_connection_recovered' : 'conversation_load_recovered');
     recovery.conversationUrl = undefined; recovery.conversationAttempts = 0; recovery.conversationFailure = undefined;
     recovery.connectionKey = undefined; recovery.connectionSince = undefined;
+    recovery.outputReconnect = undefined;
+    recovery.outputUserKey = undefined;
   }
   private releaseConversationRecovery(id: string): void {
     this.endConversationRecovery(id, false);
@@ -293,11 +343,12 @@ export class BrowserRuntime {
     }
   }
   private preserveSiteFailure(id: string, contents: WebContents): void {
+    const reconnecting = !!this.recoveries.get(id)?.conversationUrl;
     const hidden = this.errors.delete(id);
     const loading = this.pageLoading(contents);
     this.usableContents.add(contents);
     this.endConversationRecovery(id, false);
-    if (hidden || loading) { this.layout(); this.changed(); }
+    if (hidden || loading || reconnecting) { this.layout(); this.changed(); }
   }
   private connectionFailureStable(recovery: RecoveryState, key: string | undefined): boolean {
     if (!key) return false;
@@ -328,7 +379,7 @@ export class BrowserRuntime {
       try {
         const page = pageOperationResult<Page>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'inspect' }))));
         if (!current() || contents.isDestroyed()) return;
-        if (page.loadFailure && !this.hasAutomaticRecovery(id)) {
+        if (page.loadFailure && page.loadFailure !== 'reply_connection' && !this.canRecoverConversation(id, contents.getURL())) {
           this.preserveSiteFailure(id, contents); return;
         }
         if (page.editor && page.readiness === 'ready') {
@@ -360,27 +411,30 @@ export class BrowserRuntime {
       clearTimeout(state.timer); state.timer = undefined;
       state.conversationUrl = undefined; state.conversationAttempts = 0; state.conversationFailure = undefined;
       state.connectionKey = undefined; state.connectionSince = undefined;
+      state.outputReconnect = undefined;
+      state.outputUserKey = undefined;
     }
     // Keep the same conversation's recovery alive if its next fetch fails at
     // the transport layer. A different destination retains the native budget.
     if (state.conversationUrl && state.conversationUrl === target && ['load_failed', 'load_timeout'].includes(reason)) reason = 'conversation_load';
-    if (reason === 'conversation_load' && !this.hasAutomaticRecovery(id)) {
+    if (reason === 'conversation_load' && !this.canRecoverConversation(id)) {
       this.releaseConversationRecovery(id); return;
     }
     state.healthySince = undefined;
     this.recoveries.set(id, state);
-    if (state.timer || (reason !== 'conversation_load' && state.attempts >= MAX_PAGE_RECOVERIES)) return;
+    if (state.timer || (!['conversation_load', 'reply_connection'].includes(reason) && state.attempts >= MAX_PAGE_RECOVERIES)) return;
     // Preserve a known human draft on a responsive page. Main-frame loads and
     // crashed pages have no usable document to preserve.
     const owner = this.owners.get(id);
     if (owner?.hasDraft && contents && !contents.isDestroyed() && !contents.isCrashed() && !this.pageLoading(contents) && !this.hasUncommittedNavigation(view)) return;
     const generation = this.loadGenerations.get(view);
-    const attempts = reason === 'conversation_load' ? state.conversationAttempts ?? 0 : state.attempts;
+    const attempts = ['conversation_load', 'reply_connection'].includes(reason) ? state.conversationAttempts ?? 0 : state.attempts;
     // A failed conversation fetch is commonly transient. Continue at a bounded
     // low frequency instead of permanently requiring repeated manual refreshes.
     state.timer = setTimeout(() => {
       state.timer = undefined;
-      if (this.closing || this.views.get(id) !== view || this.loadGenerations.get(view) !== generation || !this.errors.has(id)) return;
+      if (this.closing || this.views.get(id) !== view || this.loadGenerations.get(view) !== generation ||
+        (reason === 'reply_connection' ? state.conversationFailure !== 'reply_connection' : !this.errors.has(id))) return;
       void this.recoverPage(id, view, reason).catch(error => this.recoveryFailed(id, view, error));
     }, Math.min(30_000, 1000 * 2 ** Math.min(attempts, 5)));
   }
@@ -419,13 +473,13 @@ export class BrowserRuntime {
     if (this.closing || !owner || this.views.get(id) !== view) return;
     const generation = this.loadGenerations.get(view);
     const current = () => !this.closing && this.owners.get(id) === owner && this.views.get(id) === view &&
-      this.loadGenerations.get(view) === generation && (reason === 'manual' || this.errors.has(id)) &&
-      (reason !== 'conversation_load' || this.hasAutomaticRecovery(id));
+      this.loadGenerations.get(view) === generation && (reason === 'manual' || reason === 'reply_connection' || this.errors.has(id)) &&
+      (reason !== 'conversation_load' || this.canRecoverConversation(id));
     const contents = view.webContents;
     const stillDamaged = async () => {
       if (!current()) return false;
       if (reason === 'manual' || !contents || contents.isDestroyed() || contents.isCrashed()) return true;
-      if (reason === 'conversation_load' && owner.hasDraft) {
+      if (['conversation_load', 'reply_connection'].includes(reason) && owner.hasDraft) {
         if (this.errors.get(id) === REPLY_CONNECTION_ERROR) {
           this.errors.delete(id); this.layout(); this.changed();
         }
@@ -467,22 +521,25 @@ export class BrowserRuntime {
         }
         const page = pageOperationResult<Page>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'inspect' }))));
         if (!current()) return false;
-        if (page.loadFailure && !this.hasAutomaticRecovery(id)) {
+        if (page.loadFailure && page.loadFailure !== 'reply_connection' && !this.canRecoverConversation(id, page.url)) {
           this.preserveSiteFailure(id, contents); return false;
         }
         const recovery = this.recoveries.get(id);
-        if (reason === 'conversation_load' && recovery?.conversationUrl && replyPageUrl(page.url) !== recovery.conversationUrl) {
+        if (['conversation_load', 'reply_connection'].includes(reason) && recovery?.conversationUrl && replyPageUrl(page.url) !== recovery.conversationUrl) {
           this.errors.delete(id); this.endConversationRecovery(id);
           this.layout(); this.changed(); return false;
         }
-        if (reason === 'conversation_load' && page.loadFailure === 'reply_connection') {
+        if (['conversation_load', 'reply_connection'].includes(reason) && page.loadFailure === 'reply_connection') {
           Object.assign(owner, { hasDraft: !!page.draft.trim(), busy: page.busy });
           return !owner.hasDraft && !!recovery && this.connectionFailureStable(recovery, page.connectionKey);
         }
-        if (reason === 'conversation_load' && !page.loadFailure &&
+        if (['conversation_load', 'reply_connection'].includes(reason) && !page.loadFailure &&
           (page.editor && page.readiness === 'ready' || page.busy || page.readiness === 'login_required' || page.readiness === 'verification_required')) {
           this.errors.delete(id);
-          this.endConversationRecovery(id);
+          const userIndex = page.messages.findLastIndex(message => message.role === 'user');
+          const last = page.messages.at(-1);
+          if (this.outputRecovered(id, { ...page, user: page.messages[userIndex], lastRole: last?.role,
+            assistant: last?.role === 'assistant' && page.messages.length - 1 > userIndex ? last : undefined }, page.messages)) this.endConversationRecovery(id);
           this.layout(); this.changed();
           return false;
         }
@@ -495,7 +552,10 @@ export class BrowserRuntime {
       } catch {
         // An observer can learn about a new human draft while a queued probe
         // fails. Keep that responsive document instead of discarding its input.
-        if (reason === 'conversation_load' && owner.hasDraft) return false;
+        if (['conversation_load', 'reply_connection'].includes(reason) && owner.hasDraft) return false;
+        // A stream reconnect must be confirmed against the current document.
+        // A timed-out probe alone cannot discard a human draft or healthy turn.
+        if (reason === 'reply_connection') return false;
       }
       return current();
     };
@@ -503,7 +563,7 @@ export class BrowserRuntime {
     const state = this.recoveries.get(id) ?? { attempts: 0 };
     clearTimeout(state.timer); state.timer = undefined; state.healthySince = undefined;
     if (reason === 'manual') { state.attempts = 0; this.endConversationRecovery(id); }
-    if (reason === 'conversation_load') state.conversationAttempts = (state.conversationAttempts ?? 0) + 1;
+    if (['conversation_load', 'reply_connection'].includes(reason)) state.conversationAttempts = (state.conversationAttempts ?? 0) + 1;
     else state.attempts++;
     this.recoveries.set(id, state);
     const isolated = session.fromPartition(this.accounts.get(owner.accountId).partition);
@@ -511,12 +571,12 @@ export class BrowserRuntime {
     // Reset only this damaged account's sole live page with no login popup.
     // A locked conversation-fetch failure is safe: its send receipt survives,
     // and other accounts and healthy sibling replies remain untouched.
-    const canResetConnections = (!this.isLocked(id) || reason === 'conversation_load') && ![...this.views].some(([otherId, other]) => {
+    const canResetConnections = (!this.isLocked(id) || ['conversation_load', 'reply_connection'].includes(reason)) && ![...this.views].some(([otherId, other]) => {
       const otherContents = other.webContents;
       return otherId !== id && otherContents && !otherContents.isDestroyed() && otherContents.session === isolated;
     }) && ![...this.popups.values()].some(popups => [...popups].some(popup => !popup.isDestroyed() && popup.webContents.session === isolated));
     this.diagnostics?.record('page_recovery_started', { reason,
-      attempt: reason === 'conversation_load' ? state.conversationAttempts : state.attempts, resetConnections: canResetConnections });
+      attempt: ['conversation_load', 'reply_connection'].includes(reason) ? state.conversationAttempts : state.attempts, resetConnections: canResetConnections });
     if (canResetConnections) {
       try { await boundedPageOperation(Promise.all([isolated.closeAllConnections(), isolated.clearHostResolverCache()])); }
       catch (error) { this.diagnostics?.error('page_connection_reset_failed', error); }
@@ -547,6 +607,19 @@ export class BrowserRuntime {
   private configureSession(partition: string): void {
     if (this.configured.has(partition)) return;
     const isolated = session.fromPartition(partition);
+    this.streamMonitors.set(partition, new ReplyStreamMonitor(isolated.webRequest, contentsId => {
+      if (this.closing) return;
+      for (const [pageId, view] of this.views) {
+        const contents = view.webContents;
+        if (contents && !contents.isDestroyed() && contents.id === contentsId && contents.session === isolated) {
+          this.diagnostics?.record('reply_stream_transport_interrupted');
+          // A stream might carry notifications rather than this reply. Recheck
+          // the current turn; an unknown endpoint alone must never refresh it.
+          void this.observe(pageId, view);
+          break;
+        }
+      }
+    }));
     isolated.setPermissionCheckHandler((_contents, permission, requestingOrigin, details) =>
       allowChatGptClipboardWrite(permission, requestingOrigin, details.isMainFrame));
     isolated.setPermissionRequestHandler((_contents, permission, callback, details) => {
@@ -711,6 +784,11 @@ export class BrowserRuntime {
     }
     if (this.redirectingDuplicates.has(id) && url !== owner.url) return;
     const target = replyPageUrl(url);
+    // React can commit a new conversation through same-document navigation.
+    // Its completed route must release recovery belonging to the previous turn,
+    // including a reconnect deferred by a human draft.
+    const recoveryUrl = this.recoveries.get(id)?.conversationUrl;
+    if (recoveryUrl && recoveryUrl !== target) this.releaseConversationRecovery(id);
     if (target && target !== HOME_URL && !this.redirectingDuplicates.has(id)) {
       const registered = this.conversations.list(owner.accountId).find(item => item.url === target);
       const duplicates = [...this.owners].filter(([otherId, other]) => otherId !== id && !this.redirectingDuplicates.has(otherId) &&
@@ -811,6 +889,7 @@ export class BrowserRuntime {
     // loading spinner active, without another did-start-loading event.
     view.webContents.on('did-start-navigation', details => {
       if (this.views.get(id) !== view || !details.isMainFrame || details.isSameDocument) return;
+      this.streamMonitors.get(account.partition)?.forget(view.webContents.id);
       const recovery = this.recoveries.get(id);
       if (recovery?.conversationUrl && replyPageUrl(details.url) !== recovery.conversationUrl) this.endConversationRecovery(id);
       this.pendingNavigations.delete(view);
@@ -972,7 +1051,7 @@ export class BrowserRuntime {
     if (this.pageLoading(contents)) throw new AppError('页面正在加载，请稍后打开队列', 409);
     const url = contents.getURL();
     const home = replyPageUrl(url) === HOME_URL;
-    const page = pageOperationResult<Page>(await executePageScript(contents, pageOperationScript({ kind: 'inspect' })));
+    const page = pageOperationResult<Page>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'inspect' }))));
     if (contents.isDestroyed() || contents.getURL() !== url || this.owners.get(pageId) !== owner) throw new AppError('页面正在切换，队列将自动重试', 409);
     if (!page.editor) throw new AppError('网页输入框正在加载，队列将自动重试', 409);
     if (owner.conversationId) {
@@ -1046,7 +1125,8 @@ export class BrowserRuntime {
     const authorization = owner?.customLink || owner?.callbackUrl || isAccountLoginUrl(url) || hasAuthorizationParameters(url);
     return { id: this.activeId!, conversationId: owner?.conversationId, url, title: authorization ? '授权页面' : contents.getTitle(), loading: this.pageLoading(contents),
       canGoBack: contents.navigationHistory.canGoBack(), canGoForward: contents.navigationHistory.canGoForward(),
-      error: this.errors.get(this.activeId!) };
+      error: this.errors.get(this.activeId!), reconnecting: !owner?.hasDraft &&
+        (this.recoveries.get(this.activeId!)?.outputReconnect === true || this.recoveries.get(this.activeId!)?.conversationFailure === 'reply_connection') };
   }
   async response(task: AgentTask, url?: string): Promise<TaskResponse> {
     const bound = task.conversationId ? this.conversations.get(task.accountId, task.conversationId).url : task.targetUrl;
@@ -1131,21 +1211,16 @@ export class BrowserRuntime {
     }
   }
   async hasBusyPage(): Promise<boolean> {
-    for (const view of this.views.values()) {
+    const busy = await Promise.all([...this.views.values()].map(async view => {
       const contents = view.webContents;
-      if (!contents || contents.isDestroyed() || !isChatUrl(contents.getURL())) continue;
+      if (!contents || contents.isDestroyed() || !isChatUrl(contents.getURL())) return false;
       if (this.pageLoading(contents)) return true;
-      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const busy = await Promise.race([
-          executePageScript(contents, pageOperationScript({ kind: 'activity' })).then(value => pageOperationResult<ActivitySnapshot>(value).busy),
-          new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(true), 3000); })
-        ]);
-        if (busy) return true;
+        return pageOperationResult<ActivitySnapshot>(await boundedPageOperation(
+          executePageScript(contents, pageOperationScript({ kind: 'activity' })), 3000)).busy;
       } catch { return true; }
-      finally { clearTimeout(timer); }
-    }
-    return false;
+    }));
+    return busy.some(Boolean);
   }
   private async waitUntilLoaded(id: string): Promise<void> {
     const deadline = Date.now() + 30000;
@@ -1243,6 +1318,9 @@ export class BrowserRuntime {
     const view = this.views.get(id);
     if (view) {
       const contents = view.webContents;
+      if (contents && !contents.isDestroyed() && owner) {
+        this.streamMonitors.get(this.accounts.get(owner.accountId).partition)?.forget(contents.id);
+      }
       if (this.activeId === id) {
         if (detach && contents && !contents.isDestroyed() && !this.window.isDestroyed() && this.window.contentView.children.includes(view))
           this.window.contentView.removeChildView(view);
@@ -1261,7 +1339,7 @@ export class BrowserRuntime {
     if (owner?.conversationId && this.conversations.get(owner.accountId, owner.conversationId).binding === 'uncertain') return;
     const idleMs = this.backgrounded() ? this.hiddenIdlePageMs : this.idlePageMs;
     if (!owner || this.views.get(id) !== view || this.activeId === id && !this.backgrounded() || this.isLocked(id) || this.redirectingDuplicates.has(id) || this.observing.has(id) ||
-      owner.hasDraft || owner.busy || !owner.hibernationReady || Date.now() - owner.idleSince < idleMs ||
+      owner.hasDraft || owner.busy || this.recoveries.get(id)?.outputReconnect || !owner.hibernationReady || Date.now() - owner.idleSince < idleMs ||
       !contents || contents.isDestroyed() || this.pageLoading(contents) || !isChatUrl(contents.getURL())) return;
     this.destroyView(id);
     this.changed();
@@ -1276,7 +1354,7 @@ export class BrowserRuntime {
     this.locks = tasks;
     this.automaticRecoveryTasks = automaticRecoveryTasks;
     for (const [id, recovery] of this.recoveries) {
-      if (recovery.conversationUrl && !this.hasAutomaticRecovery(id)) this.releaseConversationRecovery(id);
+      if (recovery.conversationUrl && !this.canRecoverConversation(id)) this.releaseConversationRecovery(id);
     }
     for (const taskId of this.taskPages.keys()) if (!tasks.some(task => task.id === taskId)) this.taskPages.delete(taskId);
     for (const id of this.previewFrames.keys()) if (!this.isLocked(id)) {
@@ -1309,12 +1387,14 @@ export class BrowserRuntime {
       if (task.retryCount && conversation?.binding !== 'uncertain' && !this.pageLoading(contents)) {
         let safeToReload = false;
         try {
-          const page = pageOperationResult<Page>(await executePageScript(contents, pageOperationScript({ kind: 'inspect' })));
+          const page = pageOperationResult<Page>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'inspect' })), 2000, signal));
           safeToReload = !page.busy && !page.draft.trim() && page.readiness !== 'login_required' && page.readiness !== 'verification_required' &&
             (!task.sendIntentAt || page.readiness === 'loading');
-        } catch { safeToReload = contents.isCrashed(); }
-        if (safeToReload) await contents.loadURL(conversation?.url ?? task.targetUrl ?? HOME_URL);
+        } catch { signal.throwIfAborted(); safeToReload = contents.isCrashed(); }
+        signal.throwIfAborted();
+        if (safeToReload) await boundedPageOperation(contents.loadURL(conversation?.url ?? task.targetUrl ?? HOME_URL), 30000, signal);
       }
+      signal.throwIfAborted();
       const result = await new ChatGPTAdapter(contents, signal, context, this.conversations,
         () => this.activeId === pageId && this.visible && !this.backgrounded() ? 250 : 2000,
         () => this.pageLoading(contents)).execute(input);
@@ -1335,5 +1415,10 @@ export class BrowserRuntime {
       }
     }
   }
-  close(): void { this.closing = true; clearInterval(this.monitor); for (const id of [...this.views.keys()]) this.closeView(id); }
+  close(): void {
+    this.closing = true; clearInterval(this.monitor);
+    for (const monitor of this.streamMonitors.values()) monitor.dispose();
+    this.streamMonitors.clear();
+    for (const id of [...this.views.keys()]) this.closeView(id);
+  }
 }

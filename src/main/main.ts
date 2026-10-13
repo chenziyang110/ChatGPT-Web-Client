@@ -22,6 +22,7 @@ import { UpdateChecker } from './UpdateChecker';
 import { createUpdateInstaller } from './UpdateInstaller';
 import { RELEASES_URL } from '../shared/updates';
 import { RuntimeDiagnostics } from './RuntimeDiagnostics';
+import { UpdatePreparation } from './UpdatePreparation';
 
 app.setName('ChatGPT-Web-Client');
 if (process.platform === 'win32') app.setAppUserModelId('com.chenziyang.chatgptwebclient');
@@ -41,7 +42,6 @@ else void app.whenReady().then(async () => {
   const db = new Database(path.join(userData, 'workspace.sqlite'));
   diagnostics.record('database_opened');
   let stopping = false;
-  let preparingUpdate = false;
   const accounts = new AccountManager(db);
   const sessions = new SessionManager(db);
   const conversations = new ConversationManager(db);
@@ -119,8 +119,27 @@ else void app.whenReady().then(async () => {
   }), conversations, notifications, shortcuts,
     path.join(app.isPackaged ? path.join(process.resourcesPath, 'agent') : path.resolve(__dirname, '../dist-agent'),
       process.platform === 'win32' ? 'chatgpt-agent.exe' : 'chatgpt-agent'));
+  const preparation = new UpdatePreparation({
+    isReady: () => updates.state.status === 'downloaded',
+    settled: async () => { await Promise.all([workspace.settled(), apiChange]); },
+    isTaskRunning: () => tasks.runningAccounts().length > 0,
+    hasBusyPage: () => browser.hasBusyPage(),
+    stage: stage => {
+      updates.prepareInstall(stage);
+      diagnostics?.record('update_preparing', { stage });
+    },
+    failed: message => {
+      updates.preparationFailed(message);
+      diagnostics?.record('update_preparation_failed');
+    },
+    beginInstall: () => {
+      if (stopping) throw new AppError('Runtime is stopping', 503);
+      updates.beginInstall();
+    },
+    shutdown: () => { void shutdown(true); }
+  });
   const api: LocalApi = new LocalApi(discoveryFile, (method, params) => {
-    if (stopping || preparingUpdate) throw new AppError('Runtime is preparing to restart', 503);
+    if (stopping || preparation.preparing) throw new AppError('Runtime is preparing to restart', 503);
     return workspace.call(method, params);
   });
   const rendererFile = path.join(__dirname, '../dist/index.html');
@@ -135,7 +154,9 @@ else void app.whenReady().then(async () => {
     const name = text(method, 'Method', 80);
     const params = record(value);
     if (JSON.stringify(params).length > 65536) throw new AppError('Request too large', 413);
-    if (preparingUpdate && !['updates.status', 'workspace.status'].includes(name)) throw new AppError('正在准备更新，请稍候。', 409);
+    if (preparation.preparing && !['updates.status', 'workspace.status', 'updates.install', 'updates.open', 'window.state', 'window.control', 'ui.bounds', 'ui.visibility'].includes(name)) {
+      throw new AppError('正在等待本地操作结束；可选择强制安装。', 409);
+    }
     // Window controls are available only to the trusted local renderer, never the HTTP API.
     if (name === 'updates.status') return { ...updates.state };
     if (name === 'updates.check') return updates.check();
@@ -143,21 +164,8 @@ else void app.whenReady().then(async () => {
     if (name === 'updates.cancel') { updates.cancelDownload(); return null; }
     if (name === 'updates.install') {
       if (params.force !== undefined && typeof params.force !== 'boolean') throw new AppError('force must be a boolean');
-      const force = params.force === true;
-      preparingUpdate = true;
-      try {
-        await workspace.settled();
-        if (stopping) throw new AppError('Runtime is stopping', 503);
-        if (!force && (tasks.runningAccounts().length || await browser.hasBusyPage())) throw new AppError('还有回复或任务正在进行，请完成后再安装，或选择强制安装。', 409);
-        // No further await before shutdown blocks new work. Pending queue items
-        // are persisted and paused by the ordinary shutdown path. Sent tasks
-        // become uncertain on interruption and cannot be resent automatically.
-        if (stopping) throw new AppError('Runtime is stopping', 503);
-        if (!force && tasks.runningAccounts().length) throw new AppError('还有任务正在进行，请完成后再安装，或选择强制安装。', 409);
-        updates.beginInstall();
-        void shutdown(true);
-        return null;
-      } finally { preparingUpdate = false; }
+      await preparation.prepare(params.force === true);
+      return null;
     }
     if (name === 'updates.open') { await shell.openExternal(RELEASES_URL); return null; }
     if (name === 'updates.configure') {
@@ -238,15 +246,20 @@ else void app.whenReady().then(async () => {
     bossKey.dispose();
     trayRegistration.dispose();
     clearTimeout(updateStart); clearInterval(updateTimer);
+    diagnostics?.record('shutdown_stage', { stage: 'local_api' });
     await apiChange;
     await api.stop();
+    diagnostics?.record('shutdown_stage', { stage: 'local_operations' });
     await workspace.settled();
+    diagnostics?.record('shutdown_stage', { stage: 'queues' });
     await tasks.stop();
+    diagnostics?.record('shutdown_stage', { stage: 'sessions' });
     sessions.saveWindow({ ...win.getNormalBounds(), maximized: win.isMaximized() });
     browser.close();
     db.close();
     stopped = true;
     if (installUpdate) {
+      diagnostics?.record('shutdown_stage', { stage: 'installer' });
       try { updates.install(); }
       catch {
         // Relaunch the installed version if the updater cannot start. User data

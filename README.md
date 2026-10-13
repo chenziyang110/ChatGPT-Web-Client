@@ -12,13 +12,13 @@
 
 ## 下载与开始
 
-**当前正式版 v1.4.27**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，按下表选择系统和 CPU 对应的安装包。
+**当前正式版 v1.4.29**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，按下表选择系统和 CPU 对应的安装包。
 
 1. 添加账号，在独立的 ChatGPT 网页中自行登录。
 2. 添加其他账号，在侧栏随时切换；各账号的登录状态互相隔离。
 3. 在任务中心准备提示词，或通过 **Agent 协作** 让本机 Agent 获取网页回复。
 
-Windows 安装包尚未配置发布者签名，可能显示未知发布者提示。请核对来源与 Release 附带的 SHA-256。v1.4.27 提供以下六种系统 / CPU 组合的安装包。
+Windows 安装包尚未配置发布者签名，可能显示未知发布者提示。请核对来源与 Release 附带的 SHA-256。v1.4.29 提供以下六种系统 / CPU 组合的安装包。
 
 | 系统 | x64（Intel / AMD） | ARM64 | 安装包 |
 | --- | --- | --- | --- |
@@ -50,7 +50,7 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 签名及公证；首次打�
 
 ![任务中心](docs/images/tasks.png)
 
-任务默认只准备草稿；明确选择发送才会提交。发送结果不明确时暂停核对，避免重复提交。重启后队列保持暂停，普通任务记录最多保留 200 条，未处理任务优先保留。
+任务默认只准备草稿；明确选择发送才会提交。发送结果不明确时暂停核对，避免重复提交。普通任务记录最多保留 200 条，未处理任务优先保留；会话队列的重启恢复与暂停规则见下文。
 
 ### 会话队列
 
@@ -58,13 +58,23 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 签名及公证；首次打�
 
 **聊天、工作和 Your dot 均支持队列**，操作方式相同。工作首页会记录模式，刷新和重启后自动恢复；Your dot 绑定其独立频道。面板显示「工作」或「Your dot」名称，主页切换模式时草稿与队列分开，消息不会混发。后台 Dot 活动不等于当前消息正在回复，队列等待新回复结束后再发送下一条。
 
-如果 ChatGPT 显示“无法思考”或“连接已中断。正在等待完整回复”，客户端会在稳定确认生成停止后结束本轮，继续发送队列的下一条。输入框恢复可用且持续没有生成活动时，即使没有完整回复，也会将当前消息记为失败并继续队列。生成完成的图片回复同样会结束等待；自动发送过但失败的消息不会重复发送。其他需要人工核对的网页错误仍会暂停队列。
+如果 ChatGPT 显示“无法思考”，客户端会在稳定确认生成停止后结束本轮，继续发送队列的下一条。输入框恢复可用且持续没有生成活动时，即使没有完整回复，也会将当前消息记为失败并继续队列。生成完成的图片回复同样会结束等待；自动发送过但失败的消息不会重复发送。其他需要人工核对的网页错误仍会暂停队列。
+
+“连接已中断，正在等待完整答复”与仍然存在的停止按钮表示输出连接断开，任务可能继续运行。客户端会恢复同一会话的输出，队列继续等待实际结束；不会因为断线提前发送下一条。
 
 面板只显示状态、消息列表和输入框。点击消息右侧 **…** 可编辑、调整顺序或移除尚未开始的消息；**暂停后续** 保留当前已发送的回复，**恢复队列** 继续后续消息。任务中心可查看各会话队列并打开对应页面。
 
 队列输入框支持 **Enter 加入队列、Shift+Enter 换行**，也可用 Ctrl / Command + Enter。中文输入法选词时的回车不会提交，按住回车不会重复入队。编辑已有消息时 Ctrl / Command + Enter 保存、Esc 取消；Esc 优先收起消息操作，再关闭队列面板并保留未入队草稿。
 
 队列消息保存在本机。等待上一轮和等待本条回复各有 60 分钟预算，按网页完成状态接续，而非固定 30 分钟定时发送。观看模式自动跟随最新回复；抓图卡住会重试，内容更新但画面停住时会唤醒页面重新抓图。接管后可自由浏览。点击窗口 × 只隐藏到托盘，队列继续运行；从托盘明确退出后队列停止，重启后未手动暂停的后台队列自动恢复，已提交的消息继续观察原回复，不重发。聊天、工作和 Your dot 的短回复已在真实页面验证，30+ 分钟边界通过模拟时间测试；真实长回复和所有后台工具场景未穷尽验证。验证见 [Work / Your dot 队列](docs/validation/work-dot-queues-2026-09-30.md)，接口详见 [API](docs/API.md)。
+
+### 回复输出的自动重连
+
+当前回复出现断线提示、停止按钮仍在，且消息正文持续 6 秒没有变化时，客户端自动重新打开同一会话，接回原任务输出。检测和等待期间保留已显示内容；输入框有未发送草稿时暂缓重连，保护正在输入的内容。
+
+输出重连独立于队列，普通观看、暂停队列和人工接管时均可恢复输出，不会重发消息、点击停止或解除暂停。首条消息尚未生成正式会话地址时保留原页面；重连后只有空输入框不算成功，须读回原轮次。首次或较晚出现的会话加载失败会继续退避重试，最长间隔 30 秒。普通浏览中未触发输出重连的加载错误仍保留网页“重试”按钮，客户端不自动循环刷新。
+
+此功能通过页面重连恢复输出，尚未接管 ChatGPT 私有流式接口。服务不可用时仍可能有输出间隙，不保证无缝实时显示；验证范围见 [输出重连记录](docs/validation/reply-output-reconnection-2026-10-10.md)。
 
 ### 打开登录或授权链接
 
@@ -82,7 +92,9 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 签名及公证；首次打�
 
 更新检查仅请求 GitHub 的公开发布信息，不上传账号、对话、Cookie 或本地 API 令牌。发现新版后点击 **下载更新**，查看下载进度；校验完成后点击 **安装并重启**，覆盖当前版本并打开新版。Windows 安装版和 Linux AppImage 支持此流程；macOS、Linux tar.gz 和开发运行保留官方下载入口。
 
-**软件内安装更新从 v1.4.0 开始支持**。v1.3.1 及更早版本需要先下载并覆盖安装一次 v1.4.0。更新不会清除账号、会话和排队消息；正在回复时会提示等任务完成，重启后队列保持暂停。下载失败或校验失败可重试，不会执行不完整安装包。
+**软件内安装更新从 v1.4.0 开始支持**。v1.3.1 及更早版本需要先下载并覆盖安装一次 v1.4.0。更新不会清除账号、会话和排队消息；正在回复时可等待完成，也可明确选择 **强制安装**。强制安装仍等待本地保存完成，不重新提交已发送的消息；用户主动暂停和接管的队列在重启后保持原状态。
+
+准备更新会显示等待本地操作或检查网页回复的阶段，总期限为 10 秒。超时后解除准备状态，保留已下载且校验通过的安装包，可再次安装；准备期间也可将当前请求改为强制安装，跳过回复检查。下载失败或校验失败可重试，不会执行不完整安装包。验证见 [更新准备记录](docs/validation/update-preparation-2026-10-10.md)。
 
 ## 运行
 
@@ -196,7 +208,7 @@ Linux 无头测试：`xvfb-run --auto-servernum npm run test:desktop`。一次�
 - 使用与开发：[Agent 协作](docs/AGENT_COLLABORATION.md)、[API 与 CLI](docs/API.md)、[发布流程](docs/RELEASING.md)、[macOS 安装](docs/MACOS.md)
 - 产品与技术：[产品需求](docs/PRODUCT_REQUIREMENTS.md)、[会话自动化方案](docs/CONVERSATION_AUTOMATION_PROPOSAL.md)、[架构](docs/ARCHITECTURE.md)、[技术栈](docs/TECH_STACK.md)、[路线图](docs/ROADMAP.md)、[验证记录](docs/VALIDATION.md)
 - 视觉与平台记录：[视觉规范](docs/BRAND.md)、[macOS 签名调查](docs/MACOS-SIGNATURE-INVESTIGATION.md)
-- 发布记录：[v1.0.0](docs/RELEASE-v1.0.0.md)、[v1.1.0](docs/RELEASE-v1.1.0.md)、[v1.1.1](docs/RELEASE-v1.1.1.md)、[v1.2.0](docs/RELEASE-v1.2.0.md)、[v1.3.0](docs/RELEASE-v1.3.0.md)、[v1.3.1](docs/RELEASE-v1.3.1.md)、[v1.4.0](docs/RELEASE-v1.4.0.md)、[v1.4.1](docs/RELEASE-v1.4.1.md)、[v1.4.2](docs/RELEASE-v1.4.2.md)、[v1.4.3](docs/RELEASE-v1.4.3.md)、[v1.4.4](docs/RELEASE-v1.4.4.md)、[v1.4.5](docs/RELEASE-v1.4.5.md)、[v1.4.6](docs/RELEASE-v1.4.6.md)、[v1.4.7](docs/RELEASE-v1.4.7.md)、[v1.4.8](docs/RELEASE-v1.4.8.md)、[v1.4.9](docs/RELEASE-v1.4.9.md)、[v1.4.10](docs/RELEASE-v1.4.10.md)、[v1.4.11](docs/RELEASE-v1.4.11.md)、[v1.4.12](docs/RELEASE-v1.4.12.md)、[v1.4.13](docs/RELEASE-v1.4.13.md)、[v1.4.14](docs/RELEASE-v1.4.14.md)
+- 发布记录：[v1.0.0](docs/RELEASE-v1.0.0.md)、[v1.1.0](docs/RELEASE-v1.1.0.md)、[v1.1.1](docs/RELEASE-v1.1.1.md)、[v1.2.0](docs/RELEASE-v1.2.0.md)、[v1.3.0](docs/RELEASE-v1.3.0.md)、[v1.3.1](docs/RELEASE-v1.3.1.md)、[v1.4.0](docs/RELEASE-v1.4.0.md)、[v1.4.1](docs/RELEASE-v1.4.1.md)、[v1.4.2](docs/RELEASE-v1.4.2.md)、[v1.4.3](docs/RELEASE-v1.4.3.md)、[v1.4.4](docs/RELEASE-v1.4.4.md)、[v1.4.5](docs/RELEASE-v1.4.5.md)、[v1.4.6](docs/RELEASE-v1.4.6.md)、[v1.4.7](docs/RELEASE-v1.4.7.md)、[v1.4.8](docs/RELEASE-v1.4.8.md)、[v1.4.9](docs/RELEASE-v1.4.9.md)、[v1.4.10](docs/RELEASE-v1.4.10.md)、[v1.4.11](docs/RELEASE-v1.4.11.md)、[v1.4.12](docs/RELEASE-v1.4.12.md)、[v1.4.13](docs/RELEASE-v1.4.13.md)、[v1.4.14](docs/RELEASE-v1.4.14.md)、[v1.4.29](docs/RELEASE-v1.4.29.md)
 
 ## 账号会话通知与快捷键
 

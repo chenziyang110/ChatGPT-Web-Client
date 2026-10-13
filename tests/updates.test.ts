@@ -8,6 +8,16 @@ test('stable versions compare numerically and never downgrade or offer previews'
   for (const version of ['1.0.0', '0.9.9', 'v2.0.0-beta.1', 'garbage', '01.2.3']) assert.equal(newerStable(version, '1.0.0'), false);
   assert.equal(newerStable('1.9.0', '1.10.0'), false);
 });
+test('local previews receive their stable counterpart and later stable releases without downgrading', () => {
+  assert.equal(newerStable('v1.4.29', '1.4.29-preview.1'), true);
+  assert.equal(newerStable('v1.4.30', '1.4.29-preview.1'), true);
+  for (const candidate of ['1.4.28', '1.4.29-preview.2', '1.4.30-beta.1', 'garbage']) {
+    assert.equal(newerStable(candidate, '1.4.29-preview.1'), false);
+  }
+  for (const current of ['1.4.29-preview.', '1.4.29-preview.01', '1.4.29-unknown.1']) {
+    assert.equal(newerStable('1.4.30', current), false);
+  }
+});
 test('checks deduplicate requests and send no account data', async () => {
   let count = 0;
   const checker = new UpdateChecker('1.0.0', true, () => {}, (async (url, options) => {

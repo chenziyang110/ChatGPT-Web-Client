@@ -266,10 +266,10 @@ function App() {
         <button role="tab" aria-selected={page.selected} title={page.title} onClick={() => void action('browser.select', { accountId: active.id, pageId: page.id })}>{page.locked ? <span className="preview-dot" /> : <Icon name="chat" size={14} />}<span>{page.title}</span></button>
         <button aria-label={`关闭会话 ${page.title}`} disabled={page.locked || busy} onClick={() => void action('browser.closePage', { accountId: active.id, pageId: page.id })}><Icon name="close" size={12} /></button>
       </div>)}</div>}
-      {tab === 'workspace' && (showPreview || !!attentionTask || loginPage) && <div className={`workspace-status ${showPreview && runningTask?.status === 'running' ? 'is-running' : ''} ${attentionTask ? 'attention-banner' : ''}`}>
+      {tab === 'workspace' && (showPreview || !!attentionTask || loginPage || state?.page?.reconnecting) && <div className={`workspace-status ${showPreview && runningTask?.status === 'running' ? 'is-running' : ''} ${attentionTask ? 'attention-banner' : ''}`}>
         <div className="workspace-status-label" role="status">
           <span aria-hidden="true" className={`preview-dot ${!showPreview || previewTask?.attention ? 'needs-attention' : ''}`} />
-          <span className="workspace-status-text" title={loginPage ? '登录页面可直接操作' : showPreview ? previewStatus : attentionTask && !pageLocked ? '当前页面可操作，该会话有暂停的任务等待你的选择' : '其他会话或账号有任务等待处理，不影响当前页面'}>{loginPage ? '请完成账号登录' : showPreview ? previewStatus : attentionTask && !pageLocked ? '当前页面可操作 · 此会话任务待处理' : '当前页面可操作 · 其他任务待处理'}</span>
+          <span className="workspace-status-text" title={state?.page?.reconnecting ? '正在重连当前会话的输出，不会重新发送消息或恢复暂停的队列。' : loginPage ? '登录页面可直接操作' : showPreview ? previewStatus : attentionTask && !pageLocked ? '当前页面可操作，该会话有暂停的任务等待你的选择' : '其他会话或账号有任务等待处理，不影响当前页面'}>{state?.page?.reconnecting ? '输出连接已中断 · 正在自动重连' : loginPage ? '请完成账号登录' : showPreview ? previewStatus : attentionTask && !pageLocked ? '当前页面可操作 · 此会话任务待处理' : '当前页面可操作 · 其他任务待处理'}</span>
           {showPreview && <span className="preview-mode" title="自动跟随最新回复。需要浏览历史或操作网页时，请选择接管。">只读预览 · 自动跟随</span>}
         </div>
         <div className="workspace-status-actions">

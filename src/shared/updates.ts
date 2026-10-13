@@ -1,10 +1,12 @@
 export const RELEASES_URL = 'https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest';
+export type UpdatePreparationStage = 'settling' | 'checking-replies';
 export interface UpdateState {
   current: string;
   enabled: boolean;
-  status: 'idle' | 'checking' | 'current' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'error';
+  status: 'idle' | 'checking' | 'current' | 'available' | 'downloading' | 'downloaded' | 'preparing' | 'installing' | 'error';
   installMode?: 'in-app' | 'manual' | 'development';
   progress?: number;
+  preparationStage?: UpdatePreparationStage;
   error?: string;
   latest?: string;
   checkedAt?: string;
@@ -12,10 +14,13 @@ export interface UpdateState {
 
 export function newerStable(candidate: string, current: string): boolean {
   const parse = (value: string) => /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(value)?.slice(1).map(Number);
-  const a = parse(candidate), b = parse(current);
+  // Trial builds still receive the next stable release, including the stable
+  // counterpart of their own version. Remote preview releases remain excluded.
+  const preview = /^(v?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))-preview\.(?:0|[1-9]\d*)$/.exec(current);
+  const a = parse(candidate), b = parse(preview?.[1] ?? current);
   if (!a || !b || [...a, ...b].some(n => !Number.isSafeInteger(n))) return false;
   for (let i = 0; i < 3; i++) { if (a[i] !== b[i]) return a[i] > b[i]; }
-  return false;
+  return !!preview;
 }
 
 export function validUpdateMetadata(value: unknown, version: string, platform: string, arch: string): boolean {

@@ -1,4 +1,4 @@
-import { newerStable, type UpdateState } from '../shared/updates';
+import { newerStable, type UpdatePreparationStage, type UpdateState } from '../shared/updates';
 
 const endpoint = 'https://api.github.com/repos/chenziyang110/ChatGPT-Web-Client/releases/latest';
 export interface UpdateInstaller {
@@ -17,7 +17,7 @@ export class UpdateChecker {
   }
   setEnabled(enabled: boolean) { this.state.enabled = enabled; this.changed(); }
   check(): Promise<UpdateState> {
-    if (['downloading', 'downloaded', 'installing'].includes(this.state.status)) return Promise.resolve({ ...this.state });
+    if (['downloading', 'downloaded', 'preparing', 'installing'].includes(this.state.status)) return Promise.resolve({ ...this.state });
     if (this.pending) return this.pending;
     this.pending = this.run().finally(() => { this.pending = undefined; });
     return this.pending;
@@ -69,9 +69,17 @@ export class UpdateChecker {
     if (this.state.status !== 'downloading') return;
     this.cancelled = true; this.installer?.cancel();
   }
+  prepareInstall(stage: UpdatePreparationStage): void {
+    if (!['downloaded', 'preparing'].includes(this.state.status) || !this.installer) throw new Error('请先完成更新下载。');
+    this.state.status = 'preparing'; this.state.preparationStage = stage; this.state.error = undefined; this.changed();
+  }
+  preparationFailed(message: string): void {
+    if (!['preparing', 'installing'].includes(this.state.status)) return;
+    this.state.status = 'downloaded'; this.state.preparationStage = undefined; this.state.error = message; this.changed();
+  }
   beginInstall(): void {
-    if (this.state.status !== 'downloaded' || !this.installer) throw new Error('请先完成更新下载。');
-    this.state.status = 'installing'; this.state.error = undefined; this.changed();
+    if (!['downloaded', 'preparing'].includes(this.state.status) || !this.installer) throw new Error('请先完成更新下载。');
+    this.state.status = 'installing'; this.state.preparationStage = undefined; this.state.error = undefined; this.changed();
   }
   install(): void {
     if (this.state.status !== 'installing' || !this.installer) throw new Error('更新尚未准备好。');

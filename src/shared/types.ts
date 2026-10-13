@@ -41,7 +41,7 @@ export interface TaskResponse {
 }
 export interface PageState {
   id?: string; conversationId?: string;
-  url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; error?: string;
+  url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; error?: string; reconnecting?: boolean;
 }
 export interface ConversationNotice {
   id: string; accountId: string; url: string; title: string; running: boolean;

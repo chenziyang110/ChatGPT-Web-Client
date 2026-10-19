@@ -117,6 +117,7 @@ Success is `{ok:true,result:...}`. Errors use `{ok:false,error:"..."}` and non-2
 | `queues.reorder` | `{accountId,conversation,items:[{id,updatedAt}]}` | Reorder the complete set of pending items in one conversation |
 | `queues.move` | `{accountId,conversation,id,expectedUpdatedAt,neighborId,expectedNeighborUpdatedAt}` | Swap two adjacent pending items without sending the whole queue |
 | `queues.status/pause/resume/takeover` | `{}`, `{accountId,conversation?}`, `{accountId,conversation?,acknowledged?}`, `{accountId,conversation?}` | Account-wide or conversation-specific queue controls |
+| `queues.timing` | `{accountId,conversation,mode,intervalMs?}` | Dot only: `interval` (60000–86400000 integer milliseconds) or `completion`. Preserves pauses and takeover |
 | `browser.navigate` | `{accountId,url}` | Queued navigation; rejected with outstanding account work |
 | `browser.openLink` | `{accountId,url}` | Open a separate tab in the account and return its `BrowserPage`; does not create a task or replace a conversation queue |
 | `browser.inspect` | `{accountId,pageId?}` | Read-only page readiness, URL/title, editor presence, draft length, busy flag and structural DOM diagnostics; bypasses the sending queue without resuming it |
@@ -138,6 +139,17 @@ Task inputs:
 Low-level click means the click ran; it does not promise a ChatGPT reply. Use submitted prompts for reply-aware sequencing. Fill refuses passwords and nonempty fields. Snapshot returns up to 64,000 characters of visible main content. Browser actions have no arbitrary script/shell or credential export interface. Tasks carry `conversationId`, `targetUrl`, phase/timestamps, `seq`, `queueOrder`, `background`, `sendIntentAt`, `submittedAt`, and (after review) `resolvedAt`; an unbound target resolves its URL through the conversation registry at execution.
 
 Editing, removal and reordering require the latest `updatedAt` from task reads. Full reordering must provide every pending item exactly once; `queues.move` accepts just two adjacent items. Both leave started tasks untouched. A changed version, started item or stale pending set returns 409 `QUEUE_CHANGED`; reread before offering another change. Editing preserves the original creation key and request hash: retrying the original creation returns the edited existing task instead of sending a duplicate. All these methods also work through `node dist-electron/cli.cjs rpc METHOD JSON`.
+
+### Timed Dot queues
+
+The Dot queue panel offers 10, 20, 30 minutes or a custom integer number of minutes (1–1440). Save the setting explicitly. The first queued background message waits one interval; each later message waits from the previous confirmed submission, regardless of Dot's background work or immediate acknowledgement. This setting does not change foreground Agent prompts, Chat or Work queues. Timed task results carry `submittedOnly:true` and `responseUnavailable:true`: delivery is confirmed, remote work completion is not.
+
+Settings and `timing.nextSendAt` persist in the account's conversation queue. Changing the interval restarts the countdown for unsent items; a started send keeps its policy when switching back to completion mode. Saving does not resume a paused or human-controlled queue. A restart or resume after a missed deadline sends at most one item, then starts a fresh interval from actual submission; it does not send all overdue items at once. No automatic sending occurs while the app is fully exited. Login, verification, human drafts, a real Stop action and an unavailable Send button retain their normal protections and retry handling. Confirmed receipts are never sent again.
+
+```sh
+node dist-electron/cli.cjs queue timing --account ACCOUNT_ID --conversation DOT_ID --mode interval --minutes 10
+node dist-electron/cli.cjs queue timing --account ACCOUNT_ID --conversation DOT_ID --mode completion
+```
 
 ## External tools / AnythingCLI
 

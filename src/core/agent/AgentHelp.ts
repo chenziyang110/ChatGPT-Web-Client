@@ -21,6 +21,8 @@ export const agentHelp = {
   readResponse: { method: 'tasks.response', params: { id: 'TASK_ID' } },
   diagnostics: { method: 'browser.inspect', params: { accountId: 'ACCOUNT_ID' } },
   queues: { method: 'queues.status', params: {} },
+  dotTiming: { method: 'queues.timing', params: { accountId: 'ACCOUNT_ID', conversation: 'DOT_CONVERSATION_ID', mode: 'interval', intervalMs: 600000 },
+    behavior: 'Human-configured Dot background queue only. First delivery waits the interval; later deliveries are spaced from confirmed submission. Remote work may continue. Pauses and deadlines survive restart; overdue items do not burst. Use mode:completion to restore work-completion detection. Does not change ordinary Agent asks.' },
   response: 'HTTP returns {ok:true,result:task} or {ok:false,error:string}. Prefer the blocking CLI. HTTP-only callers repeat tasks.wait long-polls for the same task and must not poll tasks.get every 1–2 seconds.',
   states: {
     pending: 'Queued. Keep the same blocking wait. If paused, report queues.status to the human; do not resume it yourself.',

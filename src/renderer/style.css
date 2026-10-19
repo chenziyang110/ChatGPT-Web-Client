@@ -127,6 +127,18 @@ h1 { font-size: 16px; font-weight: 600; margin-top: 5px; letter-spacing: .3px; }
 .cq-elapsed { font-variant-numeric:tabular-nums; }
 .cq-status .text-button { margin-left:auto; padding:4px 0; font-size:12px; white-space:nowrap; }
 .cq-warning { margin:10px 16px 0; color:#805a30; font-size:12px; }
+.cq-timing { flex-shrink:0; margin:10px 16px 0; padding:10px; border:1px solid var(--line); border-radius:8px; background:#f8faf4; }
+.cq-timing-label { display:block; margin-bottom:6px; color:var(--muted); font-size:12px; }
+.cq-timing > .ui-select { width:100%; }
+.cq-timing-interval { display:flex; align-items:center; gap:8px; margin-top:8px; color:var(--muted); font-size:12px; }
+.cq-timing-interval > .ui-select { flex:1; min-width:0; }
+.cq-timing-custom { display:flex; align-items:center; gap:5px; }
+.cq-timing-custom input { width:58px; min-width:0; padding:7px 5px; border:1px solid var(--line); border-radius:6px; background:white; color:var(--pine); font-size:12px; }
+.cq-timing-help { margin:8px 0 0; color:var(--muted); font-size:12px; line-height:1.6; }
+.cq-timing-validation { margin:6px 0 0; color:#805a30; font-size:12px; }
+.cq-timing-footer { display:flex; align-items:flex-end; gap:8px; }
+.cq-timing-footer > p { flex:1; min-width:0; }
+.cq-timing-footer > .text-button { flex-shrink:0; padding:4px 0; font-size:12px; }
 .cq-list { flex:1; min-height:0; overflow-y:auto; padding:0 16px; overscroll-behavior:contain; }
 .cq-empty { padding:28px 0; text-align:center; font-size:13px; color:var(--muted); }
 .cq-items { list-style:none; margin:0; padding:0; }

@@ -3,7 +3,7 @@ import { Database } from '../storage/Database';
 import { AppError, chatUrl, record, text } from '../validation';
 import { taskAttention } from './TaskAttention';
 import { canClearTask } from '../../shared/taskHistory';
-import { orderedTasks, taskOrder } from '../../shared/conversationQueue';
+import { isQueueTask, orderedTasks, taskOrder } from '../../shared/conversationQueue';
 import type { AccountQueue, AgentTask, Conversation, TaskInput, TaskPhase } from '../../shared/types';
 export type { AgentTask } from '../../shared/types';
 const queueKey = (accountId: string, conversationId?: string) => conversationId ? `${accountId}:conversation:${conversationId}` : accountId;
@@ -198,7 +198,8 @@ export class AgentGateway {
         blocked.has(queueKey(task.accountId, task.conversationId))) return false;
       const account = queues.get(task.accountId);
       const conversation = queues.get(queueKey(task.accountId, task.conversationId));
-      return !account?.paused && account?.control !== 'human' && !conversation?.paused && conversation?.control !== 'human';
+      return !account?.paused && account?.control !== 'human' && !conversation?.paused && conversation?.control !== 'human' &&
+        this.intervalDueAt(task) <= Date.now();
     });
   }
   lockedAccounts(): string[] { return [...new Set(this.lockedTasks().map(task => task.accountId))]; }
@@ -211,6 +212,55 @@ export class AgentGateway {
     this.db.write('account_queues', key, queue);
     if (notify) this.changed();
     return queue;
+  }
+  configureTiming(accountId: string, conversationId: string, intervalMs: unknown): AccountQueue {
+    const conversation = this.db.read<Conversation>('conversations', conversationId);
+    if (!conversation || conversation.accountId !== accountId || conversation.surface !== 'dot') throw new AppError('定时发送仅支持当前账号的 Dot 会话');
+    if (intervalMs !== undefined && (typeof intervalMs !== 'number' || !Number.isInteger(intervalMs) || intervalMs < 60000 || intervalMs > 86400000))
+      throw new AppError('发送间隔必须为 1–1440 分钟');
+    const key = queueKey(accountId, conversationId);
+    const active = this.listTasks().filter(task => task.accountId === accountId && task.conversationId === conversationId && isQueueTask(task) && advancesAfterInterruption(task));
+    const queue: AccountQueue = { accountId, conversationId, paused: false, ...this.db.read<AccountQueue>('account_queues', key),
+      timing: intervalMs === undefined ? undefined : { mode: 'interval', intervalMs: intervalMs as number,
+        nextSendAt: active.length ? Date.now() + (intervalMs as number) : undefined } };
+    this.db.transaction(() => {
+      this.db.write('account_queues', key, queue);
+      for (const task of active) {
+        // Starting interval mode also releases an already confirmed Dot receipt.
+        // Switching back cannot change a send already underway.
+        if (intervalMs !== undefined || task.status === 'pending' && !task.sendIntentAt && this.running.get(key)?.id !== task.id)
+          this.update(task.id, { sendMode: intervalMs === undefined ? undefined : 'dot_interval' }, false);
+      }
+    });
+    // Tasks already waiting for Dot work have passed the scheduler's due gate.
+    // Return unsent safe stages to pending so a newly chosen interval is honored.
+    for (const slot of this.running.values()) {
+      const task = this.get(slot.id);
+      if (task.accountId === accountId && task.conversationId === conversationId && !task.sendIntentAt &&
+        this.intervalDueAt(task) > Date.now() && ['preparing', 'waiting_page', 'waiting_idle', 'queued'].includes(task.phase ?? 'queued'))
+        slot.controller.abort(new QueuePausedError());
+    }
+    this.changed(); this.schedule(); return queue;
+  }
+  private isIntervalTask(task: AgentTask): boolean {
+    if (task.sendMode !== 'dot_interval' || !advancesAfterInterruption(task)) return false;
+    const conversation = this.db.read<Conversation>('conversations', task.conversationId!);
+    return conversation?.accountId === task.accountId && conversation.surface === 'dot';
+  }
+  private intervalDueAt(task: AgentTask): number {
+    // Receipt recovery is read-only and must not wait for a new delivery slot.
+    const timing = this.isIntervalTask(task) && !task.sendIntentAt
+      ? this.db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.timing : undefined;
+    return timing?.nextSendAt ?? 0;
+  }
+  private nextDispatchAt(task: AgentTask): number {
+    return Math.max(task.nextAttemptAt ?? 0, this.intervalDueAt(task));
+  }
+  private advanceInterval(task: AgentTask, at: number): void {
+    if (!this.isIntervalTask(task)) return;
+    const key = queueKey(task.accountId, task.conversationId);
+    const queue = this.db.read<AccountQueue>('account_queues', key);
+    if (queue?.timing) this.db.write('account_queues', key, { ...queue, timing: { ...queue.timing, nextSendAt: at + queue.timing.intervalMs } });
   }
   pause(accountId: string, conversationId?: string): AccountQueue {
     const queue = this.setQueue(accountId, true, '后续发送已暂停；已发送的回复继续', true, conversationId);
@@ -292,10 +342,18 @@ export class AgentGateway {
     const duplicate = this.findRequest(accountId, options.idempotencyKey, hash);
     if (duplicate) return duplicate;
     const now = Date.now();
+    const queue = options.conversationId ? this.db.read<AccountQueue>('account_queues', queueKey(accountId, options.conversationId)) : undefined;
+    const conversation = options.conversationId ? this.db.read<Conversation>('conversations', options.conversationId) : undefined;
+    const interval = queue?.timing && conversation?.accountId === accountId && conversation.surface === 'dot' &&
+      options.background === true && input.type === 'prompt' && input.submit;
     const task: AgentTask = { id: randomUUID(), accountId, input, ...options, requestHash: hash, status: 'pending', phase: 'queued',
+      sendMode: interval ? 'dot_interval' : undefined,
       replyTimeoutMs: duration(options.replyTimeoutMs, 600000), prepareTimeoutMs: duration(options.prepareTimeoutMs, 60000), idleTimeoutMs: duration(options.idleTimeoutMs, 600000),
       createdAt: now, updatedAt: now };
     this.db.transaction(() => {
+      if (interval && (queue.timing!.nextSendAt === undefined || !this.listTasks().some(other => other.accountId === accountId &&
+        other.conversationId === options.conversationId && isQueueTask(other) && advancesAfterInterruption(other))))
+        this.db.write('account_queues', queueKey(accountId, options.conversationId), { ...queue, timing: { ...queue.timing!, nextSendAt: now + queue.timing!.intervalMs } });
       task.seq = (this.db.get<number>('taskSequence') ?? 0) + 1;
       task.queueOrder = task.seq;
       this.db.set('taskSequence', task.seq);
@@ -451,8 +509,8 @@ export class AgentGateway {
         all.findIndex(other => queueKey(other.accountId, other.conversationId) === queueKey(task.accountId, task.conversationId)) === index);
       const eligible = heads.filter(task => !this.running.has(queueKey(task.accountId, task.conversationId)) && !this.db.read<AccountQueue>('account_queues', task.accountId)?.paused && !this.db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.paused &&
         !tasks.some(other => queueKey(other.accountId, other.conversationId) === queueKey(task.accountId, task.conversationId) && (other.status === 'waiting_user' || other.status === 'uncertain' && !other.resolvedAt)));
-      const pending = eligible.filter(task => !task.nextAttemptAt || task.nextAttemptAt <= Date.now());
-      const nextRetry = Math.min(...eligible.filter(task => task.nextAttemptAt && task.nextAttemptAt > Date.now()).map(task => task.nextAttemptAt!));
+      const pending = eligible.filter(task => this.nextDispatchAt(task) <= Date.now());
+      const nextRetry = Math.min(...eligible.map(task => this.nextDispatchAt(task)).filter(at => at > Date.now()));
       clearTimeout(this.retryTimer);
       if (Number.isFinite(nextRetry)) this.retryTimer = setTimeout(() => this.schedule(), Math.max(1, nextRetry - Date.now()));
       const accounts = [...new Set(pending.map(task => task.accountId))];
@@ -486,8 +544,10 @@ export class AgentGateway {
     };
     const checkpoint = () => {
       controller.signal.throwIfAborted();
-      if (!this.get(task.id).sendIntentAt && (this.db.read<AccountQueue>('account_queues', task.accountId)?.paused ||
-        this.db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.paused)) throw new QueuePausedError();
+      const current = this.get(task.id);
+      if (!current.sendIntentAt && (this.db.read<AccountQueue>('account_queues', task.accountId)?.paused ||
+        this.db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.paused ||
+        this.intervalDueAt(current) > Date.now())) throw new QueuePausedError();
     };
     const context: ExecutionContext = {
       checkpoint,
@@ -495,10 +555,23 @@ export class AgentGateway {
       precedingReplyError,
       releaseExecution: () => this.releaseExecution(task.id),
       acquireExecution: () => this.acquireExecution(task.id, controller.signal),
-      intent: receipt => { checkpoint(); this.update(task.id, { phase: 'send_intent', sendIntentAt: Date.now(), sendReceipt: receipt }); },
+      intent: receipt => {
+        checkpoint();
+        const current = this.get(task.id);
+        const at = current.sendIntentAt ?? Date.now();
+        this.db.transaction(() => {
+          if (!current.sendIntentAt) this.advanceInterval(current, at);
+          this.update(task.id, { phase: 'send_intent', sendIntentAt: at, sendReceipt: receipt });
+        });
+      },
       submitted: messageId => {
         controller.signal.throwIfAborted();
-        this.update(task.id, { phase: 'submitted', submittedAt: Date.now(), submittedMessageId: messageId });
+        const current = this.get(task.id);
+        const at = current.submittedAt ?? Date.now();
+        this.db.transaction(() => {
+          if (!current.submittedAt) this.advanceInterval(current, at);
+          this.update(task.id, { phase: 'submitted', submittedAt: at, submittedMessageId: messageId ?? current.submittedMessageId });
+        });
         this.releaseExecution(task.id);
       },
       progress: (response, url) => {

@@ -381,11 +381,29 @@ export class ChatGPTAdapter {
     private readonly pollingInterval: () => number = () => 250,
     private readonly pageLoading: () => boolean = () => contents.isLoading()) {}
   private async wait<T>(promise: Promise<T>): Promise<T> {
-    this.signal.throwIfAborted();
     return new Promise<T>((resolve, reject) => {
-      const aborted = () => reject(this.signal.reason ?? new Error('Cancelled'));
+      let settled = false;
+      const watchContents = typeof this.contents.once === 'function' && typeof this.contents.removeListener === 'function';
+      const cleanup = () => {
+        this.signal.removeEventListener('abort', aborted);
+        if (watchContents) this.contents.removeListener('destroyed', destroyed);
+      };
+      const resolveOnce = (value: T) => { if (!settled) { settled = true; cleanup(); resolve(value); } };
+      const rejectOnce = (error: unknown) => { if (!settled) { settled = true; cleanup(); reject(error); } };
+      const aborted = () => rejectOnce(this.signal.reason ?? new Error('Cancelled'));
+      // Electron can leave an old frame's script/navigation promise pending
+      // after a page rebuild. Release that observation without replaying any
+      // write; the gateway will retry against the same task and send receipt.
+      const destroyed = () => rejectOnce(new Error('PAGE_REPLACED: original page was replaced; retry the same task'));
+      promise.then(resolveOnce, rejectOnce);
+      if (this.signal.aborted) { aborted(); return; }
+      if (this.contents.isDestroyed()) { destroyed(); return; }
       this.signal.addEventListener('abort', aborted, { once: true });
-      promise.then(resolve, reject).finally(() => this.signal.removeEventListener('abort', aborted));
+      if (!settled && watchContents) this.contents.once('destroyed', destroyed);
+      // Cover destruction/cancellation between starting the operation and
+      // registering its listeners, including an event that already fired.
+      if (this.signal.aborted) aborted();
+      else if (this.contents.isDestroyed()) destroyed();
     });
   }
   private async delay(ms = 250): Promise<void> { await this.wait(new Promise<void>(resolve => setTimeout(resolve, ms))); }

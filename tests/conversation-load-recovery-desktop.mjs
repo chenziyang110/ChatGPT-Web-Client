@@ -524,7 +524,8 @@ try {
     .then(content => content.trim().split('\n').slice(-15).map(line => JSON.parse(line))).catch(() => []);
   const requests = await desktop?.evaluate(() => globalThis.fixtureRequests).catch(() => []);
   console.error(JSON.stringify({ pages: state.pages, tasks: state.tasks?.map(task => ({ id: task.id,
-    status: task.status, error: task.error, submittedAt: task.submittedAt })), requests, runtimeLog }, null, 2));
+    status: task.status, phase: task.phase, retryCount: task.retryCount, nextAttemptAt: task.nextAttemptAt,
+    error: task.error, sendIntentAt: task.sendIntentAt, submittedAt: task.submittedAt })), requests, runtimeLog }, null, 2));
   throw error;
 } finally {
   try { if (desktop) await bounded(desktop.close(), 'Fixture shutdown', 10000); }

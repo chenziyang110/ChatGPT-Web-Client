@@ -8,8 +8,8 @@ import { COMPLETION_STABLE_MS, replyToken } from '../../core/notifications/Conve
 import { ReplyTurnTracker, type ConversationMessage } from './ReplyTurnTracker';
 
 type Message = ConversationMessage;
-export interface Page { url: string; title: string; readiness: BrowserReadiness; surface?: ConversationSurface; dotWork?: DotWorkState; editor: boolean; draft: string; busy: boolean; messages: Message[]; error?: string; failure?: 'thinking' | 'interrupted'; loadFailure?: 'conversation' | 'reply_connection'; connectionKey?: string }
-interface Operation { kind: 'inspect' | 'diagnose' | 'activity' | 'follow_latest' | 'select_surface' | 'fill' | 'clear' | 'check_send' | 'send' | 'click' | 'snapshot'; url?: string; anchor?: string; value?: string; selector?: string; surface?: ConversationSurface }
+export interface Page { url: string; title: string; readiness: BrowserReadiness; surface?: ConversationSurface; dotWork?: DotWorkState; composerBusy?: boolean; editor: boolean; draft: string; busy: boolean; messages: Message[]; error?: string; failure?: 'thinking' | 'interrupted'; loadFailure?: 'conversation' | 'reply_connection'; connectionKey?: string }
+interface Operation { kind: 'inspect' | 'diagnose' | 'activity' | 'follow_latest' | 'select_surface' | 'fill' | 'clear' | 'check_send' | 'send' | 'click' | 'snapshot'; url?: string; anchor?: string; value?: string; selector?: string; surface?: ConversationSurface; allowDotWorking?: boolean; exactDraft?: boolean }
 
 // Electron otherwise replaces page exceptions with an unhelpful "Script failed
 // to execute" rejection. Catch inside the page before crossing that boundary.
@@ -190,6 +190,9 @@ export function pageOperation(operation: Operation): unknown {
         : pets.length > 0 ? pets.every(state => state === 'idle') ? 'idle' : 'unknown'
         : activeStatus ? 'working' : idleStatus ? 'idle' : 'unknown';
     }
+    // Timed Dot delivery is controlled by the actual composer action. Its
+    // proactive output/typing/work indicators do not prohibit another prompt.
+    const composerBusy = stopVisible;
     const busy = stopVisible || !interrupted && (streamingVisible || ariaBusyVisible) || dot && dotWork !== 'idle';
     // A committed ChatGPT document can show a conversation-fetch failure while
     // Chromium reports a successful load. This is unavailable history, not a
@@ -297,14 +300,19 @@ export function pageOperation(operation: Operation): unknown {
         lastRole: elements.length ? roleOf(elements.at(-1)!) : undefined };
     }
     const messages = elements.map(readMessage);
-    const page: Page = { url: location.href, title: document.title.slice(0, 120), surface, dotWork, readiness, editor: visible(editor), draft, busy, messages, error, failure, loadFailure, connectionKey };
+    const page: Page = { url: location.href, title: document.title.slice(0, 120), surface, dotWork, composerBusy, readiness, editor: visible(editor), draft, busy, messages, error, failure, loadFailure, connectionKey };
     if (operation.kind === 'inspect') return page;
     stage = 'verify_target';
     if (operation.url !== location.href) throw new Error('TARGET_CHANGED: page changed before action');
     if (operation.kind === 'snapshot') return { url: location.href, title: document.title, text: (document.querySelector('main') ?? document.body).innerText.slice(0, 64000) };
     if (loadFailure) throw new Error('CONVERSATION_LOAD_FAILED: original conversation is unavailable');
     const anchor = JSON.stringify(messages.filter(message => message.role === 'user').map(message => [message.id, message.text]));
-    if (operation.anchor !== anchor || busy) throw new Error('PAGE_CHANGED: conversation is no longer idle');
+    // Only an explicitly scheduled Dot send may ignore background agent work.
+    // A real Stop action still blocks it, and the target, user-turn
+    // anchor, draft and enabled Send checks remain identical to normal sends.
+    const timedDotSend = dot && operation.surface === 'dot' && operation.allowDotWorking === true &&
+      ['fill', 'clear', 'check_send', 'send'].includes(operation.kind);
+    if (operation.anchor !== anchor || (timedDotSend ? composerBusy : busy)) throw new Error('PAGE_CHANGED: conversation is no longer idle');
     if (operation.kind === 'select_surface') {
       if (operation.surface === surface) return { selected: true };
       if (location.pathname !== '/' || messages.length || draft.trim() || operation.surface === 'dot') throw new Error('SURFACE_CHANGED: cannot switch this conversation');
@@ -331,7 +339,8 @@ export function pageOperation(operation: Operation): unknown {
     stage = 'check_draft';
     const existing = readEditor(element);
     if (operation.kind === 'clear') {
-      if (existing.replace(/\r\n?/g, '\n').trim() !== operation.value?.replace(/\r\n?/g, '\n').trim()) throw new Error('DRAFT_CHANGED: prompt was edited');
+      const normalize = (text: string | undefined) => operation.exactDraft ? text?.replace(/\r\n?/g, '\n') : text?.replace(/\r\n?/g, '\n').trim();
+      if (normalize(existing) !== normalize(operation.value)) throw new Error('DRAFT_CHANGED: prompt was edited');
     } else if (existing.trim()) throw new Error('DRAFT_CONFLICT: clear or send the existing draft first');
     const nextValue = operation.kind === 'clear' ? '' : operation.value;
     stage = 'focus_editor';
@@ -390,9 +399,40 @@ export class ChatGPTAdapter {
     return pageOperationResult<T>(await this.track(executePageScript(this.contents, pageOperationScript(operation), true)));
   }
   private inspect(): Promise<Page> { return this.evaluate<Page>({ kind: 'inspect' }); }
-  private async clearConfirmedDraft(page: Page, value: string): Promise<void> {
+  private timedDot(): boolean {
+    // Read the current task each time: changing a running completion queue to
+    // timed delivery must also release its already acknowledged Dot message.
+    const task = this.context.task();
+    if (task.sendMode !== 'dot_interval' || !task.background || !task.conversationId ||
+      task.input.type !== 'prompt' || !task.input.submit) return false;
+    const conversation = this.conversations.get(task.accountId, task.conversationId);
+    return conversation.surface === 'dot' && conversation.binding === 'bound' && !!conversation.url;
+  }
+  private busyForSend(page: Page): boolean {
+    return this.timedDot() && page.surface === 'dot' ? page.composerBusy ?? page.busy : page.busy;
+  }
+  private idleFingerprint(page: Page): string {
+    // Dot can keep publishing background updates throughout the interval.
+    // Only the user-turn anchor/draft/composer must remain stable for a send.
+    const messages = this.timedDot() && page.surface === 'dot'
+      ? page.messages.filter(message => message.role === 'user') : page.messages;
+    return JSON.stringify([page.url, page.surface, messages, page.error, page.draft]);
+  }
+  private confirmedTimedSubmission(conversation?: Conversation): boolean {
+    const task = this.context.task();
+    return this.timedDot() && !!task.sendIntentAt && !!task.sendReceipt && !!task.submittedAt &&
+      !!task.submittedMessageId && !task.submittedMessageId.startsWith('position:') &&
+      !!conversation?.url && replyPageUrl(task.sendReceipt.url) === conversation.url;
+  }
+  private submittedOnly(conversation: Conversation): unknown {
+    return { submitted: true, submittedOnly: true, responseUnavailable: true,
+      completionReason: 'dot_interval_submission_confirmed', url: conversation.url, conversationId: conversation.id,
+      submittedMessageId: this.context.task().submittedMessageId };
+  }
+  private async clearConfirmedDraft(page: Page, value: string, exactDraft = false): Promise<void> {
     await this.context.acquireExecution?.();
-    try { await this.evaluate({ kind: 'clear', url: page.url, anchor: this.anchor(page), value }); }
+    try { await this.evaluate({ kind: 'clear', url: page.url, anchor: this.anchor(page), value,
+      surface: page.surface, allowDotWorking: this.timedDot(), exactDraft }); }
     finally { this.context.releaseExecution?.(); }
   }
   private anchor(page: Page): string { return JSON.stringify(page.messages.filter(message => message.role === 'user').map(message => [message.id, message.text])); }
@@ -430,7 +470,7 @@ export class ChatGPTAdapter {
       if (now - lastSample > Math.max(2000, interval * 2 + 500)) since = now;
       lastSample = now;
       const previousFailure = failedTail(page);
-      const terminalFailure = !!page.failure || !!this.context.task().background && !!page.error && !page.busy;
+      const terminalFailure = !!page.failure || !!this.context.task().background && !!page.error && !this.busyForSend(page);
       if (page.error && !terminalFailure && !(previousFailure && (priorError?.continueAfterInterruption || page.error === priorError?.error))) throw new Error(page.error);
       if (!page.editor || page.readiness === 'login_required' || page.readiness === 'verification_required') {
         if (!waitingForPage) { this.context.stage('waiting_page'); waitingForPage = true; }
@@ -448,8 +488,8 @@ export class ChatGPTAdapter {
       const last = page.messages.at(-1);
       // A usable composer with no active generation is an idle conversation,
       // even when ChatGPT never produced a copyable assistant turn.
-      const ready = !page.busy;
-      const fingerprint = JSON.stringify([page.url, page.surface, page.messages, page.error, page.draft]);
+      const ready = !this.busyForSend(page);
+      const fingerprint = this.idleFingerprint(page);
       if (!ready || previous !== fingerprint) since = Date.now();
       if (ready && Date.now() - since >= (last ? COMPLETION_STABLE_MS : 1000)) {
         await this.context.acquireExecution?.();
@@ -457,9 +497,9 @@ export class ChatGPTAdapter {
         // Another operation may have held capacity while this page changed.
         // Recheck after acquisition before using the baseline for a write.
         const confirmed = await this.inspect();
-        if (confirmed.editor && confirmed.readiness === 'ready' && (!confirmed.error || confirmed.failure || this.context.task().background && !confirmed.busy ||
+        if (confirmed.editor && confirmed.readiness === 'ready' && (!confirmed.error || confirmed.failure || this.context.task().background && !this.busyForSend(confirmed) ||
           (failedTail(confirmed) && (priorError?.continueAfterInterruption || confirmed.error === priorError?.error))) &&
-          !confirmed.busy && usableDraft(confirmed) && JSON.stringify([confirmed.url, confirmed.surface, confirmed.messages, confirmed.error, confirmed.draft]) === fingerprint) return confirmed;
+          !this.busyForSend(confirmed) && usableDraft(confirmed) && this.idleFingerprint(confirmed) === fingerprint) return confirmed;
         this.context.releaseExecution?.();
         previous = ''; since = Date.now(); interval = 250;
         continue;
@@ -507,6 +547,11 @@ export class ChatGPTAdapter {
   }
   private async run(input: TaskInput): Promise<unknown> {
     const task = this.context.task();
+    const restoredConversation = task.conversationId ? this.conversations.get(task.accountId, task.conversationId) : undefined;
+    // The durable acknowledgement already proves delivery. A restart or a
+    // switch to timed Dot does not need the old reply to load, and must never
+    // click Send again merely because that reply is still working/unmounted.
+    if (restoredConversation && this.confirmedTimedSubmission(restoredConversation)) return this.submittedOnly(restoredConversation);
     await this.loaded();
     if (!isChatUrl(this.contents.getURL())) throw new Error('LOGIN_REQUIRED: sign in to ChatGPT first');
     if (input.type === 'prompt' && input.submit && task.background && task.sendIntentAt && task.sendReceipt) {
@@ -542,7 +587,8 @@ export class ChatGPTAdapter {
     if (conversation?.binding === 'new' && baseline.messages.length) throw new Error('NEW_CHAT_UNAVAILABLE: expected an empty conversation');
     if (input.type === 'navigate') return { url: target };
     this.context.stage('preparing_prompt', task.prepareTimeoutMs);
-    const guard = { url: baseline.url, anchor: this.anchor(baseline), surface: conversation?.surface };
+    const guard = { url: baseline.url, anchor: this.anchor(baseline), surface: conversation?.surface,
+      allowDotWorking: this.timedDot() };
     if (input.type === 'click') {
       this.context.intent();
       return this.evaluate({ ...guard, kind: 'click', selector: input.selector });
@@ -589,9 +635,9 @@ export class ChatGPTAdapter {
       }
       throw error;
     }
-    return this.awaitReply(baseline, value, target, conversation);
+    return this.awaitReply(baseline, value, target, conversation, true);
   }
-  private async awaitReply(baseline: Page, value: string, target: string, conversation?: Conversation): Promise<unknown> {
+  private async awaitReply(baseline: Page, value: string, target: string, conversation?: Conversation, sentHere = false): Promise<unknown> {
     const task = this.context.task();
     const guard = { url: baseline.url, anchor: this.anchor(baseline), surface: conversation?.surface };
     // A short caller deadline must not restart observation before the stable
@@ -613,6 +659,7 @@ export class ChatGPTAdapter {
     let waitingForPage = false;
     const unavailableBudget = Math.min(task.prepareTimeoutMs ?? 60000, 30000);
     while (true) {
+      if (!sentHere && conversation && this.confirmedTimedSubmission(conversation)) return this.submittedOnly(conversation);
       const interval = nextPollMs;
       await this.delay(interval);
       let page: Page;
@@ -680,17 +727,39 @@ export class ChatGPTAdapter {
         }
       }
       if (ownUser && !acknowledged) { this.context.submitted(ownUser.id); acknowledged = true; }
+      if (conversation && this.confirmedTimedSubmission(conversation)) {
+        // Only this live send observation can identify its own retained input.
+        // A restored acknowledgement never authorizes deleting a later human
+        // draft, even if it happens to contain exactly the previous prompt.
+        const retainedLiveDraft = sentHere && !!ownUser && !!page.draft.trim() &&
+          page.draft.replace(/\r\n?/g, '\n') === value.replace(/\r\n?/g, '\n');
+        if (retainedLiveDraft) {
+          try { await this.clearConfirmedDraft(page, value, true); }
+          catch (error) {
+            this.signal.throwIfAborted();
+            if (!(error instanceof Error) || !error.message.startsWith('DRAFT_CHANGED')) {
+              // An ephemeral page/Stop failure must not jump into the durable
+              // receipt shortcut and leave our own input blocking the next item.
+              if (this.contents.isDestroyed()) throw error;
+              nextPollMs = 250; continue;
+            }
+            // The final page guard observed a human edit. Preserve it while
+            // completing only the delivery that was already acknowledged.
+          }
+        }
+        return this.submittedOnly(conversation);
+      }
       // A click can be ignored while ChatGPT hydrates or reconnects. Retry only
       // when the unchanged prompt is still a draft AND the recorded pre-send user
       // history is unchanged. A missing acknowledgement alone is never proof.
-      if (!acknowledged && !page.busy && page.readiness === 'ready' &&
+      if (!acknowledged && !this.busyForSend(page) && page.readiness === 'ready' &&
         page.messages.filter(message => message.role === 'user').at(-1)?.id === baseline.messages.filter(message => message.role === 'user').at(-1)?.id &&
         page.url === guard.url && page.draft.replace(/\r\n?/g, '\n').trim() === value.replace(/\r\n?/g, '\n').trim() &&
         Date.now() - lastSendAttempt >= Math.min(30000, 3000 * 2 ** Math.min(sendRetries, 4))) {
         try {
           await this.context.acquireExecution?.();
-          await this.evaluate({ ...guard, anchor: this.anchor(page), kind: 'check_send', value });
-          await this.evaluate({ ...guard, anchor: this.anchor(page), kind: 'send', value });
+          await this.evaluate({ ...guard, anchor: this.anchor(page), kind: 'check_send', value, allowDotWorking: this.timedDot() });
+          await this.evaluate({ ...guard, anchor: this.anchor(page), kind: 'send', value, allowDotWorking: this.timedDot() });
         } catch (error) {
           if (!(error instanceof Error) || !error.message.startsWith('SEND_UNAVAILABLE')) throw error;
         } finally { this.context.releaseExecution?.(); }
@@ -733,27 +802,31 @@ export class ChatGPTAdapter {
       // claiming that an uncorrelated visible answer belongs to that send.
       // Keep strict turn matching for foreground/API answer retrieval.
       const unmountedSubmission = !!task.background && acknowledged && userIndex < 0;
+      const timedDotSend = this.timedDot() && page.surface === 'dot';
       const unconfirmedSubmission = !!task.background && !acknowledged && !!task.sendIntentAt && !!task.sendReceipt &&
-        now - task.sendIntentAt >= 30000 && (page.messages.length > 0 || !!page.error);
-      const stopped = !!boundUrl && page.editor && page.readiness === 'ready' && !page.busy && (!page.draft.trim() || retainedOwnDraft) &&
+        now - task.sendIntentAt >= 30000 && (timedDotSend || page.messages.length > 0 || !!page.error);
+      const stopped = !!boundUrl && page.editor && page.readiness === 'ready' && !this.busyForSend(page) && (!page.draft.trim() || retainedOwnDraft) &&
         (acknowledged && (userIndex >= 0 || unmountedSubmission) || unconfirmedSubmission) &&
         // Dot needs both a new reply and explicit agent idle evidence. busy
         // includes its background work, not just the acknowledgement streaming.
-        (page.surface !== 'dot' || last?.role === 'assistant' && last.terminal &&
+        (timedDotSend || page.surface !== 'dot' || last?.role === 'assistant' && last.terminal &&
           (unmountedSubmission && !baseline.messages.some(message => message.id === last.id && message.role === 'assistant') || userIndex >= 0 && page.messages.indexOf(last) > userIndex));
-      if (!stopped || fingerprint !== previous) since = Date.now();
+      const completionFingerprint = timedDotSend ? this.idleFingerprint(page) : fingerprint;
+      if (!stopped || completionFingerprint !== previous) since = Date.now();
       if (stopped && Date.now() - since >= COMPLETION_STABLE_MS) {
         if (retainedOwnDraft) {
           await this.clearConfirmedDraft(page, value);
           previous = ''; since = Date.now(); continue;
         }
-        if (unconfirmedSubmission) throw new ReportedReplyError('网页已停止，旧发送记录无法确认；结束本轮并继续下一条', true, true);
+        if (unconfirmedSubmission) throw new ReportedReplyError(timedDotSend
+          ? '定时投递的旧发送记录在30秒内未确认；结束本次投递并继续后续计时，不重发原消息'
+          : '网页已停止，旧发送记录无法确认；结束本轮并继续下一条', true, true);
         if (finished) return { submitted: true, response: last!.text.slice(0, 64000), url: boundUrl, conversationId: conversation?.id, replyToken: replyToken(ownUser!, last!) };
         if (unmountedSubmission && last?.role === 'assistant' && last.terminal) return { submitted: true, responseUnavailable: true,
           completionReason: correlationLost ? 'idle_after_reply_correlation_lost' : 'idle_after_submitted_turn_unmounted', url: boundUrl, conversationId: conversation?.id };
         throw new ReportedReplyError('ChatGPT 已停止回复，本轮未提供完整可确认的答复', true);
       }
-      previous = fingerprint;
+      previous = completionFingerprint;
     }
   }
 }

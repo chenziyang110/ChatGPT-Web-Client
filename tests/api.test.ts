@@ -94,6 +94,29 @@ test('CLI opens a link directly in an account tab without queueing a task', asyn
   } finally { await api.stop(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('CLI configures only the specified Dot timer and validates intervals before sending an RPC', async () => {
+  const dir = mkdtempSync(path.resolve('.test-cli-dot-timing-'));
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const api = new LocalApi(path.join(dir, 'agent-runtime.json'), async (method, params) => { calls.push({ method, params }); return params; });
+  const run = async (args: string[]) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', '--data-dir', dir, 'queue', 'timing', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let errors = ''; child.stdout.resume(); child.stderr.on('data', chunk => { errors += chunk; });
+    return { code: await new Promise(resolve => child.on('close', resolve)), errors };
+  };
+  try {
+    await api.start();
+    const target = ['--account', 'owner', '--conversation', 'dot-channel'];
+    assert.equal((await run([...target, '--mode', 'interval', '--minutes', '20'])).code, 0);
+    assert.equal((await run([...target, '--mode', 'completion'])).code, 0);
+    assert.deepEqual(calls, [
+      { method: 'queues.timing', params: { accountId: 'owner', conversation: 'dot-channel', mode: 'interval', intervalMs: 1200000 } },
+      { method: 'queues.timing', params: { accountId: 'owner', conversation: 'dot-channel', mode: 'completion' } }
+    ]);
+    for (const minutes of ['0', '1.5', '1441', 'invalid']) assert.equal((await run([...target, '--mode', 'interval', '--minutes', minutes])).code, 1);
+    assert.equal(calls.length, 2, 'Invalid intervals never reach the runtime or resume a queue');
+  } finally { await api.stop(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('CLI targets account/conversation, returns the same task on retry, and client timeout does not cancel', async () => {
   const dir = mkdtempSync(path.resolve('.test-cli-routing-'));
   const requests: Array<{ method: string; params: Record<string, unknown> }> = [];

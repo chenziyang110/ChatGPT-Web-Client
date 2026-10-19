@@ -5,6 +5,7 @@ import { Icon } from './Icon';
 import { phaseLabels } from './TaskCenter';
 import { friendlyError } from '../errors';
 import { taskAttentionCopy } from '../../shared/taskAttentionCopy';
+import { Select } from './Select';
 
 export function queueText(task: AgentTask): string {
   return task.input.type === 'prompt' ? task.input.prompt : task.input.type === 'fill' ? task.input.text : task.input.type === 'navigate' ? '打开会话页面' : task.input.type === 'snapshot' ? '读取页面' : '网页操作';
@@ -23,6 +24,9 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
   const [diagnostic, setDiagnostic] = useState<BrowserDiagnostics>();
   const [editing, setEditing] = useState<{ id: string; version: number; text: string }>();
   const [menuId, setMenuId] = useState<string>();
+  const [timingMode, setTimingMode] = useState('completion');
+  const [timingPreset, setTimingPreset] = useState('10');
+  const [timingMinutes, setTimingMinutes] = useState('10');
   const [now, setNow] = useState(Date.now());
   const pendingAction = useRef(false);
   const composing = useRef(false);
@@ -72,10 +76,18 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
   const attentionCopy = attention && taskAttentionCopy(attention);
   const accountQueue = state.queues.find(queue => queue.accountId === account.id && !queue.conversationId);
   const queue = state.queues.find(queue => queue.accountId === account.id && queue.conversationId === conversation?.id);
+  const timedDot = conversation?.surface === 'dot' && queue?.timing?.mode === 'interval';
+  const savedInterval = queue?.timing?.intervalMs;
+  useEffect(() => {
+    const minutes = String((savedInterval ?? 600000) / 60000);
+    setTimingMode(timedDot ? 'interval' : 'completion');
+    setTimingPreset(['10', '20', '30'].includes(minutes) ? minutes : 'custom');
+    setTimingMinutes(minutes);
+  }, [account.id, conversation?.id, timedDot, savedInterval]);
   const paused = !!(queue?.paused || accountQueue?.paused);
-  const generating = !!running?.sendIntentAt || !!diagnostic?.busy;
+  const generating = !!running?.sendIntentAt || (!!diagnostic?.busy && !timedDot);
   const count = tasks.filter(task => !task.sendIntentAt).length;
-  const ready = !!conversation && diagnostic?.readiness === 'ready' && !diagnostic.busy && !diagnostic.draftLength && !tasks.length && !paused;
+  const ready = !!conversation && !timedDot && diagnostic?.readiness === 'ready' && !diagnostic.busy && !diagnostic.draftLength && !tasks.length && !paused;
   const retry = waiting.find(task => task.nextAttemptAt);
   const retryLabel = retry ? /LOGIN_REQUIRED/.test(retry.error ?? '') ? '等待登录，完成后自动继续'
     : /VERIFICATION_REQUIRED/.test(retry.error ?? '') ? '等待网页验证，完成后自动继续'
@@ -84,9 +96,16 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
   const pageWait = diagnostic?.readiness === 'verification_required' ? '等待网页验证，完成后自动继续'
     : diagnostic?.readiness === 'login_required' ? '等待登录，完成后自动继续'
     : diagnostic?.readiness === 'loading' ? '等待会话页面恢复' : undefined;
-  const dotWait = diagnostic?.surface === 'dot' && diagnostic.dotWork !== 'idle'
+  const dotWait = !timedDot && diagnostic?.surface === 'dot' && diagnostic.dotWork !== 'idle'
     ? diagnostic?.dotWork === 'working' ? running?.sendIntentAt ? 'Dot 正在工作' : '等待 Dot 工作结束' : '等待 Dot 工作状态恢复' : undefined;
-  const status = !conversation ? loading ? '页面加载中' : '检查会话' : attention ? '需要处理' : paused ? '已暂停' : pageWait ?? dotWait ?? (running ? phaseLabels[running.phase ?? 'preparing'] : retryLabel ?? (diagnostic?.busy ? '等待当前回复' : waiting.length ? '等待发送' : '就绪'));
+  const dueSeconds = timedDot && waiting.length && queue.timing?.nextSendAt !== undefined ? Math.max(0, Math.ceil((queue.timing.nextSendAt - now) / 1000)) : undefined;
+  const countdown = dueSeconds === undefined ? undefined : `${Math.floor(dueSeconds / 60)}:${String(dueSeconds % 60).padStart(2, '0')}`;
+  const timedWait = countdown ? dueSeconds ? '等待定时发送' : '已到发送时间，等待页面可发送' : undefined;
+  const draftWait = timedDot && diagnostic?.draftLength ? '等待网页草稿处理，随后自动继续' : undefined;
+  const status = !conversation ? loading ? '页面加载中' : '检查会话' : attention ? '需要处理' : paused ? '已暂停' : pageWait ?? dotWait ?? (running ? phaseLabels[running.phase ?? 'preparing'] : retryLabel ?? draftWait ?? timedWait ?? (diagnostic?.busy && !timedDot ? '等待当前回复' : waiting.length ? '等待发送' : '就绪'));
+  const selectedMinutes = Number(timingPreset === 'custom' ? timingMinutes : timingPreset);
+  const validInterval = Number.isInteger(selectedMinutes) && selectedMinutes >= 1 && selectedMinutes <= 1440;
+  const timingChanged = timingMode !== (timedDot ? 'interval' : 'completion') || (timingMode === 'interval' && selectedMinutes * 60000 !== savedInterval);
   const elapsed = running?.submittedAt ? Math.max(0, Math.floor((now - running.submittedAt) / 1000)) : undefined;
   const edited = editing && state.tasks.find(task => task.id === editing.id);
   const staleEdit = !!editing && (edited?.status !== 'pending' || edited.updatedAt !== editing.version);
@@ -134,6 +153,11 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
     if (!conversation || !editing || !editing.text.trim() || staleEdit || pendingAction.current) return;
     void run('tasks.edit', { accountId: account.id, conversation: conversation.id, id: editing.id, expectedUpdatedAt: editing.version, prompt: editing.text }, () => { setEditing(undefined); editor.current?.focus(); });
   }
+  function saveTiming() {
+    if (!conversation || pendingAction.current || !timingChanged || (timingMode === 'interval' && !validInterval)) return;
+    void run('queues.timing', { accountId: account.id, conversation: conversation.id, mode: timingMode,
+      ...(timingMode === 'interval' ? { intervalMs: selectedMinutes * 60000 } : {}) });
+  }
   return <aside className="conversation-queue" aria-label="会话队列" onKeyDown={event => {
     if (event.key !== 'Escape' || isComposing(event)) return;
     event.preventDefault(); event.stopPropagation();
@@ -155,6 +179,21 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
     {queue?.paused && queue.reason && <p className="cq-warning" role="status">{queue.reason}</p>}
     {targetError && <div className="cq-error" role="status">{targetError}<button className="text-button" onClick={() => setAttempt(value => value + 1)}>立即重试</button></div>}
     {error && <div className="cq-error" role="alert">{error}</div>}
+    {conversation?.surface === 'dot' && <form className="cq-timing" aria-label="Dot 队列发送设置" onSubmit={event => { event.preventDefault(); saveTiming(); }}>
+      <span className="cq-timing-label">发送方式</span>
+      <Select label="Dot 队列发送方式" value={timingMode} disabled={busy} onValueChange={setTimingMode} options={[
+        { value: 'interval', label: '定时发送' }, { value: 'completion', label: '工作结束后发送' },
+      ]} />
+      {timingMode === 'interval' && <>
+        <div className="cq-timing-interval"><span>每隔</span><Select label="Dot 队列发送间隔" value={timingPreset} disabled={busy} onValueChange={setTimingPreset} options={[
+          { value: '10', label: '10 分钟' }, { value: '20', label: '20 分钟' }, { value: '30', label: '30 分钟' }, { value: 'custom', label: '自定义' },
+        ]} />{timingPreset === 'custom' && <label className="cq-timing-custom"><input type="number" aria-label="自定义发送间隔（分钟）" min={1} max={1440} step={1} value={timingMinutes} disabled={busy} onChange={event => setTimingMinutes(event.target.value)} /><span>分钟</span></label>}</div>
+        <p className="cq-timing-help">首次也等待所选间隔。每次确认送达后重新计时，不等待 Dot 工作结束。</p>
+        {timingPreset === 'custom' && !validInterval && <p className="cq-timing-validation" role="alert">请输入 1 至 1440 的整数分钟。</p>}
+      </>}
+      <div className="cq-timing-footer"><p className="cq-timing-help">{timingChanged ? '保存后生效，已暂停的队列仍保持暂停。' : timedDot ? paused ? '队列已暂停，恢复后继续定时发送。' : countdown ? dueSeconds ? `下一条还有 ${countdown}` : '下一条已到计划发送时间' : '加入第一条消息后开始计时。' : '等待 Dot 工作结束后发送下一条。'}</p>
+        <button className="text-button" type="submit" disabled={busy || !timingChanged || (timingMode === 'interval' && !validInterval)}>保存</button></div>
+    </form>}
     <div className="cq-list">
       {attention && <div className="cq-attention"><strong>{attentionCopy?.title}</strong><button className="text-button" onClick={() => inspect(attention)}>处理</button></div>}
       {running && <details className="cq-running"><summary>{running.sendIntentAt ? '当前消息' : '等待发送'} · {queueText(running)}</summary><p>{queueText(running)}</p>
@@ -185,7 +224,7 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
           event.preventDefault(); if (!event.repeat) enqueue();
         }
       }} />
-      <div className="cq-compose-footer"><span id="queue-keyboard-help" title={paused ? '恢复后依次发送' : ready ? '空闲时直接发送' : '回复结束后自动发送'}>Enter 发送 · Shift+Enter 换行</span><button className="primary" title="Enter 或 Ctrl / ⌘ + Enter" disabled={busy || !conversation || !draft.trim()}>{busy ? '处理中…' : ready ? '加入并发送' : '加入队列'}</button></div>
+      <div className="cq-compose-footer"><span id="queue-keyboard-help" title={paused ? '恢复后依次发送' : timedDot ? '按设置的时间间隔发送' : ready ? '空闲时直接发送' : '回复结束后自动发送'}>Enter 发送 · Shift+Enter 换行</span><button className="primary" title="Enter 或 Ctrl / ⌘ + Enter" disabled={busy || !conversation || !draft.trim()}>{busy ? '处理中…' : ready ? '加入并发送' : '加入队列'}</button></div>
     </form>
   </aside>;
 }

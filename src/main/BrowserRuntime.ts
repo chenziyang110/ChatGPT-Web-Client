@@ -1384,7 +1384,11 @@ export class BrowserRuntime {
     try {
       // Retry the fixed conversation, never another selected tab. Reload only
       // a stalled, empty, idle page; preserve human drafts and active replies.
-      if (task.retryCount && conversation?.binding !== 'uncertain' && !this.pageLoading(contents)) {
+      const confirmedTimedDot = task.sendMode === 'dot_interval' && task.background && task.input.type === 'prompt' &&
+        task.input.submit && conversation?.surface === 'dot' && conversation.binding === 'bound' &&
+        task.sendIntentAt && task.sendReceipt && task.submittedAt && task.submittedMessageId &&
+        !task.submittedMessageId.startsWith('position:') && replyPageUrl(task.sendReceipt.url) === conversation.url;
+      if (task.retryCount && !confirmedTimedDot && conversation?.binding !== 'uncertain' && !this.pageLoading(contents)) {
         let safeToReload = false;
         try {
           const page = pageOperationResult<Page>(await boundedPageOperation(executePageScript(contents, pageOperationScript({ kind: 'inspect' })), 2000, signal));

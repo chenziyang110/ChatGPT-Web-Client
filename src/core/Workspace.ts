@@ -191,6 +191,13 @@ export class Workspace {
         result = this.tasks.resume(account.id, params.acknowledged === true, params.conversation === undefined ? undefined : this.conversations.get(account.id, params.conversation).id); break;
       }
       case 'queues.takeover': { const account = this.accounts.resolve(params.accountId); result = await this.tasks.takeover(account.id, params.conversation === undefined ? undefined : this.conversations.get(account.id, params.conversation).id); break; }
+      case 'queues.timing': {
+        const account = this.accounts.resolve(params.accountId);
+        const conversation = this.conversations.get(account.id, params.conversation);
+        if (params.mode !== 'interval' && params.mode !== 'completion') throw new AppError('请选择定时发送或工作结束后发送');
+        if (params.mode === 'interval' && params.intervalMs === undefined) throw new AppError('请选择发送间隔');
+        result = this.tasks.configureTiming(account.id, conversation.id, params.mode === 'interval' ? params.intervalMs : undefined); break;
+      }
       case 'tasks.create': {
         const accountId = this.accounts.resolve(params.accountId).id;
         const input = parseTask(params.input);

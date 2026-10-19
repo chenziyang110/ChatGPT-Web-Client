@@ -250,3 +250,124 @@ test('receipt recovery reports unavailable pages promptly without replaying or c
     } finally { db.close(); }
   }
 });
+
+function timedDotDraftFixture(options: { afterSendDraft?: string; restored?: boolean; failFirstClear?: boolean;
+  editBeforeClear?: string; enableTimingAfterSend?: boolean } = {}) {
+  const db = new Database(':memory:'); const conversations = new Conversations(db);
+  const url = 'https://chatgpt.com/dots/draft-test', conversation = conversations.register('account', url);
+  const prompt = 'Queued Dot prompt'; const controller = new AbortController();
+  const operations: Array<{ kind: string; exactDraft?: boolean; allowDotWorking?: boolean }> = [];
+  let sent = !!options.restored, draft = options.restored ? options.afterSendDraft ?? prompt : '', clearAttempts = 0;
+  const task: AgentTask = { id: 'timed-dot-draft', accountId: 'account', conversationId: conversation.id, background: true,
+    sendMode: options.enableTimingAfterSend ? undefined : 'dot_interval',
+    input: { type: 'prompt', prompt, submit: true }, status: 'running', createdAt: 1, updatedAt: 1 };
+  if (options.restored) Object.assign(task, { sendIntentAt: 1, submittedAt: 2, submittedMessageId: 'own-dot-user', sendReceipt: { url, users: [] } });
+  const contents = { isLoading: () => !!options.restored, getURL: () => url, isDestroyed: () => false,
+    executeJavaScript: async (script: string) => {
+      const operation = JSON.parse(script.slice(script.lastIndexOf(')(') + 2, -1)); operations.push(operation);
+      if (operation.kind === 'inspect') return pageResult({ url, title: 'Dot', surface: 'dot', dotWork: sent ? 'working' : 'idle',
+        readiness: 'ready', editor: true, draft, busy: sent, composerBusy: false,
+        messages: sent ? [{ id: 'own-dot-user', role: 'user', text: prompt, terminal: false }] : [] });
+      if (operation.kind === 'fill') { draft = operation.value; return pageResult({ prepared: true }); }
+      if (operation.kind === 'check_send') return pageResult({ ready: true });
+      if (operation.kind === 'send') { assert.equal(sent, false, 'The original prompt must never be replayed'); sent = true;
+        draft = options.afterSendDraft ?? prompt; return pageResult({ clicked: true }); }
+      if (operation.kind === 'clear') {
+        clearAttempts++;
+        if (options.failFirstClear && clearAttempts === 1) throw new Error('PAGE_CHANGED: conversation is no longer idle');
+        if (operation.exactDraft && draft.replace(/\r\n?/g, '\n') !== operation.value.replace(/\r\n?/g, '\n')) throw new Error('DRAFT_CHANGED: prompt was edited');
+        draft = ''; return pageResult({ cleared: true });
+      }
+      throw new Error(`Unexpected operation: ${operation.kind}`);
+    } } as unknown as WebContents;
+  const context: ExecutionContext = { task: () => task, stage: () => {},
+    intent: receipt => { task.sendIntentAt = Date.now(); task.sendReceipt = receipt; },
+    submitted: id => { task.submittedAt = Date.now(); task.submittedMessageId = id;
+      if (options.enableTimingAfterSend) task.sendMode = 'dot_interval'; },
+    acquireExecution: async () => { if (sent && options.editBeforeClear !== undefined) draft = options.editBeforeClear; } };
+  return { db, task, operations, controller, draft: () => draft, clearAttempts: () => clearAttempts,
+    adapter: new ChatGPTAdapter(contents, controller.signal, context, conversations) };
+}
+
+test('timed Dot clears only its live confirmed retained prompt before finishing delivery', async () => {
+  const f = timedDotDraftFixture(); const timer = setTimeout(() => f.controller.abort(new Error('test deadline')), 6000);
+  try {
+    const result = await f.adapter.execute(f.task.input) as Record<string, unknown>;
+    assert.equal(result.submittedOnly, true); assert.equal(result.responseUnavailable, true);
+    assert.equal(f.draft(), ''); assert.equal(f.clearAttempts(), 1);
+    const clear = f.operations.find(operation => operation.kind === 'clear');
+    assert.equal(clear?.exactDraft, true); assert.equal(clear?.allowDotWorking, true);
+    assert.equal(f.operations.filter(operation => operation.kind === 'send').length, 1);
+  } finally { clearTimeout(timer); f.db.close(); }
+});
+
+test('timed Dot preserves different human drafts and edits made after the acknowledgement read', async () => {
+  await Promise.all([
+    { afterSendDraft: 'A different human draft' },
+    { editBeforeClear: 'Queued Dot prompt ' },
+  ].map(async options => {
+    const f = timedDotDraftFixture(options); const timer = setTimeout(() => f.controller.abort(new Error('test deadline')), 6000);
+    try {
+      const result = await f.adapter.execute(f.task.input) as Record<string, unknown>;
+      assert.equal(result.submittedOnly, true);
+      assert.equal(f.draft(), options.editBeforeClear ?? options.afterSendDraft);
+      assert.equal(f.operations.filter(operation => operation.kind === 'send').length, 1);
+    } finally { clearTimeout(timer); f.db.close(); }
+  }));
+});
+
+test('timed Dot retries a transient live cleanup failure instead of skipping it through the receipt shortcut', async () => {
+  const f = timedDotDraftFixture({ failFirstClear: true, enableTimingAfterSend: true });
+  const timer = setTimeout(() => f.controller.abort(new Error('test deadline')), 6000);
+  try {
+    const result = await f.adapter.execute(f.task.input) as Record<string, unknown>;
+    assert.equal(result.submittedOnly, true); assert.equal(f.draft(), ''); assert.equal(f.clearAttempts(), 2);
+    assert.equal(f.operations.filter(operation => operation.kind === 'send').length, 1);
+  } finally { clearTimeout(timer); f.db.close(); }
+});
+
+test('restored timed Dot acknowledgement remains read-only even when a human draft repeats the old prompt', async () => {
+  const f = timedDotDraftFixture({ restored: true });
+  try {
+    const result = await f.adapter.execute(f.task.input) as Record<string, unknown>;
+    assert.equal(result.submittedOnly, true); assert.equal(result.submittedMessageId, 'own-dot-user');
+    assert.equal(f.draft(), 'Queued Dot prompt'); assert.deepEqual(f.operations, []);
+  } finally { f.db.close(); }
+});
+
+test('timed Dot ends an old unconfirmed receipt despite continuously changing background output without replay', async () => {
+  const db = new Database(':memory:'); const conversations = new Conversations(db);
+  const url = 'https://chatgpt.com/dots/unconfirmed-old', conversation = conversations.register('account', url);
+  const controller = new AbortController(); const operations: string[] = []; let reads = 0;
+  const task: AgentTask = { id: 'timed-old', accountId: 'account', conversationId: conversation.id,
+    background: true, sendMode: 'dot_interval', input: { type: 'prompt', prompt: 'Original Dot prompt', submit: true },
+    status: 'running', createdAt: 1, updatedAt: 1, sendIntentAt: Date.now() - 60000,
+    sendReceipt: { url, users: [{ id: 'unmounted-old-user', role: 'user', text: 'Old anchor', terminal: false }] } };
+  const contents = { isLoading: () => false, getURL: () => url, isDestroyed: () => false,
+    executeJavaScript: async (script: string) => {
+      const operation = JSON.parse(script.slice(script.lastIndexOf(')(') + 2, -1)); operations.push(operation.kind);
+      assert.equal(operation.kind, 'inspect', 'Unconfirmed receipt recovery must never fill or click Send');
+      reads++;
+      return pageResult({ url, title: 'Working Dot', surface: 'dot', dotWork: 'working', readiness: 'ready', editor: true,
+        composerBusy: false, busy: true, draft: '', messages: [
+          { id: 'unrelated-visible-user', role: 'user', text: 'A different user message', terminal: false },
+          { id: 'live-background-output', role: 'assistant', text: `Still working, update ${reads}`, terminal: false },
+        ] });
+    } } as unknown as WebContents;
+  const context: ExecutionContext = { task: () => task, stage: () => {},
+    intent: () => assert.fail('The original prompt must never be replayed'),
+    submitted: () => assert.fail('An unmatched user turn must not be reported as submitted') };
+  const timer = setTimeout(() => controller.abort(new Error('Background output must not keep the old receipt stuck')), 11000);
+  try {
+    await assert.rejects(new ChatGPTAdapter(contents, controller.signal, context, conversations).execute(task.input),
+      (error: unknown) => {
+        assert.ok(error instanceof Error); assert.equal(error.name, 'ReportedReplyError');
+        assert.ok('continueQueue' in error && error.continueQueue === true);
+        assert.ok('submissionUnconfirmed' in error && error.submissionUnconfirmed === true);
+        return true;
+      });
+    assert.ok(reads > 2, 'The assistant body must have changed repeatedly during the stable user-anchor window');
+    assert.ok(operations.every(operation => operation === 'inspect'));
+    assert.equal(task.submittedAt, undefined); assert.equal(task.submittedMessageId, undefined);
+  } finally { clearTimeout(timer); db.close(); }
+});

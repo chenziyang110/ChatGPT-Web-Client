@@ -41,6 +41,8 @@ const help = `ChatGPT Web Client — local agent CLI
     --wait-timeout SECONDS             Client waiting budget; does not cancel
   queue status
   queue pause|resume|takeover --account ID [--conversation ID]
+  queue timing --account ID --conversation ID --mode interval --minutes 10
+    --mode completion                 Return Dot to completion-based sending
     resume --acknowledged              Confirm manual review of uncertain sends
   task wait|get|cancel TASK_ID
   tasks                               List task history
@@ -137,8 +139,15 @@ async function main(): Promise<void> {
       break;
     }
     case 'queue':
-      if (!['status', 'pause', 'resume', 'takeover'].includes(id)) throw new Error('Use queue status|pause|resume|takeover');
-      result = await call(`queues.${id}`, id === 'status' ? {} : { accountId: requireArg(options.account, 'account'), acknowledged: options.acknowledged, conversation: options.conversation }); break;
+      if (!['status', 'pause', 'resume', 'takeover', 'timing'].includes(id)) throw new Error('Use queue status|pause|resume|takeover|timing');
+      if (id === 'timing') {
+        const mode = requireArg(options.mode, 'mode');
+        if (mode !== 'interval' && mode !== 'completion') throw new Error('Use --mode interval|completion');
+        const minutes = mode === 'interval' ? Number(requireArg(options.minutes, 'minutes')) : undefined;
+        if (minutes !== undefined && (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440)) throw new Error('Minutes must be an integer from 1 to 1440');
+        result = await call('queues.timing', { accountId: requireArg(options.account, 'account'), conversation: requireArg(options.conversation, 'conversation'),
+          mode, ...(minutes !== undefined ? { intervalMs: minutes * 60000 } : {}) });
+      } else result = await call(`queues.${id}`, id === 'status' ? {} : { accountId: requireArg(options.account, 'account'), acknowledged: options.acknowledged, conversation: options.conversation }); break;
     case 'tasks': result = await call('tasks.list'); break;
     case 'task-get': result = await call('tasks.get', { id: requireArg(id, 'ID') }); break;
     case 'task-cancel': result = await call('tasks.cancel', { id: requireArg(id, 'ID') }); break;

@@ -7,7 +7,11 @@ export interface Conversation {
   remoteId?: string; binding: 'new' | 'bound' | 'uncertain'; createdAt: number; updatedAt: number;
 }
 export type TaskPhase = 'queued' | 'preparing' | 'waiting_page' | 'waiting_idle' | 'preparing_prompt' | 'send_intent' | 'submitted' | 'generating' | 'completed';
-export interface AccountQueue { accountId: string; conversationId?: string; runningTaskIds?: string[]; paused: boolean; pausedConversationCount?: number; reason?: string; runningTaskId?: string; control?: 'agent' | 'human' }
+export interface AccountQueue {
+  accountId: string; conversationId?: string; runningTaskIds?: string[]; paused: boolean;
+  pausedConversationCount?: number; reason?: string; runningTaskId?: string; control?: 'agent' | 'human';
+  timing?: { mode: 'interval'; intervalMs: number; nextSendAt?: number };
+}
 export type TaskChoice = 'retry' | 'takeover' | 'cancel' | 'acknowledge';
 export interface TaskAttention {
   id: string; kind: 'verification' | 'login' | 'draft' | 'page' | 'manual_takeover' | 'review_send' | 'other';
@@ -23,6 +27,8 @@ export type TaskInput =
   | { type: 'click'; selector: string }
   | { type: 'prompt'; prompt: string; submit: boolean };
 export interface AgentTask {
+  /** Explicit Dot queue delivery policy. Completion confirms delivery, not remote work completion. */
+  sendMode?: 'dot_interval';
   id: string; accountId: string; input: TaskInput;
   status: 'pending' | 'running' | 'done' | 'failed' | 'cancelled' | 'blocked' | 'waiting_user' | 'uncertain';
   attention?: TaskAttention;

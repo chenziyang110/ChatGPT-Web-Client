@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter, getEventListeners } from 'node:events';
 import type { WebContents } from 'electron';
 import { ChatGPTAdapter, pageOperationResult } from '../src/main/adapters/ChatGPTAdapter';
 import type { ConversationManager } from '../src/core/conversation/ConversationManager';
@@ -8,6 +9,88 @@ import type { AgentTask } from '../src/shared/types';
 import { Database } from '../src/core/storage/Database';
 import { ConversationManager as Conversations } from '../src/core/conversation/ConversationManager';
 const pageResult = (value: unknown) => ({ workspacePageResult: true, ok: true, value });
+
+function pendingContentsFixture(input: AgentTask['input'] = { type: 'snapshot' }) {
+  const events = new EventEmitter(); const controller = new AbortController();
+  const url = 'https://chatgpt.com/c/pending-frame'; const operations: string[] = [];
+  let destroyed = false, destroyDuringRead = false;
+  let resolveRead!: (value: unknown) => void, rejectRead!: (error: Error) => void, readStarted!: () => void;
+  const reading = new Promise<void>(resolve => { readStarted = resolve; });
+  const pending = new Promise<unknown>((resolve, reject) => { resolveRead = resolve; rejectRead = reject; });
+  const contents = Object.assign(events, { isLoading: () => false, getURL: () => url, isDestroyed: () => destroyed,
+    executeJavaScript: (script: string) => {
+      const operation = JSON.parse(script.slice(script.lastIndexOf(')(') + 2, -1)); operations.push(operation.kind);
+      if (destroyDuringRead) destroyed = true;
+      readStarted(); return pending;
+    } });
+  const task = { id: 'pending-frame', accountId: 'account', input, targetUrl: url,
+    prepareTimeoutMs: 5000, idleTimeoutMs: 5000 } as AgentTask;
+  const context: ExecutionContext = { task: () => task, stage: () => {},
+    intent: () => assert.fail('A destroyed page must never send'), submitted: () => assert.fail('A destroyed page must never submit') };
+  const readyPage = () => pageResult({ url, title: 'Recovered too late', readiness: 'ready', editor: true, draft: '', busy: false, messages: [] });
+  return { events, controller, task, operations, reading, readyPage, resolveRead, rejectRead,
+    destroy: () => { destroyed = true; events.emit('destroyed'); }, destroyDuringRead: () => { destroyDuringRead = true; },
+    adapter: new ChatGPTAdapter(contents as unknown as WebContents, controller.signal, context, {} as ConversationManager) };
+}
+
+test('destroying contents rejects a pending page read promptly without any late fill or send', async () => {
+  const f = pendingContentsFixture({ type: 'prompt', prompt: 'Must never send', submit: true });
+  const execution = f.adapter.execute(f.task.input).then(value => ({ value }), error => ({ error }));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await f.reading; f.destroy();
+    const outcome = await Promise.race([execution,
+      new Promise<{ timedOut: true }>(resolve => { timer = setTimeout(() => resolve({ timedOut: true }), 3000); })]);
+    assert.ok(!('timedOut' in outcome), 'The old frame must be released without waiting for the task idle deadline');
+    assert.ok('error' in outcome && outcome.error instanceof Error);
+    assert.match(outcome.error.message, /PAGE_(REPLACED|UNAVAILABLE)/);
+    assert.equal(f.events.listenerCount('destroyed'), 0);
+    assert.equal(getEventListeners(f.controller.signal, 'abort').length, 0);
+    f.resolveRead(f.readyPage()); await new Promise(resolve => setTimeout(resolve, 25));
+    assert.deepEqual(f.operations, ['inspect'], 'A late old-frame result must never continue into a page write');
+  } finally {
+    clearTimeout(timer); f.controller.abort(new Error('Test cleanup')); f.resolveRead(f.readyPage()); await execution;
+  }
+});
+
+test('page wait removes abort and destroyed listeners immediately on every settlement path', async () => {
+  for (const outcome of ['resolve', 'reject', 'abort', 'destroy'] as const) {
+    const f = pendingContentsFixture();
+    const execution = f.adapter.execute(f.task.input).then(value => ({ value }), error => ({ error }));
+    try {
+      await f.reading;
+      assert.equal(f.events.listenerCount('destroyed'), 1, `A pending ${outcome} read must observe page destruction`);
+      assert.equal(getEventListeners(f.controller.signal, 'abort').length, 1);
+      if (outcome === 'resolve') f.resolveRead(pageResult({ text: 'Snapshot' }));
+      else if (outcome === 'reject') f.rejectRead(new Error('Page test failure'));
+      else if (outcome === 'abort') f.controller.abort(new Error('User cancelled'));
+      else f.destroy();
+      await Promise.resolve(); await Promise.resolve();
+      assert.equal(f.events.listenerCount('destroyed'), 0, `The ${outcome} path must detach the contents listener immediately`);
+      assert.equal(getEventListeners(f.controller.signal, 'abort').length, 0, `The ${outcome} path must detach the abort listener immediately`);
+      f.resolveRead(pageResult({ text: 'Late snapshot' }));
+      const result = await execution;
+      if (outcome === 'resolve') assert.ok('value' in result);
+      else assert.ok('error' in result && result.error instanceof Error);
+    } finally { f.controller.abort(new Error('Test cleanup')); f.resolveRead(pageResult({})); await execution; }
+  }
+});
+
+test('page destruction between starting a read and subscribing is rejected without leaking listeners', async () => {
+  const f = pendingContentsFixture(); f.destroyDuringRead();
+  const execution = f.adapter.execute(f.task.input).then(value => ({ value }), error => ({ error }));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await f.reading;
+    const outcome = await Promise.race([execution,
+      new Promise<{ timedOut: true }>(resolve => { timer = setTimeout(() => resolve({ timedOut: true }), 3000); })]);
+    assert.ok(!('timedOut' in outcome), 'The destroyed-state check must cover a missed destruction event');
+    assert.ok('error' in outcome && outcome.error instanceof Error);
+    assert.match(outcome.error.message, /PAGE_(REPLACED|UNAVAILABLE)/);
+    assert.equal(f.events.listenerCount('destroyed'), 0);
+    assert.equal(getEventListeners(f.controller.signal, 'abort').length, 0);
+  } finally { clearTimeout(timer); f.controller.abort(new Error('Test cleanup')); f.resolveRead(pageResult({})); await execution; }
+});
 
 test('page result preserves a guarded failure instead of losing it across the Electron boundary', () => {
   assert.throws(() => pageOperationResult({ workspacePageResult: true, ok: false, error: 'PAGE_SCRIPT_FAILED [stage=write_text; error=TypeError]' }), /stage=write_text; error=TypeError/);

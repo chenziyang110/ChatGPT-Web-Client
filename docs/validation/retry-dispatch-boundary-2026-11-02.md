@@ -12,7 +12,7 @@ v1.4.32 候选六目标安装、审计、单测与构建均通过，完整 Linux
 
 新增确定性测试通过真实 Gateway / SQLite 与模拟时钟跨越边界。旧代码明确失败：后继任务仍 pending；修复后同一发送凭据恢复观察并完成，后继按 FIFO 推进，另一持续回复仍运行，原消息实际发送 1 次、恢复观察 1 次。测试不依赖其他队列完成来唤醒。
 
-相关 automatic-recovery、conversation-queue、dot-interval、automation 和 core 共 63 项测试通过；新增修复后全量 189 项单测和发布清单 1 项通过，类型检查与 diff 检查通过。v1.4.33 重新执行六目标桌面、打包与更新清单检查后才发布。
+相关 automatic-recovery、conversation-queue、dot-interval、automation 和 core 共 63 项测试通过；新增修复后全量 189 项单测和发布清单 1 项通过，类型检查与 diff 检查通过。v1.4.33 候选随后被平台尺寸断言拦截，修正后以 v1.4.34 重新执行六目标桌面、打包与更新清单检查。
 
 最终 v1.4.33 构建、Windows x64 NSIS 打包及完整 `conversation-load-recovery-desktop.mjs` 通过。恢复回归使用默认 20 秒原生加载超时，验证异步 skeleton、原始提交凭据、后台队列推进、反复语义错误、混合原生卡住、独立目标的三次恢复上限与健康兄弟会话；没有缩短等待预算来跳过失败路径。
 

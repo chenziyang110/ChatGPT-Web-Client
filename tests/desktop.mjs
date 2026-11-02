@@ -12,6 +12,12 @@ const directory = await mkdtemp(path.resolve('.test-desktop-'));
 await mkdir('test-results', { recursive: true });
 const bootstrap = path.join(directory, 'fixture.cjs');
 await writeFile(bootstrap, `const { app } = require('electron');
+globalThis.fixtureViewportEvents = [];
+app.on('browser-window-created', (_, win) => {
+  for (const event of ['resize', 'resized', 'maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) {
+    win.on(event, () => globalThis.fixtureViewportEvents.push({ event, at: Date.now(), bounds: win.getBounds(), contentBounds: win.getContentBounds(), maximized: win.isMaximized() }));
+  }
+});
 app.on('session-created', isolated => isolated.protocol.handle('https', () => new Response(${JSON.stringify(fixture)}, { headers: { 'Content-Type': 'text/html' } })));
 require(${JSON.stringify(path.resolve('dist-electron/main.cjs'))});
 `);
@@ -19,6 +25,31 @@ let desktop;
 let page;
 let cleanExit = false;
 const errors = [];
+async function viewportDiagnostic(label, requested) {
+  if (!desktop) return;
+  const bounded = (promise, name) => Promise.race([promise, new Promise(resolve => {
+    const timer = setTimeout(() => resolve({ diagnosticTimeout: name }), 2000);
+    timer.unref();
+  })]).catch(error => ({ diagnosticError: String(error) }));
+  const native = await bounded(desktop.evaluate(({ BrowserWindow, screen }) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    return win ? {
+      bounds: win.getBounds(), contentBounds: win.getContentBounds(), size: win.getSize(), contentSize: win.getContentSize(),
+      maximized: win.isMaximized(), fullscreen: win.isFullScreen(), visible: win.isVisible(), focused: win.isFocused(),
+      minimized: win.isMinimized(), loading: win.webContents.isLoading(),
+      workArea: screen.getPrimaryDisplay().workArea, displayBounds: screen.getPrimaryDisplay().bounds,
+      scaleFactor: screen.getPrimaryDisplay().scaleFactor, events: globalThis.fixtureViewportEvents.slice(-30)
+    } : { missingWindow: true };
+  }), 'native');
+  const renderer = page && !page.isClosed() ? await bounded(page.evaluate(() => ({
+    innerWidth, innerHeight, outerWidth, outerHeight, devicePixelRatio,
+    readyState: document.readyState, focused: document.hasFocus(), visibility: document.visibilityState,
+    slot: document.querySelector('.browser-slot')?.getBoundingClientRect().toJSON(),
+    viewport: window.visualViewport && { width: visualViewport.width, height: visualViewport.height, scale: visualViewport.scale },
+    focusMode: !!document.querySelector('.focus-mode')
+  })), 'renderer') : { missingPage: true };
+  console.log(JSON.stringify({ viewportDiagnostic: label, at: Date.now(), requested, native, renderer }));
+}
 async function launch(scale = 1) {
   // This long scenario returns to old fixture pages to drive notifications.
   // Keep them alive here; memory-desktop separately tests real hibernation.
@@ -409,13 +440,16 @@ try {
   await accountSelect.click();
   await page.getByRole('option', { name: 'Personal', exact: true }).click();
   await activeAccount(personal.id);
+  await viewportDiagnostic('before-large-resize');
   const largeSize = await desktop.evaluate(({ BrowserWindow, screen }) => {
     const area = screen.getPrimaryDisplay().workArea;
     const size = { width: Math.max(900, Math.min(1920, area.width)), height: Math.max(640, Math.min(1080, area.height)) };
     BrowserWindow.getAllWindows()[0].setSize(size.width, size.height);
     return size;
   });
+  await viewportDiagnostic('after-large-resize', largeSize);
   await page.waitForFunction(size => innerWidth === size.width && innerHeight === size.height, largeSize);
+  await viewportDiagnostic('large-resize-settled', largeSize);
   await checkBrowserBounds();
   const focusSlot = await page.locator('.browser-slot').boundingBox();
   assert.equal(focusSlot.x, 0);
@@ -628,6 +662,7 @@ try {
   console.log('Desktop integration passed: scoped Agent handoff preview/copy and service toggle, configurable shortcuts, background manual/task reply notifications, per-conversation counts, open/read and restart persistence, pinned queues, takeover, UI, isolation and shutdown.');
 } finally {
   if (!cleanExit) {
+    await viewportDiagnostic('failure');
     if (page && !page.isClosed()) await page.screenshot({ path: 'test-results/failure.png' }).catch(() => {});
     console.error(errors.join('\n'));
   }

@@ -5,7 +5,7 @@ import type { Conversation, ConversationSurface } from '../../shared/types';
 
 export function conversationUrl(value: unknown): { url: string; remoteId: string; surface?: ConversationSurface } {
   const parsed = new URL(chatUrl(value));
-  const dot = /^\/dots\/([a-zA-Z0-9_-]{1,128})\/?$/.exec(parsed.pathname);
+  const dot = /^\/dots\/([a-zA-Z0-9_-]{1,128}(?:~[a-zA-Z0-9_-]{1,128})?)\/?$/.exec(parsed.pathname);
   if (dot && !parsed.search && !parsed.hash) return { url: `https://chatgpt.com/dots/${dot[1]}`, remoteId: `dot:${dot[1]}`, surface: 'dot' };
   const match = /^\/c\/([a-zA-Z0-9_-]{1,128})\/?$/.exec(parsed.pathname);
   if (!match || parsed.search || parsed.hash) throw new AppError('Use a personal https://chatgpt.com/c/<id> or /dots/<id> URL. Shared and temporary chats are not supported.');

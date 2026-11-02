@@ -7,7 +7,11 @@ export function Select({ label, value, options, onValueChange, disabled, placeho
   label: string; value: string; options: SelectOption[]; onValueChange: (value: string) => void;
   disabled?: boolean; placeholder?: string; className?: string; open?: boolean; onOpenChange?: (open: boolean) => void;
 }) {
-  return <SelectPrimitive.Root value={value} onValueChange={onValueChange} disabled={disabled || !options.length} open={open} onOpenChange={onOpenChange}>
+  return <SelectPrimitive.Root value={value} onValueChange={next => {
+    // The hidden form select can emit an empty value before its options mount.
+    // Only an available option may change this controlled selection.
+    if (options.some(option => option.value === next)) onValueChange(next);
+  }} disabled={disabled || !options.length} open={open} onOpenChange={onOpenChange}>
     <SelectPrimitive.Trigger className={`ui-select ${className}`} aria-label={label} data-value={value}>
       <span className="ui-select-value"><SelectPrimitive.Value placeholder={placeholder} /></span>
       <SelectPrimitive.Icon className="ui-select-chevron"><Icon name="chevronDown" size={16} /></SelectPrimitive.Icon>

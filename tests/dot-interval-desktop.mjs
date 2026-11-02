@@ -11,6 +11,7 @@ const root = path.resolve('.');
 const directory = await mkdtemp(path.join(root, '.test-dot-interval-'));
 const bootstrap = path.join(directory, 'fixture.cjs');
 const captureUi = process.env.WORKSPACE_TEST_CAPTURE_UI === '1';
+const compoundSwitchOnly = process.argv.includes('--compound-switch-only');
 const fixture = surfaceFixture.replace('</script>', `
 window.keepWorking=dot&&localStorage.getItem(key+':keep-working')==='true';
 window.startPersistentWork=()=>{window.keepWorking=true;localStorage.setItem(key+':keep-working','true');window.startWork()};
@@ -49,8 +50,29 @@ const launch = async () => {
     env: { ...env, WORKSPACE_TEST_CLOCK_OFFSET: String(clockOffset) } });
   await until(async () => !!(ui = desktop.windows().find(page => page.url().startsWith('file:'))));
   await ui.waitForFunction(() => !!window.workspace);
+  await ui.evaluate(() => {
+    window.dotIntervalSelectChanges = [];
+    document.addEventListener('change', event => {
+      const select = event.target;
+      if (!(select instanceof HTMLSelectElement) || !select.closest('.cq-timing')) return;
+      window.dotIntervalSelectChanges.push({ value: select.value, trusted: event.isTrusted,
+        options: [...select.options].map(option => option.value),
+        controls: [...select.closest('.cq-timing').querySelectorAll('[role="combobox"]')].map(control => ({
+          label: control.getAttribute('aria-label'), value: control.dataset.value, text: control.innerText })) });
+    }, true);
+  });
 };
 const rpc = (method, params = {}) => ui.evaluate(({ method, params }) => window.workspace.call(method, params), { method, params });
+const queueUiState = async () => ({ ...await ui.evaluate(() => {
+  const panel = document.querySelector('.conversation-queue');
+  const settings = panel?.querySelector('.cq-timing');
+  const mode = settings?.querySelector('[aria-label="Dot 队列发送方式"]');
+  const save = settings?.querySelector('button[type="submit"]');
+  return { header: panel?.querySelector('.cq-header')?.innerText, mode: { value: mode?.dataset.value, text: mode?.innerText },
+    saveDisabled: save?.disabled, nativeSelects: [...(settings?.querySelectorAll('select') ?? [])].map(select => ({
+      value: select.value, options: [...select.options].map(option => option.value) })),
+    selectChanges: window.dotIntervalSelectChanges?.slice(-20) };
+}), queues: await rpc('queues.status') });
 const read = (account, url, script) => desktop.evaluate(async ({ webContents, session }, { partition, url, script }) => {
   const contents = webContents.getAllWebContents().find(value => value.session === session.fromPartition(partition) && value.getURL() === url);
   if (!contents) throw Error('Own isolated Dot page unavailable');
@@ -69,9 +91,9 @@ const advance = async (account, conversation, milliseconds) => {
   // Resume is idempotent and wakes scheduling without resetting its due time.
   await resume(account, conversation);
 };
-const openDot = async (account, name) => {
+const openDot = async (account, name, alias) => {
   const url = `https://chatgpt.com/dots/${name}`;
-  const conversation = await rpc('conversations.register', { accountId: account.id, url });
+  const conversation = await rpc('conversations.register', { accountId: account.id, url, alias });
   await rpc('conversations.open', { accountId: account.id, conversation: conversation.id });
   await until(async () => { try { return await read(account, url, 'typeof window.startPersistentWork === "function"'); } catch { return false; } });
   return conversation;
@@ -87,11 +109,51 @@ const assertSubmittedOnly = async value => {
 try {
   await launch();
   const account = await rpc('accounts.create', { name: 'Timed Dot fixture' });
-  const dot = await openDot(account, 'interval-dot');
+  const compoundPrefix = '11111111-2222-4333-8444-555555555555';
+  const dot = await openDot(account, `${compoundPrefix}~0123456789abcdef`, 'Compound timed Dot');
+  assert.equal(dot.surface, 'dot');
+  assert.equal(dot.url, `https://chatgpt.com/dots/${compoundPrefix}~0123456789abcdef`);
+  if (compoundSwitchOnly) {
+    await timing(account, dot);
+    const completion = await openDot(account, `${compoundPrefix}~fedcba9876543210`, 'Compound completion Dot');
+    assert.notEqual(completion.id, dot.id);
+    await rpc('conversations.open', { accountId: account.id, conversation: dot.id });
+    await ui.getByRole('button', { name: '会话队列', exact: true }).click();
+    const panel = ui.getByRole('complementary', { name: '会话队列' });
+    const composer = panel.getByLabel('下一条消息', { exact: true });
+    const drafts = new Map();
+    for (const [conversation, mode, label, draft] of [
+      [dot, 'interval', '定时发送', 'Timed compound draft'],
+      [completion, 'completion', '工作结束后发送', 'Completion compound draft'],
+      [dot, 'interval', '定时发送', 'Timed compound draft'],
+      [completion, 'completion', '工作结束后发送', 'Completion compound draft'],
+    ]) {
+      await rpc('conversations.open', { accountId: account.id, conversation: conversation.id });
+      await until(async () => (await panel.locator('.cq-header').innerText()).includes(conversation.alias) && await composer.isEnabled());
+      await sleep(1000);
+      const snapshot = await queueUiState();
+      console.log('Compound switch UI:', JSON.stringify(snapshot));
+      assert.equal(snapshot.mode.value, mode);
+      assert.equal(snapshot.mode.text, label);
+      assert.equal(snapshot.saveDisabled, true);
+      assert.equal(await composer.inputValue(), drafts.get(conversation.id) ?? '');
+      await composer.fill(draft);
+      drafts.set(conversation.id, draft);
+    }
+    assert.equal((await rpc('tasks.list')).length, 0, 'The switch-only regression must not submit messages');
+    passed = true;
+    console.log('Compound switch-only UI passed: saved modes, separate suffixes and drafts remain intact without sending.');
+  } else {
   await read(account, dot.url, 'window.startPersistentWork()');
   await ui.getByRole('button', { name: '会话队列', exact: true }).click();
   const panel = ui.getByRole('complementary', { name: '会话队列' });
   const settings = panel.getByRole('form', { name: 'Dot 队列发送设置' });
+  await until(() => panel.getByLabel('下一条消息', { exact: true }).isEnabled(), 'The compound Dot route must resolve its visible composer without reopening the queue');
+  const dotPage = (await rpc('workspace.status')).page;
+  assert.equal(dotPage.url, dot.url);
+  const diagnostic = await rpc('browser.inspect', { accountId: account.id, pageId: dotPage.id });
+  assert.equal(diagnostic.surface, 'dot'); assert.equal(diagnostic.editor, true); assert.equal(diagnostic.readiness, 'ready');
+  assert.equal((await rpc('conversations.forPage', { accountId: account.id, pageId: dotPage.id })).id, dot.id);
   await settings.getByRole('combobox', { name: 'Dot 队列发送方式' }).click();
   await ui.getByRole('option', { name: '定时发送', exact: true }).click();
   await settings.getByRole('button', { name: '保存', exact: true }).click();
@@ -176,14 +238,51 @@ try {
   console.log('Dot interval fixture: restart spacing and acknowledged receipt recovery passed.');
 
   // Completion-based Dot queues keep their existing semantics unless the
-  // user explicitly chooses interval delivery for that conversation.
-  const completion = await openDot(account, 'completion-dot');
+  // user explicitly chooses interval delivery for that conversation. Two
+  // channels with the same UUID prefix keep separate settings and UI drafts.
+  await rpc('conversations.open', { accountId: account.id, conversation: dot.id });
+  await ui.getByRole('button', { name: '会话队列', exact: true }).click();
+  const isolationPanel = ui.getByRole('complementary', { name: '会话队列' });
+  const isolationComposer = isolationPanel.getByLabel('下一条消息', { exact: true });
+  const isolationSettings = isolationPanel.getByRole('form', { name: 'Dot 队列发送设置' });
+  const isolationMode = isolationSettings.getByRole('combobox', { name: 'Dot 队列发送方式' });
+  const isolationSave = isolationSettings.getByRole('button', { name: '保存', exact: true });
+  // The saved policy and Radix's selected label settle after the target does.
+  await until(async () => /Compound timed Dot/.test(await isolationPanel.locator('.cq-header').innerText()) && await isolationComposer.isEnabled()
+    && /定时发送/.test(await isolationMode.innerText()) && await isolationSave.isDisabled());
+  await isolationComposer.fill('Draft for the timed compound Dot');
+  const completion = await openDot(account, `${compoundPrefix}~fedcba9876543210`, 'Compound completion Dot');
+  assert.notEqual(completion.id, dot.id, 'Different compound suffixes must bind different conversations');
+  assert.notEqual(completion.remoteId, dot.remoteId, 'The full compound path must remain part of the remote identity');
+  assert.equal((await rpc('conversations.register', { accountId: account.id, url: dot.url })).id, dot.id);
+  await until(async () => /Compound completion Dot/.test(await isolationPanel.locator('.cq-header').innerText()) && await isolationComposer.isEnabled()
+    && /工作结束后发送/.test(await isolationMode.innerText()) && await isolationSave.isDisabled());
+  assert.equal(await isolationComposer.inputValue(), '', 'A different suffix must not reuse the timed Dot draft');
+  assert.match(await isolationMode.innerText(), /工作结束后发送/);
+  assert.equal((await rpc('queues.status')).find(queue => queue.accountId === account.id && queue.conversationId === completion.id)?.timing, undefined, 'A different suffix must not inherit interval settings');
+  assert.equal((await ownQueue()).timing.intervalMs, 60000, 'Opening another suffix must retain the original interval');
+  await isolationComposer.fill('Draft for the completion compound Dot');
   const working = await add(account, completion, 'ack-then-work');
   const afterWork = await add(account, completion, 'after-work');
   await until(async () => !!(await task(working)).submittedAt);
   await sleep(2500);
   assert.equal((await task(working)).status, 'running');
   assert.equal((await task(afterWork)).sendIntentAt, undefined, 'Ordinary Dot queues must keep waiting for work completion');
+  assert.equal((await task(working)).conversationId, completion.id);
+  assert.equal((await task(afterWork)).conversationId, completion.id);
+  await until(() => isolationPanel.locator(`[data-task-id="${afterWork.id}"]`).isVisible());
+  await rpc('conversations.open', { accountId: account.id, conversation: dot.id });
+  await until(async () => /Compound timed Dot/.test(await isolationPanel.locator('.cq-header').innerText()) && await isolationComposer.isEnabled() && await isolationComposer.inputValue() === 'Draft for the timed compound Dot'
+    && /定时发送/.test(await isolationMode.innerText()) && await isolationSave.isDisabled());
+  assert.match(await isolationMode.innerText(), /定时发送/);
+  assert.equal(await isolationPanel.locator(`[data-task-id="${afterWork.id}"]`).count(), 0, 'The other suffix must not display this conversation\'s pending queue');
+  assert.deepEqual(await read(account, dot.url, 'window.sent()'), ['timer-first', 'timer-second', 'timer-third', 'timer-fourth']);
+  await rpc('conversations.open', { accountId: account.id, conversation: completion.id });
+  await until(async () => /Compound completion Dot/.test(await isolationPanel.locator('.cq-header').innerText()) && await isolationComposer.isEnabled() && await isolationComposer.inputValue() === 'Draft for the completion compound Dot'
+    && /工作结束后发送/.test(await isolationMode.innerText()) && await isolationSave.isDisabled());
+  assert.match(await isolationMode.innerText(), /工作结束后发送/);
+  await until(() => isolationPanel.locator(`[data-task-id="${afterWork.id}"]`).isVisible());
+  await isolationPanel.getByRole('button', { name: '关闭队列面板' }).click();
   await read(account, completion.url, 'window.finishWork()');
   await until(async () => (await task(afterWork)).status === 'done');
 
@@ -262,12 +361,13 @@ try {
   await until(async () => (await task(paused)).status === 'done');
   await assertSubmittedOnly(paused);
   passed = true;
-  console.log('Dot interval queues passed: delayed first send, confirmed-send spacing, changing background output, restart without bursts/replay, completion mode preservation, disabled Send, Stop, drafts, and persistent pause.');
+  console.log('Dot interval queues passed: compound and legacy routes, suffix-isolated settings/drafts/queues, delayed first send, confirmed-send spacing, changing background output, restart without bursts/replay, completion mode preservation, disabled Send, Stop, drafts, and persistent pause.');
+  }
 } finally {
-  if (!passed && ui) console.error(JSON.stringify(await rpc('workspace.status').then(state => state.tasks.map(value => ({
+  if (!passed && ui) console.error(JSON.stringify({ ui: await queueUiState().catch(error => ({ error: error.message })), tasks: await rpc('workspace.status').then(state => state.tasks.map(value => ({
     prompt: value.input.prompt, status: value.status, phase: value.phase, sendMode: value.sendMode,
     intent: value.sendIntentAt, submitted: value.submittedAt, error: value.error
-  }))).catch(() => [])));
+  }))).catch(() => []) }));
   await desktop?.close();
   assert.equal(path.dirname(directory), root);
   assert.ok(path.basename(directory).startsWith('.test-dot-interval-'));

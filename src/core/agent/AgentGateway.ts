@@ -509,10 +509,18 @@ export class AgentGateway {
         all.findIndex(other => queueKey(other.accountId, other.conversationId) === queueKey(task.accountId, task.conversationId)) === index);
       const eligible = heads.filter(task => !this.running.has(queueKey(task.accountId, task.conversationId)) && !this.db.read<AccountQueue>('account_queues', task.accountId)?.paused && !this.db.read<AccountQueue>('account_queues', queueKey(task.accountId, task.conversationId))?.paused &&
         !tasks.some(other => queueKey(other.accountId, other.conversationId) === queueKey(task.accountId, task.conversationId) && (other.status === 'waiting_user' || other.status === 'uncertain' && !other.resolvedAt)));
-      const pending = eligible.filter(task => this.nextDispatchAt(task) <= Date.now());
-      const nextRetry = Math.min(...eligible.map(task => this.nextDispatchAt(task)).filter(at => at > Date.now()));
+      const now = Date.now();
+      const pending: AgentTask[] = [];
+      let nextRetry = Infinity;
+      // A deadline crossing during this scan must retain either dispatch or a
+      // wakeup. Use one time sample and one due-time calculation per task.
+      for (const task of eligible) {
+        const due = this.nextDispatchAt(task);
+        if (due <= now) pending.push(task);
+        else nextRetry = Math.min(nextRetry, due);
+      }
       clearTimeout(this.retryTimer);
-      if (Number.isFinite(nextRetry)) this.retryTimer = setTimeout(() => this.schedule(), Math.max(1, nextRetry - Date.now()));
+      if (Number.isFinite(nextRetry)) this.retryTimer = setTimeout(() => this.schedule(), Math.max(1, nextRetry - now));
       const accounts = [...new Set(pending.map(task => task.accountId))];
       if (!accounts.length) return;
       const nextAccount = accounts.sort((a, b) => (this.dispatched.get(a) ?? 0) - (this.dispatched.get(b) ?? 0))[0];

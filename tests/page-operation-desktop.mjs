@@ -180,6 +180,46 @@ try {
     document.querySelector('main').append(answer);
   });
   assert.equal((await execute({ kind: 'inspect' })).error, undefined, 'A finished answer supersedes the failed reasoning label');
+  // The conversation-fetch card now also uses the Chinese action 再试一次.
+  // Exercise each label in real DOM, including a single text node followed by
+  // its action so recognition also depends on stripping the complete suffix.
+  for (const label of ['重试', 'Retry', 'Try again', '再试一次']) {
+    await page.evaluate(label => {
+      document.body.innerHTML = `<main><div id="load-error">无法加载此 ChatGPT 对话<button>${label}</button></div></main>`;
+    }, label);
+    for (const kind of ['inspect', 'activity', 'diagnose']) {
+      const failed = await execute({ kind });
+      assert.equal(failed.loadFailure, 'conversation', `The ${label} fetch card must be recognized by ${kind}`);
+      assert.equal(failed.readiness, 'unavailable');
+    }
+  }
+  const errorCard = '<div>无法加载此 ChatGPT 对话<button>再试一次</button></div>';
+  for (const [name, html] of [
+    ['assistant quote', `<main><article><div data-message-author-role="assistant">${errorCard}</div></article></main>`],
+    ['quoted block', `<main><article><blockquote>${errorCard}</blockquote></article></main>`],
+    ['sidebar', `<main><aside>${errorCard}</aside></main>`],
+    ['navigation', `<main><nav>${errorCard}</nav></main>`],
+    ['outside main', `${errorCard}<main>Conversation shell</main>`],
+    ['hidden card', `<main><div style="display:none">${errorCard}</div></main>`],
+    ['invisible card', `<main><div style="visibility:hidden">${errorCard}</div></main>`],
+    ['aria-hidden card', `<main><div aria-hidden="true">${errorCard}</div></main>`],
+    ['unrelated error', '<main><div>请求失败<button>再试一次</button></div></main>'],
+    ['usable editor', `<main>${errorCard}<textarea id="prompt-textarea"></textarea></main>`],
+    ['active Stop', `<main>${errorCard}<button data-testid="stop-button">Stop</button></main>`],
+    ['active stream', `<main>${errorCard}<div data-is-streaming="true">Still replying</div></main>`],
+    ['signed out', `<main>${errorCard}<button data-testid="login-button">Log in</button></main>`],
+    ['verification shell', `<main>${errorCard}<div id="challenge-running">Checking</div></main>`],
+  ]) {
+    await page.evaluate(html => { document.body.innerHTML = html; }, html);
+    for (const kind of ['inspect', 'activity', 'diagnose']) {
+      assert.equal((await execute({ kind })).loadFailure, undefined, `${name} must not be a conversation-fetch failure`);
+    }
+  }
+  await page.evaluate(html => { history.replaceState({}, '', '/'); document.body.innerHTML = `<main>${html}</main>`; }, errorCard);
+  assert.equal((await execute({ kind: 'inspect' })).loadFailure, undefined, 'The homepage is not a failed bound conversation');
+  await page.evaluate(html => { history.replaceState({}, '', '/c/diagnostic-fixture?temporary-chat=true'); document.body.innerHTML = `<main>${html}</main>`; }, errorCard);
+  assert.equal((await execute({ kind: 'inspect' })).loadFailure, undefined, 'A temporary chat must not enter bound-conversation recovery');
+  await page.evaluate(() => history.replaceState({}, '', '/c/diagnostic-fixture'));
   // Replies scroll inside their own viewport, separately from sidebar history
   // and code blocks. Following must not click controls or disturb a draft.
   await page.evaluate(() => {
@@ -221,6 +261,45 @@ try {
   await page.evaluate(() => { document.body.innerHTML = '<main style="height:2400px">No messages yet</main>'; window.scrollTo(0, 0); });
   assert.deepEqual(await execute({ kind: 'follow_latest', url }), { scrolled: false });
   assert.equal(await page.evaluate(() => window.scrollY), 0, 'Pages without conversation messages do not move');
+  // Both observed Dot routes must use the marked composer, preserve drafts,
+  // and keep the complete destination/user anchor guards before any send.
+  for (const dotPath of ['/dots/legacy-dot', '/dots/11111111-2222-4333-8444-555555555555~0123456789abcdef0123456789abcdef']) {
+    await page.evaluate(dotPath => {
+      history.replaceState({}, '', dotPath);
+      document.body.innerHTML = `<main>
+        <div id="unrelated" contenteditable="true" role="textbox">Other draft</div>
+        <article class="message-row self" data-message-id="own"><div class="message-body" data-message-id="own">Question</div></article>
+        <article class="message-row" data-message-id="ack"><div class="message-body" data-message-id="ack">Received</div><div class="message-inline-actions--orbit"><button data-action="reply">Reply</button></div></article>
+        <div data-codex-composer-root><div data-composer-markdown contenteditable="true" role="textbox"><p>Existing Dot draft</p></div><button type="button" aria-label="发送">Send</button></div>
+        <span data-slot="thread-summary-panel-item-leading"><div data-codex-pet-state="idle"></div></span></main>`;
+      window.dotRouteSends = 0;
+      document.querySelector('[data-codex-composer-root] button').onclick = () => window.dotRouteSends++;
+    }, dotPath);
+    const dotUrl = `https://chatgpt.com${dotPath}`;
+    const dotGuard = { url: dotUrl, anchor: JSON.stringify([['own', 'Question']]), surface: 'dot' };
+    const state = await execute({ kind: 'inspect' });
+    assert.equal(state.surface, 'dot', dotPath); assert.equal(state.editor, true, dotPath);
+    assert.equal(state.readiness, 'ready', dotPath); assert.equal(state.draft, 'Existing Dot draft');
+    assert.deepEqual(state.messages.map(message => message.role), ['user', 'assistant']);
+    const diagnostic = await execute({ kind: 'diagnose' });
+    assert.equal(diagnostic.dom.visibleEditorCount, 1); assert.equal(diagnostic.dom.sendVisible, true);
+    assert.match((await execute({ ...dotGuard, kind: 'fill', value: 'Next' }, true)).error, /DRAFT_CONFLICT/);
+    await execute({ ...dotGuard, kind: 'clear', value: state.draft });
+    await execute({ ...dotGuard, kind: 'fill', value: 'Next' });
+    assert.equal((await execute({ kind: 'inspect' })).draft, 'Next');
+    assert.match((await execute({ ...dotGuard, kind: 'send', url: `${dotUrl}~other`, value: 'Next' }, true)).error, /TARGET_CHANGED/);
+    assert.match((await execute({ ...dotGuard, kind: 'send', anchor: '[]', value: 'Next' }, true)).error, /PAGE_CHANGED/);
+    assert.match((await execute({ ...dotGuard, kind: 'send', value: 'Edited' }, true)).error, /DRAFT_CHANGED/);
+    await page.evaluate(() => { document.querySelector('[data-codex-composer-root] button').disabled = true; });
+    assert.match((await execute({ ...dotGuard, kind: 'send', value: 'Next' }, true)).error, /SEND_UNAVAILABLE/);
+    assert.equal(await page.evaluate(() => window.dotRouteSends), 0);
+    await page.evaluate(() => { document.querySelector('[data-codex-composer-root] button').disabled = false; });
+    assert.deepEqual(await execute({ ...dotGuard, kind: 'check_send', value: 'Next' }), { ready: true });
+    assert.equal(await page.evaluate(() => window.dotRouteSends), 0);
+    assert.deepEqual(await execute({ ...dotGuard, kind: 'send', value: 'Next' }), { clicked: true });
+    assert.equal(await page.evaluate(() => window.dotRouteSends), 1);
+    assert.equal(await page.locator('#unrelated').innerText(), 'Other draft');
+  }
   // Live Dot acknowledges immediately, then works without streaming a message.
   // Its summary avatar changes running -> idle; its status text can lag a minute.
   await page.evaluate(() => {

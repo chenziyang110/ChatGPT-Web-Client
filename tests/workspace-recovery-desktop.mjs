@@ -79,12 +79,15 @@ try {
 } catch (error) {
   let diagnosticTimer;
   console.error(await Promise.race([
-    shell?.evaluate(() => ({ readyState: document.readyState, bridge: !!window.workspace,
-      accounts: document.querySelectorAll('.account-row').length, text: document.body?.innerText.slice(0, 600) }))
-      .catch(failure => ({ diagnosticError: String(failure) })),
+    Promise.all([
+      shell?.evaluate(() => ({ readyState: document.readyState, bridge: !!window.workspace,
+        accounts: document.querySelectorAll('.account-row').length, text: document.body?.innerText.slice(0, 600) }))
+        .catch(failure => ({ diagnosticError: String(failure) })),
+      desktop?.evaluate(() => ({ statusFailures: globalThis.statusFailures, shellLoadEvents: globalThis.shellLoadEvents }))
+        .catch(failure => ({ diagnosticError: String(failure) }))
+    ]).then(([renderer, runtime]) => ({ renderer, runtime })),
     new Promise(resolve => { diagnosticTimer = setTimeout(() => resolve({ diagnosticTimeout: true }), 2000); })
   ]).finally(() => clearTimeout(diagnosticTimer)));
-  console.error(await desktop?.evaluate(() => ({ statusFailures: globalThis.statusFailures, shellLoadEvents: globalThis.shellLoadEvents })));
   console.error(await readFile(path.join(directory, 'logs/runtime.jsonl'), 'utf8'));
   console.error(await desktop?.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map(w => ({
     url: w.webContents.getURL(), destroyed: w.webContents.isDestroyed(), loading: w.webContents.isLoading()

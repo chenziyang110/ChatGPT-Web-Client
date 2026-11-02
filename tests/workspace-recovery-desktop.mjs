@@ -9,7 +9,7 @@ const directory = await mkdtemp(path.join(root, '.test-workspace-recovery-'));
 const bootstrap = path.join(directory, 'fixture.cjs');
 await writeFile(bootstrap, `const { app, ipcMain, Notification } = require('electron');
 Notification.isSupported = () => false;
-globalThis.statusBlocked = false; globalThis.statusFailures = 0;
+globalThis.statusBlocked = false; globalThis.statusFailures = 0; globalThis.shellLoadEvents = [];
 const handle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, handler) => handle(channel, async (...args) => {
   if (channel === 'workspace:call' && args[1] === 'workspace.status' && globalThis.statusBlocked) {
@@ -17,19 +17,27 @@ ipcMain.handle = (channel, handler) => handle(channel, async (...args) => {
   }
   return handler(...args);
 });
-app.on('browser-window-created', (_, win) => { win.on('show', () => win.hide()); });
+app.on('browser-window-created', (_, win) => {
+  win.on('show', () => win.hide());
+  for (const event of ['did-start-loading', 'dom-ready', 'did-finish-load', 'did-stop-loading']) {
+    win.webContents.on(event, () => {
+      globalThis.shellLoadEvents.push({ event, at: Date.now() });
+      if (globalThis.shellLoadEvents.length > 50) globalThis.shellLoadEvents.shift();
+    });
+  }
+});
 app.on('session-created', s => s.protocol.handle('https', () => new Response(${JSON.stringify(fixture)}, { headers: { 'Content-Type': 'text/html' } })));
 require(${JSON.stringify(path.join(root, 'dist-electron/main.cjs'))});`);
 const env = { ...process.env, WORKSPACE_USER_DATA: directory };
 delete env.ELECTRON_RUN_AS_NODE; delete env.WORKSPACE_DEV_URL;
-let desktop;
+let desktop, shell;
 const until = async check => {
   const end = Date.now() + 20000;
   while (!await check()) { assert.ok(Date.now() < end, 'Recovery timed out'); await new Promise(resolve => setTimeout(resolve, 100)); }
 };
 try {
   desktop = await electron.launch({ args: [bootstrap], env });
-  const shell = await desktop.firstWindow();
+  shell = await desktop.firstWindow();
   await shell.waitForFunction(() => !!window.workspace);
   const rpc = (method, params = {}) => shell.evaluate(({ method, params }) => window.workspace.call(method, params), { method, params });
   const accounts = [];
@@ -69,6 +77,17 @@ try {
   assert.equal(JSON.parse(await readFile(path.join(directory, 'logs/session.json'), 'utf8')).clean, true);
   console.log('Workspace recovery passed: repeated read failures retry without empty-account onboarding; shell crash preserves three accounts, tabs and queued work.');
 } catch (error) {
+  let diagnosticTimer;
+  console.error(await Promise.race([
+    Promise.all([
+      shell?.evaluate(() => ({ readyState: document.readyState, bridge: !!window.workspace,
+        accounts: document.querySelectorAll('.account-row').length, text: document.body?.innerText.slice(0, 600) }))
+        .catch(failure => ({ diagnosticError: String(failure) })),
+      desktop?.evaluate(() => ({ statusFailures: globalThis.statusFailures, shellLoadEvents: globalThis.shellLoadEvents }))
+        .catch(failure => ({ diagnosticError: String(failure) }))
+    ]).then(([renderer, runtime]) => ({ renderer, runtime })),
+    new Promise(resolve => { diagnosticTimer = setTimeout(() => resolve({ diagnosticTimeout: true }), 2000); })
+  ]).finally(() => clearTimeout(diagnosticTimer)));
   console.error(await readFile(path.join(directory, 'logs/runtime.jsonl'), 'utf8'));
   console.error(await desktop?.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map(w => ({
     url: w.webContents.getURL(), destroyed: w.webContents.isDestroyed(), loading: w.webContents.isLoading()

@@ -57,9 +57,12 @@ try {
   const boundWork = await rpc('conversations.get', { accountId: account.id, conversation: work.id });
   assert.equal(boundWork.surface, 'work'); assert.equal(boundWork.url, 'https://chatgpt.com/c/work-bound');
   assert.deepEqual(await read(account, boundWork.url, 'window.sent()'), ['work-first', 'work-next']);
-  const dotUrl = 'https://chatgpt.com/dots/same-dot';
+  const dotRoute = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee~0123456789abcdef';
+  const dotUrl = `https://chatgpt.com/dots/${dotRoute}`;
   const dot = await rpc('conversations.register', { accountId: account.id, url: dotUrl });
+  assert.equal(dot.surface, 'dot'); assert.equal(dot.url, dotUrl); assert.equal(dot.remoteId, `dot:${dotRoute}`);
   const first = await add(account, dot, 'ignored-click'), next = await add(account, dot, 'dot-next');
+  assert.equal(first.conversationId, dot.id); assert.equal(next.conversationId, dot.id);
   await until(async () => !!(await rpc('tasks.get', { id: first.id })).submittedAt);
   const receipt = (await rpc('tasks.get', { id: first.id })).submittedMessageId;
   await new Promise(r => setTimeout(r, 7000));
@@ -85,6 +88,7 @@ try {
   const currentPage = (await rpc('workspace.status')).pages.find(p => p.accountId === account.id && p.url === dotUrl);
   assert.ok(currentPage);
   const workDiagnostic = await rpc('browser.inspect', { accountId: account.id, pageId: currentPage.id });
+  assert.equal(workDiagnostic.surface, 'dot'); assert.equal(workDiagnostic.editor, true); assert.equal(workDiagnostic.readiness, 'ready');
   assert.equal(workDiagnostic.dotWork, 'working'); assert.equal(workDiagnostic.busy, true);
   await desktop.close(); await launch();
   await until(async () => (await rpc('tasks.get', { id: working.id })).status === 'running');
@@ -118,6 +122,8 @@ try {
   assert.deepEqual(await read(account, dotUrl, 'window.sent()'), expectedDot);
   const other = await rpc('accounts.create', { name: 'Other Dot' });
   const otherDot = await rpc('conversations.register', { accountId: other.id, url: dotUrl });
+  assert.notEqual(otherDot.id, dot.id, 'The same compound Dot route must retain account isolation');
+  assert.equal(otherDot.remoteId, dot.remoteId);
   const otherTask = await add(other, otherDot, 'other-first');
   await until(async () => !!(await rpc('tasks.get', { id: otherTask.id })).submittedAt);
   await read(other, dotUrl, 'window.finishReply()');
@@ -125,7 +131,7 @@ try {
   assert.deepEqual(await read(other, dotUrl, 'window.sent()'), ['other-first']);
   assert.deepEqual(await read(account, dotUrl, 'window.sent()'), expectedDot);
   passed = true;
-  console.log('Work/Dot queues passed: mode restoration, FIFO, delayed reply, ignored-click retry, acknowledgement while work continues, work-only completion, restart without replay, and account isolation.');
+  console.log('Work/Dot queues passed: mode restoration, compound-route FIFO, delayed reply, ignored-click retry, acknowledgement while work continues, work-only completion, restart without replay, and account isolation.');
 } finally {
   if (!passed && ui) console.error(JSON.stringify(await rpc('workspace.status').then(s => s.tasks.map(t => ({ prompt: t.input.prompt, status: t.status, phase: t.phase, error: t.error }))).catch(() => [])));
   await desktop?.close(); assert.equal(path.dirname(directory), root); assert.ok(path.basename(directory).startsWith('.test-surface-queue-'));

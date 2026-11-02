@@ -21,7 +21,9 @@ const cappedNativeUrl = 'https://chatgpt.com/c/6ac8a40d-feb0-83ee-90f1-9fe754214
 const canceledUrl = 'https://chatgpt.com/c/6ac8a40d-feb0-83ee-90f1-9fe754214775';
 const pausedUrl = 'https://chatgpt.com/c/6ac8a40d-feb0-83ee-90f1-9fe754214776';
 const plainPendingUrl = 'https://chatgpt.com/c/6ac8a40d-feb0-83ee-90f1-9fe754214777';
-const errorCard = '<div id="conversation-load-error"><p>无法加载此 ChatGPT 对话</p><button onclick="location.reload()">重试</button></div>';
+// Current ChatGPT uses 再试一次; legacy 重试 remains covered by the DOM
+// operation and disconnected-reply fixtures.
+const errorCard = '<div id="conversation-load-error"><p>无法加载此 ChatGPT 对话</p><button onclick="location.reload()">再试一次</button></div>';
 const failureFixture = `<!doctype html><html><head><meta charset="utf-8"><title>ChatGPT</title></head><body>
 <aside><a href="/">新聊天</a></aside><main>${errorCard}</main></body></html>`;
 const pendingFailureFixture = `<!doctype html><html><head><meta charset="utf-8"><title>ChatGPT</title></head><body>
@@ -261,6 +263,8 @@ try {
       'The pending-resource guard checks the active PageState for the normal conversation');
     assert.equal(pendingPage?.error, undefined,
       'A normal pending-resource error is not covered by a client page error');
+    assert.equal((await rpc('browser.inspect', { accountId: account.id, pageId: pendingPlain.page.id })).loadFailure, 'conversation',
+      'The current 再试一次 card is recognized even while an unrelated resource remains pending');
     assert.equal(await inPage(account, plainPendingUrl, "!!document.querySelector('#conversation-load-error button')"), true,
       'The site Retry control remains available while the subresource is pending');
     assert.equal(await inPage(account, plainPendingUrl,
@@ -441,7 +445,7 @@ try {
   const quoteNative = await nativeFor(account, quoteUrl);
   const quoteRequests = await requestCount(quoteUrl);
   await inPage(account, quoteUrl, `
-    document.querySelector('main').innerHTML = '<article><div data-message-author-role="assistant" data-message-id="quoted-error"><p>无法加载此 ChatGPT 对话</p><button onclick="location.reload()">重试</button></div></article>';
+    document.querySelector('main').innerHTML = '<article><div data-message-author-role="assistant" data-message-id="quoted-error"><p>无法加载此 ChatGPT 对话</p><button onclick="location.reload()">再试一次</button></div></article>';
     const aside = document.createElement('aside'); aside.innerHTML = ${JSON.stringify(errorCard)}; document.body.append(aside);
     const hidden = document.createElement('div'); hidden.hidden = true; hidden.innerHTML = ${JSON.stringify(errorCard)}; document.querySelector('main').append(hidden);
   `);

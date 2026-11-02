@@ -40,7 +40,7 @@ export function replyPageUrl(value: string, allowOptimistic = false): string | u
   const url = new URL(value);
   if (url.searchParams.getAll('temporary-chat').some(flag => flag !== 'false' && flag !== '0')) return;
   if (url.pathname === '/') return HOME_URL;
-  const dot = /^\/dots\/([a-zA-Z0-9_-]{1,128})\/?$/.exec(url.pathname);
+  const dot = /^\/dots\/([a-zA-Z0-9_-]{1,128}(?:~[a-zA-Z0-9_-]{1,128})?)\/?$/.exec(url.pathname);
   if (dot) return `${HOME_URL}dots/${dot[1]}`;
   let pathname: string;
   try { pathname = decodeURI(url.pathname).replace(/%3A/ig, ':'); } catch { return; }
@@ -64,7 +64,7 @@ export function pageOperation(operation: Operation): unknown {
     const visible = (element: Element | null | undefined): element is HTMLElement => !!element?.getClientRects().length;
     // These schemas are observed on live ChatGPT chat, Work and Dot accounts. Do not use generated
     // CSS classes, translated placeholder text, or an arbitrary page textbox.
-    const dot = /^\/dots\/[a-zA-Z0-9_-]{1,128}\/?$/.test(location.pathname);
+    const dot = /^\/dots\/[a-zA-Z0-9_-]{1,128}(?:~[a-zA-Z0-9_-]{1,128})?\/?$/.test(location.pathname);
     const editorSelector = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"][role="textbox"], form[data-composer-placement] [data-composer-markdown][contenteditable="true"][role="textbox"]' +
       (dot ? ', [data-codex-composer-root] [data-composer-markdown][contenteditable="true"][role="textbox"]' : '');
     const editor = [...document.querySelectorAll<HTMLElement>(editorSelector)].find(visible) ?? null;
@@ -207,10 +207,10 @@ export function pageOperation(operation: Operation): unknown {
       !stopVisible && !streamingVisible && !ariaBusyVisible &&
       [...document.querySelectorAll<HTMLElement>('main button, main [role="button"], main a')].some(control => {
         if (!visibleLoadElement(control) || control.closest(`${messageWrapper}, aside, nav`) ||
-          !/^(重试|Retry|Try again)$/i.test((control.innerText || control.getAttribute('aria-label') || '').trim())) return false;
+          !/^(重试|再试一次|Retry|Try again)$/i.test((control.innerText || control.getAttribute('aria-label') || '').trim())) return false;
         for (let card = control.parentElement, depth = 0; card && depth < 5 && !card.matches('main'); card = card.parentElement, depth++) {
           if (!visibleLoadElement(card) || card.closest(`${messageWrapper}, aside, nav`) || card.querySelector(messageWrapper) || card.innerText.length > 240) continue;
-          const cardLabel = card.innerText.trim().replace(/\s+/g, ' ').replace(/\s*(?:重试|Retry|Try again)$/i, '').trim();
+          const cardLabel = card.innerText.trim().replace(/\s+/g, ' ').replace(/\s*(?:重试|再试一次|Retry|Try again)$/i, '').trim();
           if (loadFailureLabel.test(cardLabel)) return true;
           if ([card, ...card.querySelectorAll<HTMLElement>('p, span, div, h1, h2, h3, [role="alert"]')].some(label =>
             visibleLoadElement(label) && loadFailureLabel.test(label.innerText.trim().replace(/\s+/g, ' ')))) return true;

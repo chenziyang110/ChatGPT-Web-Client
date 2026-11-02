@@ -1,0 +1,10 @@
+{
+  "name": "@chatgpt-web-client/temp-cleanup",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Literal-path cleanup adapter for temp's callback and sync build-tool APIs",
+  "main": "index.cjs",
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

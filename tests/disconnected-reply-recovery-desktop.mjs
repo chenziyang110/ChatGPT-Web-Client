@@ -31,6 +31,10 @@ function fixtureDocument() {
     save();
   }
   function emptyReconnectShell() {
+    // The composer can mount while Chromium is still finishing this document.
+    // Keep a subresource pending briefly so that gap is exercised consistently.
+    const resource = document.createElement('img'); resource.hidden = true;
+    resource.src = '/fixture-reconnect-shell-resource'; main.append(resource);
     turns.replaceChildren(); turns.dataset.fixtureEmptyShell = 'true';
     controls.querySelectorAll('button').forEach(button => button.remove());
     const send = document.createElement('button'); send.type = 'button';
@@ -208,8 +212,12 @@ app.on('browser-window-created', (_, win) => {
   win.webContents.setBackgroundThrottling(false); win.setSkipTaskbar(true);
   if (process.platform === 'win32') win.setPosition(-20000, -20000);
 });
-app.on('session-created', isolated => isolated.protocol.handle('https', request => {
+app.on('session-created', isolated => isolated.protocol.handle('https', async request => {
   globalThis.fixtureRequests.push(request.url);
+  if (new URL(request.url).pathname === '/fixture-reconnect-shell-resource') {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    return new Response('', { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' } });
+  }
   return new Response(${JSON.stringify(fixture)}, { headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' } });
 }));
 require(${JSON.stringify(mainEntry)});`);
@@ -352,7 +360,11 @@ async function retryFailedOutputReconnect(account, shellMs = 0) {
   if (shellMs) {
     await until(async () => {
       if (await requests(current.url) !== 2) return false;
-      try { return (await state(account, current.url))?.reconnectShell; }
+      try {
+        const native = await contents(account, current.url);
+        if (native.loading || native.waitingResponse) return false;
+        return (await state(account, current.url))?.reconnectShell;
+      }
       catch (error) {
         if (/Fixture page missing|Execution context was destroyed|frame was disposed|Render frame was disposed|Object has been destroyed/i.test(String(error))) return false;
         throw error;
@@ -640,6 +652,10 @@ try {
     await sameDocumentNavigationEndsOutputRecovery();
     passed = true;
     console.log('Disconnected SPA navigation passed: a draft holds confirmed output recovery, then a committed same-document destination clears its state without replacing or refreshing the native page.');
+  } else if (process.argv.includes('--empty-shell-only')) {
+    await retryFailedOutputReconnect(account, 4500);
+    passed = true;
+    console.log('Disconnected empty shell passed: the native document settles before strict composer-only readiness checks, then its delayed load error recovers the original live output.');
   } else if (process.argv.includes('--live-only')) {
     for (const mode of ['legacy', 'modern']) await manualOnlyRecovery(account, mode);
     for (const kind of ['takeover', 'uncertain', 'paused']) await stoppedQueueRecovery(account, kind);

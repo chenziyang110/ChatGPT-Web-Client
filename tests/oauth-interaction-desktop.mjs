@@ -14,12 +14,13 @@ const chatPage = `<!doctype html><html><head><meta charset="utf-8"><title>ChatGP
 <div id="messages"></div></main><script>
 const historyKey = () => 'oauth-history:' + location.pathname;
 let messages = JSON.parse(localStorage.getItem(historyKey()) || '[]');
-function render(){ const box=document.querySelector('#messages'); box.replaceChildren(); for(const message of messages){ const article=document.createElement('article'); const div=document.createElement('div'); div.dataset.messageAuthorRole=message.role; div.dataset.messageId=message.id; div.textContent=message.text; article.append(div); if(message.role==='assistant'&&message.finished){ const copy=document.createElement('button'); copy.dataset.testid='copy-turn-action-button'; copy.textContent='Copy'; article.append(copy); } box.append(article); } localStorage.setItem(historyKey(), JSON.stringify(messages)); }
+function render(){ const box=document.querySelector('#messages'); box.replaceChildren(); for(const message of messages){ const article=document.createElement('article'); const div=document.createElement('div'); div.dataset.messageAuthorRole=message.role; div.dataset.messageId=message.id; div.textContent=message.text; article.append(div); if(message.role==='assistant'&&message.finished){ const copy=document.createElement('button'); copy.dataset.testid='copy-turn-action-button'; copy.textContent='Copy'; article.append(copy); } box.append(article); } localStorage.setItem(historyKey(), JSON.stringify(messages)); const busy=messages.at(-1)?.role==='assistant'&&!messages.at(-1).finished; let stop=document.querySelector('[data-testid="stop-button"]'); if(busy&&!stop){stop=document.createElement('button');stop.dataset.testid='stop-button';stop.textContent='Stop';document.querySelector('main').append(stop);} if(!busy)stop?.remove(); }
+window.fixtureFinish=()=>{if(messages.at(-1)?.role==='assistant')messages.at(-1).finished=true;render();};
 render();
 document.querySelector('#google-login').addEventListener('click', () => { location.href = 'https://auth.openai.com/login?connection=google&return_to=' + encodeURIComponent('https://chatgpt.com/'); });
 document.querySelector('#popup-login').addEventListener('click', () => { window.open('https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=' + encodeURIComponent('https://auth.openai.com/callback') + '&state=popup', 'oauth-popup'); });
 document.querySelector('#external-link').addEventListener('click', () => { location.href = 'https://evil.example/phish'; });
-document.querySelector('[data-testid="send-button"]').addEventListener('click', () => { const composer=document.querySelector('#prompt-textarea'); const value=composer.value; window.fixtureSendCount=(window.fixtureSendCount||0)+1; composer.value=''; messages.push({role:'user',id:crypto.randomUUID(),text:value}); messages.push({role:'assistant',id:crypto.randomUUID(),text:'Fixture reply: '+value,finished:false}); const stop=document.createElement('button'); stop.dataset.testid='stop-button'; stop.textContent='Stop'; document.querySelector('main').append(stop); render(); window.fixtureFinish=()=>{messages.at(-1).finished=true; stop.remove(); render();}; if(!value.startsWith('HOLD:')) setTimeout(()=>window.fixtureFinish(),100); });
+document.querySelector('[data-testid="send-button"]').addEventListener('click', () => { const composer=document.querySelector('#prompt-textarea'); const value=composer.value; window.fixtureSendCount=(window.fixtureSendCount||0)+1; composer.value=''; messages.push({role:'user',id:crypto.randomUUID(),text:value}); messages.push({role:'assistant',id:crypto.randomUUID(),text:'Fixture reply: '+value,finished:false}); render(); if(!value.startsWith('HOLD:')) setTimeout(()=>window.fixtureFinish(),100); });
 </script></body></html>`;
 
 const authPage = `<!doctype html><html><head><meta charset="utf-8"><title>OpenAI Auth fixture</title></head><body><main>
@@ -267,6 +268,7 @@ try {
   await waitSelectedPageReady(first, lockedReadyPage?.id, 'https://chatgpt.com/c/locked-queue', '#prompt-textarea', 'Locked queue target did not finish its original document load');
   const lockedTask = await rpc('tasks.create', { accountId: first.id, current: true, input: { type: 'prompt', prompt: 'HOLD:keep queue locked', submit: true }, background: true });
   await until(async () => !!(await rpc('tasks.get', { id: lockedTask.id })).submittedAt, 'Locked queue task did not submit');
+  const lockedReceipt = await rpc('tasks.get', { id: lockedTask.id });
   const lockedPage = (await rpc('workspace.status')).pages.find(page => page.accountId === first.id && page.url === 'https://chatgpt.com/c/locked-queue');
   assert.ok(lockedPage?.locked, 'Queue task locks only its target conversation page');
 
@@ -362,10 +364,34 @@ try {
   await clickSelector(first, lockedAuthContents.id, '#continue-google');
   const lockedGoogleContents = await waitSelectedPageReady(first, lockedPage.id, /^https:\/\/accounts\.google\.com\//, '#account-choice', 'Locked auth page could not load ready Google account selection');
   await clickSelector(first, lockedGoogleContents.id, '#account-choice');
-  const lockedChatContents = await waitSelectedPageReady(first, lockedPage.id, /^https:\/\/chatgpt\.com\//, '#prompt-textarea', 'Locked page OAuth did not return to a ready ChatGPT document in its original tab');
-  const lockedAfterOAuth = (await rpc('workspace.status')).pages.find(page => page.id === lockedPage.id);
-  assert.ok(lockedAfterOAuth?.locked, 'Locked task remains attached after manual OAuth returns to ChatGPT');
-  assert.equal((await rpc('tasks.get', { id: lockedTask.id })).status, 'running', 'Manual OAuth interaction must preserve the running task');
+  await waitSelectedPageReady(first, lockedPage.id, /^https:\/\/chatgpt\.com\//, '#prompt-textarea', 'Locked page OAuth did not return to a ready ChatGPT document in its original tab');
+  // The OAuth callback lands on home. A sampled change of destination puts the
+  // acknowledged task into retry backoff, during which its lock is released.
+  // Exercise that path deliberately instead of requiring the login to finish
+  // between two observer polls. Restoration must keep the original receipt.
+  await until(async () => {
+    const current = await rpc('tasks.get', { id: lockedTask.id });
+    return ['pending', 'running'].includes(current.status) && !!current.retryCount;
+  }, 'OAuth landing on home must retain the acknowledged task for automatic retry');
+  let lockedChatContents;
+  await until(async () => {
+    const current = await rpc('tasks.get', { id: lockedTask.id });
+    assert.ok(['pending', 'running'].includes(current.status), current.error ?? current.status);
+    const state = await rpc('workspace.status');
+    const page = state.pages.find(page => page.accountId === first.id && page.conversationId === lockedReceipt.conversationId && page.taskId === lockedTask.id);
+    if (current.status !== 'running' || !page?.locked || page.url !== lockedReceipt.sendReceipt.url) return false;
+    const contents = (await accountWebContents(first)).find(contents => contents.url === lockedReceipt.sendReceipt.url);
+    if (!contents || !await selectorReady(first, contents.id, '[data-testid="stop-button"]')) return false;
+    lockedChatContents = contents;
+    return true;
+  }, 'Original queue task must automatically reattach to its conversation after OAuth');
+  const lockedAfterOAuth = await rpc('tasks.get', { id: lockedTask.id });
+  for (const field of ['conversationId', 'sendIntentAt', 'submittedAt', 'submittedMessageId', 'sendReceipt']) {
+    assert.deepEqual(lockedAfterOAuth[field], lockedReceipt[field], `OAuth recovery preserves ${field}`);
+  }
+  assert.deepEqual(await scriptIn(first, lockedChatContents.id,
+    "messages.filter(message=>message.role==='user').map(message=>({id:message.id,text:message.text}))"),
+  [{ id: lockedReceipt.submittedMessageId, text: 'HOLD:keep queue locked' }], 'OAuth recovery must not resend the acknowledged prompt');
 
   const { page: popupPage, contents: popupContents } = await openNewConversationContents(first, 'Popup tab');
   await waitSelector(first, popupContents.id, '#popup-login', 'Popup login button did not become ready');
@@ -420,7 +446,7 @@ try {
   }, { partition: first.partition, id: lockedChatContents.id });
   passed = true;
   console.log(JSON.stringify({ pendingNavigationEvents: await desktop.evaluate(() => globalThis.pendingNavigationEvents) }));
-  console.log('OAuth interaction passed: queued sibling pages stay locked, independent and locked OAuth pages accept mouse account selection, popup login remains visible, callback POST returns, external hosts are denied, and account partitions remain isolated.');
+  console.log('OAuth interaction passed: queued sibling pages stay locked, manual OAuth permits account selection, a sampled home callback resumes the original queue task and receipt without resending, popup login remains visible, callback POST returns, external hosts are denied, and account partitions remain isolated.');
 } catch (error) {
   const diagnostic = await desktop?.evaluate(({ BrowserWindow, session, webContents }, partition) => {
     const isolated = partition ? session.fromPartition(partition) : null;

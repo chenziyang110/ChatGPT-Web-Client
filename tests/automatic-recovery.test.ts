@@ -138,6 +138,59 @@ for (const receipt of [false, true]) {
   });
 }
 
+test('a retry deadline crossing during dispatch retains its wakeup and advances the original receipt once', async context => {
+  context.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 100000 });
+  const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
+  let sends = 0;
+  let observations = 0;
+  const completed: string[] = [];
+  const { gateway } = fixture(context, async (accountId, input, signal, execution) => {
+    if (input.type !== 'prompt') return;
+    if (input.prompt === 'sibling') {
+      execution.releaseExecution!();
+      await hold(accountId, input, signal, execution);
+      return;
+    }
+    if (input.prompt === 'retry') {
+      if (!execution.task().sendIntentAt) {
+        sends += 1;
+        execution.intent({ url: 'https://chatgpt.com/c/one', users: [] });
+        execution.submitted('original-user');
+        throw new Error('PAGE_REPLACED: original page was replaced; retry the same task');
+      }
+      observations += 1;
+      assert.equal(execution.task().submittedMessageId, 'original-user');
+    }
+    completed.push(input.prompt);
+  });
+  const retry = gateway.createTask('a', prompt('retry'), { conversationId: 'one', background: true });
+  const next = gateway.createTask('a', prompt('next'), { conversationId: 'one', background: true });
+  gateway.createTask('a', prompt('sibling'), { conversationId: 'two', background: true });
+  await flush();
+  const receipt = gateway.get(retry.id);
+  assert.equal(receipt.retryCount, 1);
+  assert.equal(receipt.status, 'pending');
+  assert.equal(gateway.get(next.id).status, 'pending');
+
+  const due = receipt.nextAttemptAt!;
+  let clockReads = 0;
+  const crossingClock = context.mock.method(Date, 'now', () => ++clockReads === 1 ? due - 1 : due);
+  context.mock.timers.tick(due - 100000);
+  await flush();
+  crossingClock.mock.restore();
+  context.mock.timers.tick(1);
+  await flush();
+
+  assert.equal(gateway.get(next.id).status, 'done', 'the due retry must wake without another queue finishing');
+  assert.equal(gateway.get(retry.id).status, 'done');
+  assert.equal(gateway.get(retry.id).submittedAt, receipt.submittedAt);
+  assert.equal(gateway.get(retry.id).submittedMessageId, receipt.submittedMessageId);
+  assert.equal(gateway.isRunning('a', 'two'), true, 'an unrelated held reply stays running');
+  assert.equal(sends, 1, 'receipt recovery must not replay the submitted prompt');
+  assert.equal(observations, 1);
+  assert.deepEqual(completed, ['retry', 'next']);
+});
+
 test('automatic recovery excludes browser operations and unsubmitted drafts regardless of background mode', context => {
   const { gateway } = fixture(context, hold, 0);
   const options = { conversationId: 'one', background: true };

@@ -443,9 +443,13 @@ try {
   await viewportDiagnostic('before-large-resize');
   const largeSize = await desktop.evaluate(({ BrowserWindow, screen }) => {
     const area = screen.getPrimaryDisplay().workArea;
-    const size = { width: Math.max(900, Math.min(1920, area.width)), height: Math.max(640, Math.min(1080, area.height)) };
-    BrowserWindow.getAllWindows()[0].setSize(size.width, size.height);
-    return size;
+    const requested = { width: Math.max(900, Math.min(1920, area.width)), height: Math.max(640, Math.min(1080, area.height)) };
+    const window = BrowserWindow.getAllWindows()[0];
+    window.setSize(requested.width, requested.height);
+    // The window manager may clamp a work-area-sized request (Openbox accepts
+    // 1919x1079 on a 1920x1080 display). Layout must match the native content.
+    const [width, height] = window.getContentSize();
+    return { width, height, requested };
   });
   await viewportDiagnostic('after-large-resize', largeSize);
   await page.waitForFunction(size => innerWidth === size.width && innerHeight === size.height, largeSize);

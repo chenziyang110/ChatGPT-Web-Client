@@ -111,6 +111,7 @@ Success is `{ok:true,result:...}`. Errors use `{ok:false,error:"..."}` and non-2
 | `conversations.forPage` | `{accountId,pageId}` | Pin the exact live page and detected Chat/Work/Dot surface, including an empty Chat/Work home |
 | `conversations.open` | `{accountId,conversation}` | Select the target's existing page or open a separate page |
 | `tasks.create` | `{accountId,input,conversation?,url?,current?,new?,alias?,idempotencyKey?,replyTimeoutMs?,idleTimeoutMs?,background?}` | Pinned queued task; choose at most one target selector; timeout values are integer milliseconds, 1000–3600000 |
+| `tasks.repeat` | `{accountId,conversation,prompt,count,idempotencyKey,replyTimeoutMs?,idleTimeoutMs?}` | Dot only: atomically append `count` independent background sends of the same prompt; returns `AgentTask[]`. Requires an existing Dot target, a positive integer count (1–1000 per request), and a saved request key |
 | `tasks.list/get/cancel/clear` | `{}`, `{id}`, `{id}`, `{}` | History, detail, cancellation, or clear resolved history |
 | `tasks.edit` | `{accountId,conversation,id,expectedUpdatedAt,prompt}` | Edit a pending prompt; maximum 32000 characters |
 | `tasks.removeQueued` | `{accountId,conversation,id,expectedUpdatedAt}` | Cancel a still-pending item; stale controls cannot cancel a running task |
@@ -141,6 +142,10 @@ Low-level click means the click ran; it does not promise a ChatGPT reply. Use su
 Editing, removal and reordering require the latest `updatedAt` from task reads. Full reordering must provide every pending item exactly once; `queues.move` accepts just two adjacent items. Both leave started tasks untouched. A changed version, started item or stale pending set returns 409 `QUEUE_CHANGED`; reread before offering another change. Editing preserves the original creation key and request hash: retrying the original creation returns the edited existing task instead of sending a duplicate. All these methods also work through `node dist-electron/cli.cjs rpc METHOD JSON`.
 
 ### Timed Dot queues
+
+The Dot composer supports **×1**, **×5**, **×10** and a custom send count. Repetition appends separate tasks to the selected account and conversation. Each item retains ordinary edit/remove controls and the queue's current timing policy. The 1000-item bound applies to one batch, not the total queue length.
+
+`tasks.repeat` commits the whole batch and its request key together. Retrying identical parameters with the same key returns the original tasks; different text, count, target or timeout values return `IDEMPOTENCY_CONFLICT`. If a member's history was cleared, the original key cannot recreate it. Save the key before sending the request, and use a new key for an intentional new batch. The generic CLI `rpc` command exposes the same method.
 
 The Dot queue panel offers 10, 20, 30 minutes or a custom integer number of minutes (1–1440). Save the setting explicitly. The first queued background message waits one interval; each later message waits from the previous confirmed submission, regardless of Dot's background work or immediate acknowledgement. This setting does not change foreground Agent prompts, Chat or Work queues. Timed task results carry `submittedOnly:true` and `responseUnavailable:true`: delivery is confirmed, remote work completion is not.
 

@@ -198,6 +198,16 @@ export class Workspace {
         if (params.mode === 'interval' && params.intervalMs === undefined) throw new AppError('请选择发送间隔');
         result = this.tasks.configureTiming(account.id, conversation.id, params.mode === 'interval' ? params.intervalMs : undefined); break;
       }
+      case 'tasks.repeat': {
+        const account = this.accounts.resolve(params.accountId);
+        const conversation = this.conversations.get(account.id, params.conversation);
+        if (params.url !== undefined || params.new !== undefined || params.current !== undefined) throw new AppError('批量发送必须指定一个 Dot 会话');
+        result = this.tasks.createRepeatedTasks(account.id, params.prompt, params.count, {
+          conversationId: conversation.id, idempotencyKey: text(params.idempotencyKey, 'Idempotency key', 120),
+          replyTimeoutMs: params.replyTimeoutMs as number | undefined, idleTimeoutMs: params.idleTimeoutMs as number | undefined
+        });
+        break;
+      }
       case 'tasks.create': {
         const accountId = this.accounts.resolve(params.accountId).id;
         const input = parseTask(params.input);

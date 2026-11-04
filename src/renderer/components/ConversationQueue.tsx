@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import type { Account, AgentTask, BrowserDiagnostics, BrowserPage, Conversation, WorkspaceBridge, WorkspaceState } from '../../shared/types';
-import { isQueueTask, LONG_REPLY_TIMEOUT_MS, orderedTasks } from '../../shared/conversationQueue';
+import { isQueueTask, LONG_REPLY_TIMEOUT_MS, MAX_QUEUE_REPEAT_COUNT, orderedTasks } from '../../shared/conversationQueue';
 import { Icon } from './Icon';
 import { phaseLabels } from './TaskCenter';
 import { friendlyError } from '../errors';
@@ -11,9 +11,10 @@ export function queueText(task: AgentTask): string {
   return task.input.type === 'prompt' ? task.input.prompt : task.input.type === 'fill' ? task.input.text : task.input.type === 'navigate' ? '打开会话页面' : task.input.type === 'snapshot' ? '读取页面' : '网页操作';
 }
 
-export function ConversationQueue({ account, page, state, bridge, drafts, changeDraft, clearDraft, refresh, close, inspect, takeover }: {
+export function ConversationQueue({ account, page, state, bridge, drafts, changeDraft, clearDraft, repeatCounts, changeRepeatCount, refresh, close, inspect, takeover }: {
   account: Account; page: BrowserPage; state: WorkspaceState; bridge: WorkspaceBridge; drafts: Record<string, string>;
   changeDraft: (key: string, text: string) => void; clearDraft: (key: string, text: string) => void; refresh: () => Promise<void>; close: () => void;
+  repeatCounts: Record<string, string>; changeRepeatCount: (key: string, value: string) => void;
   inspect: (task: AgentTask) => void; takeover: (accountId: string, conversationId?: string) => void;
 }) {
   const [target, setTarget] = useState<Conversation>();
@@ -69,6 +70,10 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
   useEffect(() => { if (conversation) editor.current?.focus(); }, [conversation?.id]);
   const draftKey = `${account.id}:${conversation?.id}`;
   const draft = conversation ? drafts[draftKey] ?? '' : '';
+  const isDot = conversation?.surface === 'dot';
+  const repeatValue = repeatCounts[draftKey] ?? '1';
+  const repeatCount = Number(repeatValue);
+  const validRepeat = Number.isSafeInteger(repeatCount) && repeatCount >= 1 && repeatCount <= MAX_QUEUE_REPEAT_COUNT;
   const tasks = orderedTasks(state.tasks.filter(task => !!conversation && task.accountId === account.id && task.conversationId === conversation.id && isQueueTask(task)));
   const running = tasks.find(task => task.status === 'running');
   const waiting = tasks.filter(task => task.status === 'pending');
@@ -119,7 +124,7 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
     if (pendingAction.current) return;
     pendingAction.current = true; setBusy(true); setError(''); setMenuId(undefined);
     try {
-      if (method === 'tasks.create') {
+      if (method === 'tasks.create' || method === 'tasks.repeat') {
         // Chat and Work share the home URL. Revalidate the mode at Enter/click,
         // including the short gap before the next diagnostic sample arrives.
         const current = await bridge.call<Conversation>('conversations.forPage', { accountId: account.id, pageId: page.id });
@@ -134,13 +139,15 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
     finally { pendingAction.current = false; setBusy(false); }
   }
   function enqueue() {
-    if (pendingAction.current || !conversation || !draft.trim()) return;
+    if (pendingAction.current || !conversation || !draft.trim() || (isDot && !validRepeat)) return;
     const prompt = draft;
-    const params = { accountId: account.id, conversation: conversation.id, input: { type: 'prompt', prompt, submit: true },
-      replyTimeoutMs: LONG_REPLY_TIMEOUT_MS, idleTimeoutMs: LONG_REPLY_TIMEOUT_MS, background: true };
-    const signature = JSON.stringify(params);
+    const method = isDot ? 'tasks.repeat' : 'tasks.create';
+    const params = { accountId: account.id, conversation: conversation.id,
+      ...(isDot ? { prompt, count: repeatCount } : { input: { type: 'prompt', prompt, submit: true }, background: true }),
+      replyTimeoutMs: LONG_REPLY_TIMEOUT_MS, idleTimeoutMs: LONG_REPLY_TIMEOUT_MS };
+    const signature = JSON.stringify({ method, params });
     if (request.current?.signature !== signature) request.current = { signature, key: crypto.randomUUID() };
-    void run('tasks.create', { ...params, idempotencyKey: request.current.key }, () => { clearDraft(draftKey, prompt); request.current = undefined; editor.current?.focus(); });
+    void run(method, { ...params, idempotencyKey: request.current.key }, () => { clearDraft(draftKey, prompt); request.current = undefined; editor.current?.focus(); });
   }
   function reorder(index: number, direction: number) {
     if (!conversation) return;
@@ -224,7 +231,14 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
           event.preventDefault(); if (!event.repeat) enqueue();
         }
       }} />
-      <div className="cq-compose-footer"><span id="queue-keyboard-help" title={paused ? '恢复后依次发送' : timedDot ? '按设置的时间间隔发送' : ready ? '空闲时直接发送' : '回复结束后自动发送'}>Enter 发送 · Shift+Enter 换行</span><button className="primary" title="Enter 或 Ctrl / ⌘ + Enter" disabled={busy || !conversation || !draft.trim()}>{busy ? '处理中…' : ready ? '加入并发送' : '加入队列'}</button></div>
+      {isDot && <>
+        <div className="cq-repeat">
+          <label htmlFor="queue-repeat-count">发送次数 <span aria-hidden="true">×</span><input id="queue-repeat-count" type="number" aria-label="发送次数" aria-describedby="queue-repeat-help" min={1} max={MAX_QUEUE_REPEAT_COUNT} step={1} value={repeatValue} disabled={busy} onChange={event => changeRepeatCount(draftKey, event.target.value)} /></label>
+          <div className="cq-repeat-presets" role="group" aria-label="快捷发送次数">{[1, 5, 10].map(value => <button key={value} type="button" aria-pressed={validRepeat && repeatCount === value} disabled={busy} onClick={() => changeRepeatCount(draftKey, String(value))}>×{value}</button>)}</div>
+        </div>
+        <p id="queue-repeat-help" className="cq-repeat-help" role={validRepeat ? undefined : 'alert'}>{validRepeat ? `一次加入 ${repeatCount} 条相同消息，按当前发送方式依次发送。` : `请输入 1 至 ${MAX_QUEUE_REPEAT_COUNT} 的整数次数。`}</p>
+      </>}
+      <div className="cq-compose-footer"><span id="queue-keyboard-help" title={paused ? '恢复后依次发送' : timedDot ? '按设置的时间间隔发送' : ready ? '空闲时直接发送' : '回复结束后自动发送'}>Enter 发送 · Shift+Enter 换行</span><button className="primary" title="Enter 或 Ctrl / ⌘ + Enter" disabled={busy || !conversation || !draft.trim() || (isDot && !validRepeat)}>{busy ? '处理中…' : isDot && validRepeat && repeatCount > 1 ? `加入队列 ×${repeatCount}` : ready ? '加入并发送' : '加入队列'}</button></div>
     </form>
   </aside>;
 }

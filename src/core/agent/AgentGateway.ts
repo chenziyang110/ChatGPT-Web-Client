@@ -3,7 +3,7 @@ import { Database } from '../storage/Database';
 import { AppError, chatUrl, record, text } from '../validation';
 import { taskAttention } from './TaskAttention';
 import { canClearTask } from '../../shared/taskHistory';
-import { isQueueTask, orderedTasks, taskOrder } from '../../shared/conversationQueue';
+import { isQueueTask, MAX_QUEUE_REPEAT_COUNT, orderedTasks, taskOrder } from '../../shared/conversationQueue';
 import type { AccountQueue, AgentTask, Conversation, TaskInput, TaskPhase } from '../../shared/types';
 export type { AgentTask } from '../../shared/types';
 const queueKey = (accountId: string, conversationId?: string) => conversationId ? `${accountId}:conversation:${conversationId}` : accountId;
@@ -31,7 +31,7 @@ export interface TaskOptions {
   conversationId?: string; targetUrl?: string; idempotencyKey?: string; requestHash?: string;
   replyTimeoutMs?: number; prepareTimeoutMs?: number; idleTimeoutMs?: number; background?: boolean;
 }
-interface RequestRecord { accountId: string; hash: string; taskId: string; task?: AgentTask }
+interface RequestRecord { accountId: string; hash: string; taskId: string; taskIds?: string[]; task?: AgentTask }
 export const requestHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export function parseTask(value: unknown): TaskInput {
   const input = record(value);
@@ -330,7 +330,7 @@ export class AgentGateway {
     text(key, 'Idempotency key', 120);
     const existing = this.db.read<RequestRecord>('request_keys', `${accountId}:${key}`);
     if (!existing) return;
-    if (existing.hash !== hash) throw new AppError('IDEMPOTENCY_CONFLICT: key was already used for different input', 409);
+    if (existing.hash !== hash || existing.taskIds) throw new AppError('IDEMPOTENCY_CONFLICT: key was already used for different input', 409);
     const task = this.db.read<AgentTask>('tasks', existing.taskId);
     if (!task) throw new AppError(`REQUEST_ALREADY_HANDLED: task ${existing.taskId} history was cleared; it will not be submitted again`, 409);
     return task;
@@ -341,23 +341,56 @@ export class AgentGateway {
     const hash = options.requestHash ?? requestHash({ input, ...options, idempotencyKey: undefined });
     const duplicate = this.findRequest(accountId, options.idempotencyKey, hash);
     if (duplicate) return duplicate;
+    return this.createTasks(accountId, input, { ...options, requestHash: hash }, 1)[0];
+  }
+  createRepeatedTasks(accountId: string, prompt: unknown, count: unknown,
+    options: Pick<TaskOptions, 'conversationId' | 'idempotencyKey' | 'replyTimeoutMs' | 'idleTimeoutMs'>): AgentTask[] {
+    if (this.stopped) throw new AppError('Runtime is stopping', 503);
+    if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 1 || count > MAX_QUEUE_REPEAT_COUNT)
+      throw new AppError(`单次发送次数必须是 1 至 ${MAX_QUEUE_REPEAT_COUNT} 的整数`);
+    const key = text(options.idempotencyKey, 'Idempotency key', 120);
+    const conversation = options.conversationId ? this.db.read<Conversation>('conversations', options.conversationId) : undefined;
+    if (!conversation || conversation.accountId !== accountId || conversation.surface !== 'dot') throw new AppError('请选择当前账号的 Dot 会话');
+    const input = parseTask({ type: 'prompt', prompt, submit: true });
+    const normalized = { conversationId: conversation.id, targetUrl: conversation.url, background: true,
+      replyTimeoutMs: options.replyTimeoutMs, idleTimeoutMs: options.idleTimeoutMs };
+    const hash = requestHash({ method: 'tasks.repeat', input, count, ...normalized });
+    const existing = this.db.read<RequestRecord>('request_keys', `${accountId}:${key}`);
+    if (existing) {
+      if (existing.hash !== hash || !existing.taskIds) throw new AppError('IDEMPOTENCY_CONFLICT: key was already used for different input', 409);
+      return existing.taskIds.map(id => {
+        const task = this.db.read<AgentTask>('tasks', id);
+        if (!task) throw new AppError(`REQUEST_ALREADY_HANDLED: task ${id} history was cleared; it will not be submitted again`, 409);
+        return task;
+      });
+    }
+    return this.createTasks(accountId, input, { ...normalized, requestHash: hash }, count, key);
+  }
+  private createTasks(accountId: string, input: TaskInput, options: TaskOptions, count: number, batchKey?: string): AgentTask[] {
     const now = Date.now();
     const queue = options.conversationId ? this.db.read<AccountQueue>('account_queues', queueKey(accountId, options.conversationId)) : undefined;
     const conversation = options.conversationId ? this.db.read<Conversation>('conversations', options.conversationId) : undefined;
     const interval = queue?.timing && conversation?.accountId === accountId && conversation.surface === 'dot' &&
       options.background === true && input.type === 'prompt' && input.submit;
-    const task: AgentTask = { id: randomUUID(), accountId, input, ...options, requestHash: hash, status: 'pending', phase: 'queued',
-      sendMode: interval ? 'dot_interval' : undefined,
+    const common = { accountId, input, ...options, status: 'pending' as const, phase: 'queued' as const,
       replyTimeoutMs: duration(options.replyTimeoutMs, 600000), prepareTimeoutMs: duration(options.prepareTimeoutMs, 60000), idleTimeoutMs: duration(options.idleTimeoutMs, 600000),
       createdAt: now, updatedAt: now };
+    const tasks: AgentTask[] = [];
     this.db.transaction(() => {
       if (interval && (queue.timing!.nextSendAt === undefined || !this.listTasks().some(other => other.accountId === accountId &&
         other.conversationId === options.conversationId && isQueueTask(other) && advancesAfterInterruption(other))))
         this.db.write('account_queues', queueKey(accountId, options.conversationId), { ...queue, timing: { ...queue.timing!, nextSendAt: now + queue.timing!.intervalMs } });
-      task.seq = (this.db.get<number>('taskSequence') ?? 0) + 1;
-      task.queueOrder = task.seq;
-      this.db.set('taskSequence', task.seq);
-      this.persist(task);
+      const sequence = this.db.get<number>('taskSequence') ?? 0;
+      if (!Number.isSafeInteger(sequence + count)) throw new AppError('任务序号已超出可保存范围');
+      for (let index = 0; index < count; index++) {
+        const task: AgentTask = { ...common, sendMode: interval ? 'dot_interval' : undefined,
+          id: randomUUID(), seq: sequence + index + 1, queueOrder: sequence + index + 1 };
+        this.persist(task); tasks.push(task);
+      }
+      this.db.set('taskSequence', sequence + count);
+      if (batchKey) this.db.write('request_keys', `${accountId}:${batchKey}`, {
+        accountId, hash: options.requestHash!, taskId: tasks[0].id, taskIds: tasks.map(task => task.id)
+      } satisfies RequestRecord);
       const history = this.listTasks();
       let remaining = history.length;
       for (const old of [...history].reverse()) {
@@ -369,7 +402,7 @@ export class AgentGateway {
       }
     });
     this.changed(); this.schedule();
-    return task;
+    return tasks;
   }
   private persist(task: AgentTask): void {
     this.db.write('tasks', task.id, task);

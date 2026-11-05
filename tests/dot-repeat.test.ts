@@ -9,6 +9,7 @@ import { AccountManager } from '../src/core/account/AccountManager';
 import { ConversationManager } from '../src/core/conversation/ConversationManager';
 import { Workspace } from '../src/core/Workspace';
 import { MAX_QUEUE_REPEAT_COUNT, orderedTasks } from '../src/shared/conversationQueue';
+import { taskAttention } from '../src/core/agent/TaskAttention';
 import type { AccountQueue, AgentTask } from '../src/shared/types';
 
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
@@ -182,4 +183,79 @@ test('identical Dot messages retain FIFO intervals and a restart delivers only o
   assert.deepEqual((await f.repeat({ count: 3 })).map(task => task.id), tasks.map(task => task.id));
   assert.equal(sent.length, 3);
   assert.equal(new Set(tasks.map(task => f.gateway.get(task.id).submittedMessageId)).size, 3);
+});
+
+test('custom Dot groups repeat in input order and recover the same IDs after restart or a lost response', async t => {
+  const f = fixture(t);
+  const prompts = ['你好', '你好啊', '你很好啊', '第四条', '第五条'];
+  const params = { accountId: f.account.id, conversation: f.dot.id, prompts, repeatCount: 3, idempotencyKey: 'group-key' };
+  const [first, duplicate] = await Promise.all([f.call('tasks.repeatBatch', params), f.call('tasks.repeatBatch', params)]) as AgentTask[][];
+  assert.equal(first.length, 15);
+  assert.equal(new Set(first.map(task => task.id)).size, 15);
+  assert.deepEqual(orderedTasks(first).map(task => task.input.type === 'prompt' && task.input.prompt), Array.from({ length: 3 }, () => prompts).flat());
+  assert.deepEqual(duplicate.map(task => task.id), first.map(task => task.id));
+  for (const patch of [{ prompts: [...prompts].reverse() }, { repeatCount: 4 }, { conversation: f.sibling.id }])
+    await assert.rejects(f.call('tasks.repeatBatch', { ...params, ...patch }), /IDEMPOTENCY_CONFLICT/);
+  await f.restart();
+  assert.deepEqual((await f.call('tasks.repeatBatch', params) as AgentTask[]).map(task => task.id), first.map(task => task.id));
+  assert.equal(f.gateway.listTasks().length, 15);
+  assert.ok(first.every(task => task.conversationId === f.dot.id && task.accountId === f.account.id && task.background));
+});
+
+test('invalid groups and a failed batch write cannot append partial messages or consume sequence numbers', async t => {
+  const f = fixture(t);
+  const params = { accountId: f.account.id, conversation: f.dot.id, prompts: ['A', 'B'], repeatCount: 10, idempotencyKey: 'group-key' };
+  for (const patch of [{ prompts: [] }, { prompts: ['A'] }, { prompts: ['A', ''] }, { prompts: ['A', {}] },
+    { prompts: 'A\nB' }, { repeatCount: 0 }, { repeatCount: 1.5 }, { repeatCount: '10' }, { repeatCount: 501 },
+    { conversation: f.chat.id }, { accountId: f.other.id }, { idempotencyKey: '' }])
+    await assert.rejects(f.call('tasks.repeatBatch', { ...params, ...patch }));
+  assert.equal(f.gateway.listTasks().length, 0);
+  assert.equal(f.db.get('taskSequence'), undefined);
+  const write = f.db.write.bind(f.db); let writes = 0;
+  const mock = t.mock.method(f.db, 'write', (...args: Parameters<Database['write']>) => {
+    if (args[0] === 'tasks' && ++writes === 3) throw new Error('Injected batch disk failure');
+    return write(...args);
+  });
+  await assert.rejects(f.call('tasks.repeatBatch', params), /Injected batch disk failure/);
+  mock.mock.restore();
+  assert.equal(f.gateway.listTasks().length, 0);
+  assert.equal(f.db.records('request_keys').length, 0);
+  assert.equal(f.db.get('taskSequence'), undefined);
+  const tasks = await f.call('tasks.repeatBatch', params) as AgentTask[];
+  assert.equal(tasks.length, 20); assert.equal(tasks[0].seq, 1);
+});
+
+test('clearing one queue is atomic, preserves executing and review tasks, and does not replay cancelled groups', async t => {
+  const f = fixture(t);
+  const params = { accountId: f.account.id, conversation: f.dot.id, prompts: ['A', 'B', 'C'], repeatCount: 10, idempotencyKey: 'clear-group' };
+  const group = await f.call('tasks.repeatBatch', params) as AgentTask[];
+  f.db.write('tasks', group[0].id, { ...group[0], status: 'running' });
+  f.db.write('tasks', group[1].id, { ...group[1], sendIntentAt: Date.now() });
+  f.db.write('tasks', group[2].id, { ...group[2], status: 'waiting_user', attention: taskAttention('Review this task', false) });
+  const other = f.gateway.createTask(f.other.id, { type: 'snapshot' }, { conversationId: f.otherDot.id });
+  const sibling = f.gateway.createTask(f.account.id, { type: 'snapshot' }, { conversationId: f.sibling.id });
+  let notifications = 0;
+  const waiters = group.slice(3).map(task => f.gateway.wait(task.id, 10000).then(value => { notifications++; return value; }));
+  const write = f.db.write.bind(f.db); let writes = 0;
+  const mock = t.mock.method(f.db, 'write', (...args: Parameters<Database['write']>) => {
+    if (args[0] === 'tasks' && ++writes === 2) throw new Error('Injected clear disk failure');
+    return write(...args);
+  });
+  await assert.rejects(f.call('tasks.clearQueued', { accountId: f.account.id, conversation: f.dot.id }), /Injected clear disk failure/);
+  mock.mock.restore();
+  await flush();
+  assert.equal(notifications, 0, 'A rolled-back clear must not report cancellation to task waiters');
+  assert.equal(f.gateway.get(group[3].id).status, 'pending');
+  await assert.rejects(f.call('tasks.clearQueued', { accountId: f.other.id, conversation: f.dot.id }));
+  assert.deepEqual(await f.call('tasks.clearQueued', { accountId: f.account.id, conversation: f.dot.id }), { count: 27 });
+  assert.equal(f.gateway.get(group[0].id).status, 'running');
+  assert.equal(f.gateway.get(group[1].id).status, 'pending');
+  assert.equal(f.gateway.get(group[2].id).status, 'waiting_user');
+  assert.equal(f.gateway.get(other.id).status, 'pending'); assert.equal(f.gateway.get(sibling.id).status, 'pending');
+  assert.ok(group.slice(3).every(task => f.gateway.get(task.id).status === 'cancelled'));
+  assert.ok((await Promise.all(waiters)).every(task => task.status === 'cancelled'));
+  const replay = await f.call('tasks.repeatBatch', params) as AgentTask[];
+  assert.deepEqual(replay.map(task => task.id), group.map(task => task.id));
+  assert.ok(replay.slice(3).every(task => task.status === 'cancelled'));
+  assert.deepEqual(await f.call('tasks.clearQueued', { accountId: f.account.id, conversation: f.dot.id }), { count: 0 });
 });

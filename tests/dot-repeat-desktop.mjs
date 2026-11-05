@@ -148,6 +148,60 @@ try {
   await until(async () => await panel().locator('.cq-item').count() === 2, 'The other account must display only its own two queued items');
   assert.deepEqual(await read(other, otherDot.url, 'window.sent()'), []);
   assert.deepEqual(await read(account, dot.url, 'window.sent()'), [], 'Account and Dot switches must not execute a paused batch');
+
+  const group = await open(account, `${compoundPrefix}~group`, 'Custom ordered groups');
+  await rpc('queues.pause', { accountId: account.id, conversation: group.id });
+  await rpc('queues.timing', { accountId: account.id, conversation: group.id, mode: 'interval', intervalMs: 60000 });
+  await openPanel(group);
+  const multiline = () => panel().getByRole('checkbox', { name: '每行作为一条消息，整组重复', exact: true });
+  await multiline().check();
+  await panel().getByRole('button', { name: '×10', exact: true }).click();
+  await composer().fill(' 你好 \n\n你好啊\n你很好啊\n第四条 ');
+  await composer().press('Control+End');
+  await composer().press('Enter');
+  assert.equal((await fence(account, group)).filter(item => item.conversationId === group.id).length, 0, 'Enter adds a line in group mode instead of submitting');
+  await panel().getByRole('button', { name: '加入队列 40 条', exact: true }).waitFor();
+  assert.match(await panel().locator('#queue-repeat-help').innerText(), /4 条消息.*10 次.*40 条/);
+  await composer().press('Control+Enter');
+  await until(async () => await panel().locator('.cq-item').count() === 40);
+  const groupTasks = (await tasks()).filter(item => item.conversationId === group.id).sort((a, b) => a.seq - b.seq);
+  assert.deepEqual(groupTasks.map(item => item.input.prompt), Array.from({ length: 10 }, () => ['你好', '你好啊', '你很好啊', '第四条']).flat());
+  await rpc('conversations.open', { accountId: account.id, conversation: sibling.id });
+  await openPanel(sibling);
+  assert.equal(await multiline().isChecked(), false, 'Split mode belongs to its own conversation');
+  await rpc('conversations.open', { accountId: account.id, conversation: group.id });
+  await openPanel(group);
+  assert.equal(await multiline().isChecked(), true);
+  assert.equal(await repetition().inputValue(), '10');
+  const clear = () => panel().getByRole('button', { name: '清空当前会话待发送队列', exact: true });
+  await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1024, 600));
+  await until(async () => await panel().locator('.cq-list').evaluate(element => element.getBoundingClientRect().height >= 160));
+  assert.equal(await panel().evaluate(element => element.querySelector('.cq-list').getBoundingClientRect().bottom <= element.querySelector('.cq-composer').getBoundingClientRect().top + 1), true, 'The composer cannot overlap queue actions in compact windows');
+  assert.equal(await ui.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await clear().click();
+  await panel().getByRole('group', { name: '清空队列确认', exact: true }).getByRole('button', { name: '取消', exact: true }).press('Escape');
+  assert.equal(await panel().getByRole('group', { name: '清空队列确认', exact: true }).count(), 0);
+  assert.ok((await tasks()).filter(item => item.conversationId === group.id).every(item => item.status === 'pending'));
+  await clear().click();
+  await panel().getByRole('button', { name: '确认清空', exact: true }).click();
+  await until(async () => await panel().locator('.cq-item').count() === 0);
+  assert.ok((await tasks()).filter(item => item.conversationId === group.id).every(item => item.status === 'cancelled'));
+  assert.ok((await tasks()).filter(item => item.conversationId === dot.id || item.conversationId === sibling.id).every(item => item.status === 'pending'));
+  assert.equal(await clear().isDisabled(), true);
+  await repetition().fill('2');
+  await composer().fill('Group A\n\nGroup B');
+  await composer().press('Control+Enter');
+  await until(async () => await panel().locator('.cq-item').count() === 4);
+  const deliveredGroup = (await tasks()).filter(item => item.conversationId === group.id && item.status === 'pending').sort((a, b) => a.seq - b.seq);
+  for (const item of deliveredGroup) {
+    await advance(account, group, 61000);
+    await until(async () => (await task(item)).status === 'done');
+  }
+  assert.deepEqual(await read(account, group.url, 'window.sent()'), ['Group A', 'Group B', 'Group A', 'Group B'], 'Native Dot sends preserve whole-group repetition order');
+  await rpc('queues.pause', { accountId: account.id, conversation: group.id });
+  const groupReplayParams = { accountId: account.id, conversation: group.id, prompts: ['Persist A', 'Persist B'], repeatCount: 2, idempotencyKey: 'desktop-group-persisted-request' };
+  const groupReplayBatch = await rpc('tasks.repeatBatch', groupReplayParams);
+  console.log('Grouped queue UI passed: custom line count, blank lines, ×10 totals, Enter/Ctrl+Enter, per-conversation mode, clear confirmation/cancellation and four ordered native sends.');
   console.log('Dot repetition UI passed: ×10, custom count + Enter, invalid inputs, independent Dot counts, Chat exclusion and account isolation.');
 
   await rpc('conversations.open', { accountId: account.id, conversation: dot.id });
@@ -176,6 +230,7 @@ try {
   assert.equal((await task(orderedBatch[4])).sendIntentAt, undefined, 'Restart must not burst the remaining identical queue');
   assert.deepEqual((await tasks()).map(item => item.id).sort(), beforeRestartIds, 'Restart preserves exactly the original task set');
   assert.deepEqual((await rpc('tasks.repeat', replayParams)).map(item => item.id), replayBatch.map(item => item.id), 'Retrying a persisted batch request must return the same tasks after restart');
+  assert.deepEqual((await rpc('tasks.repeatBatch', groupReplayParams)).map(item => item.id), groupReplayBatch.map(item => item.id), 'Grouped requests must retain their original IDs after SQLite closes and reopens');
   assert.deepEqual((await tasks()).map(item => item.id).sort(), beforeRestartIds, 'A retry must not append another batch');
   await rpc('conversations.open', { accountId: account.id, conversation: dot.id });
   await until(async () => { try { return await read(account, dot.url, 'window.sent().length === 4'); } catch { return false; } });

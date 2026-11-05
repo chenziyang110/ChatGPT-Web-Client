@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import type { Account, AgentTask, BrowserDiagnostics, BrowserPage, Conversation, WorkspaceBridge, WorkspaceState } from '../../shared/types';
-import { isQueueTask, LONG_REPLY_TIMEOUT_MS, MAX_QUEUE_REPEAT_COUNT, orderedTasks } from '../../shared/conversationQueue';
+import { isQueueTask, LONG_REPLY_TIMEOUT_MS, MAX_QUEUE_BATCH_SIZE, MAX_QUEUE_REPEAT_COUNT, orderedTasks } from '../../shared/conversationQueue';
 import { Icon } from './Icon';
 import { phaseLabels } from './TaskCenter';
 import { friendlyError } from '../errors';
@@ -11,10 +11,11 @@ export function queueText(task: AgentTask): string {
   return task.input.type === 'prompt' ? task.input.prompt : task.input.type === 'fill' ? task.input.text : task.input.type === 'navigate' ? '打开会话页面' : task.input.type === 'snapshot' ? '读取页面' : '网页操作';
 }
 
-export function ConversationQueue({ account, page, state, bridge, drafts, changeDraft, clearDraft, repeatCounts, changeRepeatCount, refresh, close, inspect, takeover }: {
+export function ConversationQueue({ account, page, state, bridge, drafts, changeDraft, clearDraft, repeatCounts, changeRepeatCount, multiLineModes, changeMultiLineMode, refresh, close, inspect, takeover }: {
   account: Account; page: BrowserPage; state: WorkspaceState; bridge: WorkspaceBridge; drafts: Record<string, string>;
   changeDraft: (key: string, text: string) => void; clearDraft: (key: string, text: string) => void; refresh: () => Promise<void>; close: () => void;
   repeatCounts: Record<string, string>; changeRepeatCount: (key: string, value: string) => void;
+  multiLineModes: Record<string, boolean>; changeMultiLineMode: (key: string, value: boolean) => void;
   inspect: (task: AgentTask) => void; takeover: (accountId: string, conversationId?: string) => void;
 }) {
   const [target, setTarget] = useState<Conversation>();
@@ -25,6 +26,7 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
   const [diagnostic, setDiagnostic] = useState<BrowserDiagnostics>();
   const [editing, setEditing] = useState<{ id: string; version: number; text: string }>();
   const [menuId, setMenuId] = useState<string>();
+  const [confirmClear, setConfirmClear] = useState(false);
   const [timingMode, setTimingMode] = useState('completion');
   const [timingPreset, setTimingPreset] = useState('10');
   const [timingMinutes, setTimingMinutes] = useState('10');
@@ -68,15 +70,22 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
   const conversation = state.conversations.find(item => item.id === target?.id) ?? target;
   useEffect(() => { if (conversation) editor.current?.focus(); }, [conversation?.id]);
+  useEffect(() => { setConfirmClear(false); }, [account.id, conversation?.id]);
   const draftKey = `${account.id}:${conversation?.id}`;
   const draft = conversation ? drafts[draftKey] ?? '' : '';
   const isDot = conversation?.surface === 'dot';
   const repeatValue = repeatCounts[draftKey] ?? '1';
   const repeatCount = Number(repeatValue);
-  const validRepeat = Number.isSafeInteger(repeatCount) && repeatCount >= 1 && repeatCount <= MAX_QUEUE_REPEAT_COUNT;
+  const multiLineMode = isDot && (multiLineModes[draftKey] ?? false);
+  const batchPrompts = multiLineMode ? draft.split(/\r?\n/).map(prompt => prompt.trim()).filter(Boolean) : [draft.trim()];
+  const batchSize = batchPrompts.length * repeatCount;
+  const validRepeatCount = Number.isSafeInteger(repeatCount) && repeatCount >= 1 && repeatCount <= MAX_QUEUE_REPEAT_COUNT;
+  const validRepeat = validRepeatCount && (!multiLineMode || batchSize <= MAX_QUEUE_BATCH_SIZE);
   const tasks = orderedTasks(state.tasks.filter(task => !!conversation && task.accountId === account.id && task.conversationId === conversation.id && isQueueTask(task)));
   const running = tasks.find(task => task.status === 'running');
   const waiting = tasks.filter(task => task.status === 'pending');
+  const clearableWaiting = waiting.filter(task => !task.sendIntentAt && (!task.attention || !!task.resolvedAt));
+  useEffect(() => { if (!clearableWaiting.length) setConfirmClear(false); }, [clearableWaiting.length]);
   const attention = tasks.find(task => task.attention && !task.resolvedAt);
   const attentionCopy = attention && taskAttentionCopy(attention);
   const accountQueue = state.queues.find(queue => queue.accountId === account.id && !queue.conversationId);
@@ -124,7 +133,7 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
     if (pendingAction.current) return;
     pendingAction.current = true; setBusy(true); setError(''); setMenuId(undefined);
     try {
-      if (method === 'tasks.create' || method === 'tasks.repeat') {
+      if (method === 'tasks.create' || method === 'tasks.repeat' || method === 'tasks.repeatBatch') {
         // Chat and Work share the home URL. Revalidate the mode at Enter/click,
         // including the short gap before the next diagnostic sample arrives.
         const current = await bridge.call<Conversation>('conversations.forPage', { accountId: account.id, pageId: page.id });
@@ -140,14 +149,16 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
   }
   function enqueue() {
     if (pendingAction.current || !conversation || !draft.trim() || (isDot && !validRepeat)) return;
-    const prompt = draft;
-    const method = isDot ? 'tasks.repeat' : 'tasks.create';
+    const prompts = multiLineMode ? batchPrompts : [draft];
+    const prompt = prompts[0];
+    const method = isDot ? multiLineMode && prompts.length > 1 ? 'tasks.repeatBatch' : 'tasks.repeat' : 'tasks.create';
     const params = { accountId: account.id, conversation: conversation.id,
-      ...(isDot ? { prompt, count: repeatCount } : { input: { type: 'prompt', prompt, submit: true }, background: true }),
+      ...(method === 'tasks.repeatBatch' ? { prompts, repeatCount }
+        : isDot ? { prompt, count: repeatCount } : { input: { type: 'prompt', prompt, submit: true }, background: true }),
       replyTimeoutMs: LONG_REPLY_TIMEOUT_MS, idleTimeoutMs: LONG_REPLY_TIMEOUT_MS };
     const signature = JSON.stringify({ method, params });
     if (request.current?.signature !== signature) request.current = { signature, key: crypto.randomUUID() };
-    void run(method, { ...params, idempotencyKey: request.current.key }, () => { clearDraft(draftKey, prompt); request.current = undefined; editor.current?.focus(); });
+    void run(method, { ...params, idempotencyKey: request.current.key }, () => { clearDraft(draftKey, draft); request.current = undefined; editor.current?.focus(); });
   }
   function reorder(index: number, direction: number) {
     if (!conversation) return;
@@ -165,6 +176,10 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
     void run('queues.timing', { accountId: account.id, conversation: conversation.id, mode: timingMode,
       ...(timingMode === 'interval' ? { intervalMs: selectedMinutes * 60000 } : {}) });
   }
+  function clearQueued() {
+    if (!conversation || !clearableWaiting.length || pendingAction.current) return;
+    void run('tasks.clearQueued', { accountId: account.id, conversation: conversation.id }, () => setConfirmClear(false));
+  }
   return <aside className="conversation-queue" aria-label="会话队列" onKeyDown={event => {
     if (event.key !== 'Escape' || isComposing(event)) return;
     event.preventDefault(); event.stopPropagation();
@@ -173,9 +188,10 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
       event.currentTarget.querySelector<HTMLButtonElement>(`[data-task-id="${menuId}"] .cq-icon-button`)?.focus();
       setMenuId(undefined);
     } else if (editing) { setEditing(undefined); editor.current?.focus(); }
+    else if (confirmClear) setConfirmClear(false);
     else close();
   }}>
-    <header className="cq-header"><div><h2>待发送 <span>{count}</span></h2><p title={`${account.name} · ${conversation?.alias ?? page.title ?? '新会话'}`}>{account.name}{conversation?.surface === 'work' ? ' · 工作' : conversation?.surface === 'dot' ? ' · Your dot' : ''} · {conversation?.alias ?? page.title ?? '新会话'}</p></div>
+    <header className="cq-header"><div><div className="cq-heading-row"><h2>待发送 <span>{count}</span></h2><button className="text-button cq-clear-trigger" aria-label="清空当前会话待发送队列" title={clearableWaiting.length ? '移除当前会话所有未开始的队列项；正在执行、已发送或需人工处理的任务会保留' : '当前没有可清空的未开始队列项'} disabled={busy || !clearableWaiting.length} onClick={() => { setError(''); setConfirmClear(true); }}>清空队列</button></div><p title={`${account.name} · ${conversation?.alias ?? page.title ?? '新会话'}`}>{account.name}{conversation?.surface === 'work' ? ' · 工作' : conversation?.surface === 'dot' ? ' · Your dot' : ''} · {conversation?.alias ?? page.title ?? '新会话'}</p></div>
       <button className="cq-icon-button" aria-label="关闭队列面板" title="关闭面板，队列继续运行" onClick={close}><Icon name="close" size={18} /></button></header>
     <div className={`cq-status ${attention ? 'needs-attention' : ''}`}>
       <span className={`cq-status-dot ${generating ? 'is-generating' : ''}`} /><span role="status">{status}</span>
@@ -202,6 +218,7 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
         <button className="text-button" type="submit" disabled={busy || !timingChanged || (timingMode === 'interval' && !validInterval)}>保存</button></div>
     </form>}
     <div className="cq-list">
+      {confirmClear && <div className="cq-clear-confirm" role="group" aria-label="清空队列确认"><p>确定移除当前会话的 {clearableWaiting.length} 个未开始队列项吗？正在执行、已发送或需人工处理的任务会保留。</p><div><button className="text-button" disabled={busy} onClick={() => setConfirmClear(false)}>取消</button><button className="primary" disabled={busy || !clearableWaiting.length} onClick={clearQueued}>确认清空</button></div></div>}
       {attention && <div className="cq-attention"><strong>{attentionCopy?.title}</strong><button className="text-button" onClick={() => inspect(attention)}>处理</button></div>}
       {running && <details className="cq-running"><summary>{running.sendIntentAt ? '当前消息' : '等待发送'} · {queueText(running)}</summary><p>{queueText(running)}</p>
         <button className="text-button" onClick={() => takeover(account.id, conversation?.id)}>接管此会话</button></details>}
@@ -227,18 +244,22 @@ export function ConversationQueue({ account, page, state, bridge, drafts, change
     </div>
     <form className="cq-composer" onSubmit={event => { event.preventDefault(); enqueue(); }}>
       <textarea id="queue-draft" aria-label="下一条消息" aria-describedby="queue-keyboard-help" ref={editor} {...compositionEvents} placeholder="写下一条消息…" maxLength={32000} value={draft} disabled={!conversation} aria-busy={busy} onChange={event => changeDraft(draftKey, event.target.value)} onKeyDown={event => {
-        if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !isComposing(event)) {
+        if (event.key === 'Enter' && !event.shiftKey && !event.altKey && (!multiLineMode || event.ctrlKey || event.metaKey) && !isComposing(event)) {
           event.preventDefault(); if (!event.repeat) enqueue();
         }
       }} />
       {isDot && <>
         <div className="cq-repeat">
-          <label htmlFor="queue-repeat-count">发送次数 <span aria-hidden="true">×</span><input id="queue-repeat-count" type="number" aria-label="发送次数" aria-describedby="queue-repeat-help" min={1} max={MAX_QUEUE_REPEAT_COUNT} step={1} value={repeatValue} disabled={busy} onChange={event => changeRepeatCount(draftKey, event.target.value)} /></label>
+          <label htmlFor="queue-repeat-count">发送次数 <span aria-hidden="true">×</span><input id="queue-repeat-count" type="number" aria-label="发送次数" aria-describedby="queue-repeat-help" min={1} max={multiLineMode && batchPrompts.length ? Math.max(1, Math.floor(MAX_QUEUE_BATCH_SIZE / batchPrompts.length)) : MAX_QUEUE_REPEAT_COUNT} step={1} value={repeatValue} disabled={busy} onChange={event => changeRepeatCount(draftKey, event.target.value)} /></label>
           <div className="cq-repeat-presets" role="group" aria-label="快捷发送次数">{[1, 5, 10].map(value => <button key={value} type="button" aria-pressed={validRepeat && repeatCount === value} disabled={busy} onClick={() => changeRepeatCount(draftKey, String(value))}>×{value}</button>)}</div>
         </div>
-        <p id="queue-repeat-help" className="cq-repeat-help" role={validRepeat ? undefined : 'alert'}>{validRepeat ? `一次加入 ${repeatCount} 条相同消息，按当前发送方式依次发送。` : `请输入 1 至 ${MAX_QUEUE_REPEAT_COUNT} 的整数次数。`}</p>
+        <label className="cq-multiline-toggle"><input type="checkbox" checked={multiLineMode} disabled={busy} onChange={event => changeMultiLineMode(draftKey, event.target.checked)} />每行作为一条消息，整组重复</label>
+        <p id="queue-repeat-help" className="cq-repeat-help" role={validRepeat ? undefined : 'alert'}>{!validRepeatCount ? `发送次数请输入 1 至 ${MAX_QUEUE_REPEAT_COUNT} 的整数。`
+          : !validRepeat ? `单次最多加入 ${MAX_QUEUE_BATCH_SIZE} 条队列项，请减少消息行数或重复次数。`
+          : multiLineMode ? `识别到 ${batchPrompts.length} 条消息，整组按顺序重复 ${repeatCount} 次，共加入 ${batchSize} 条。空行会忽略。`
+          : `一次加入 ${repeatCount} 条相同消息，按当前发送方式依次发送。`}</p>
       </>}
-      <div className="cq-compose-footer"><span id="queue-keyboard-help" title={paused ? '恢复后依次发送' : timedDot ? '按设置的时间间隔发送' : ready ? '空闲时直接发送' : '回复结束后自动发送'}>Enter 发送 · Shift+Enter 换行</span><button className="primary" title="Enter 或 Ctrl / ⌘ + Enter" disabled={busy || !conversation || !draft.trim() || (isDot && !validRepeat)}>{busy ? '处理中…' : isDot && validRepeat && repeatCount > 1 ? `加入队列 ×${repeatCount}` : ready ? '加入并发送' : '加入队列'}</button></div>
+      <div className="cq-compose-footer"><span id="queue-keyboard-help" title={paused ? '恢复后依次发送' : timedDot ? '按设置的时间间隔发送' : ready ? '空闲时直接发送' : '回复结束后自动发送'}>{multiLineMode ? 'Enter 换行 · Ctrl / ⌘ + Enter 入队' : 'Enter 发送 · Shift+Enter 换行'}</span><button className="primary" title={multiLineMode ? 'Ctrl / ⌘ + Enter' : 'Enter 或 Ctrl / ⌘ + Enter'} disabled={busy || !conversation || !draft.trim() || (isDot && !validRepeat)}>{busy ? '处理中…' : multiLineMode && validRepeat ? `加入队列 ${batchSize} 条` : isDot && validRepeat && repeatCount > 1 ? `加入队列 ×${repeatCount}` : ready ? '加入并发送' : '加入队列'}</button></div>
     </form>
   </aside>;
 }

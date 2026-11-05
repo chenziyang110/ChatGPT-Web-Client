@@ -208,6 +208,16 @@ export class Workspace {
         });
         break;
       }
+      case 'tasks.repeatBatch': {
+        const account = this.accounts.resolve(params.accountId);
+        const conversation = this.conversations.get(account.id, params.conversation);
+        if (params.url !== undefined || params.new !== undefined || params.current !== undefined) throw new AppError('批量发送必须指定一个 Dot 会话');
+        result = this.tasks.createRepeatedBatch(account.id, params.prompts, params.repeatCount, {
+          conversationId: conversation.id, idempotencyKey: text(params.idempotencyKey, 'Idempotency key', 120),
+          replyTimeoutMs: params.replyTimeoutMs as number | undefined, idleTimeoutMs: params.idleTimeoutMs as number | undefined
+        });
+        break;
+      }
       case 'tasks.create': {
         const accountId = this.accounts.resolve(params.accountId).id;
         const input = parseTask(params.input);
@@ -266,6 +276,11 @@ export class Workspace {
         const account = this.accounts.resolve(params.accountId);
         const conversation = this.conversations.get(account.id, params.conversation);
         result = this.tasks.removeQueued(account.id, conversation.id, identifier(params.id), params.expectedUpdatedAt); break;
+      }
+      case 'tasks.clearQueued': {
+        const account = this.accounts.resolve(params.accountId);
+        const conversation = this.conversations.get(account.id, params.conversation);
+        result = { count: this.tasks.clearQueued(account.id, conversation.id) }; break;
       }
       case 'queues.reorder': {
         const account = this.accounts.resolve(params.accountId);

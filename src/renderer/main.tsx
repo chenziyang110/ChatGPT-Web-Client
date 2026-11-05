@@ -45,6 +45,7 @@ function App() {
   const [queueOpen, setQueueOpen] = useState(false);
   const [queueDrafts, setQueueDrafts] = useState<Record<string, string>>({});
   const [queueRepeatCounts, setQueueRepeatCounts] = useState<Record<string, string>>({});
+  const [queueMultiLineModes, setQueueMultiLineModes] = useState<Record<string, boolean>>({});
   const [focusMode, setFocusMode] = useState(() => {
     try { return localStorage.getItem('workspace.focusMode') === 'true'; } catch { return false; }
   });
@@ -295,6 +296,7 @@ function App() {
         {queueOpen && activePage && state && <ConversationQueue key={`${active.id}:${activePage.id}`} account={active} page={activePage} state={state} bridge={bridge}
           drafts={queueDrafts} changeDraft={(key, text) => setQueueDrafts(values => ({ ...values, [key]: text }))}
           repeatCounts={queueRepeatCounts} changeRepeatCount={(key, value) => setQueueRepeatCounts(values => ({ ...values, [key]: value }))}
+          multiLineModes={queueMultiLineModes} changeMultiLineMode={(key, value) => setQueueMultiLineModes(values => ({ ...values, [key]: value }))}
           clearDraft={(key, text) => setQueueDrafts(values => values[key] === text ? { ...values, [key]: '' } : values)} refresh={refresh} close={closeQueue}
           inspect={task => openModal({ kind: 'task', task })} takeover={takeover} />}
       </div>}

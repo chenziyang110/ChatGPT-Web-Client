@@ -3,7 +3,7 @@ import { Database } from '../storage/Database';
 import { AppError, chatUrl, record, text } from '../validation';
 import { taskAttention } from './TaskAttention';
 import { canClearTask } from '../../shared/taskHistory';
-import { isQueueTask, MAX_QUEUE_REPEAT_COUNT, orderedTasks, taskOrder } from '../../shared/conversationQueue';
+import { isQueueTask, MAX_QUEUE_BATCH_SIZE, MAX_QUEUE_REPEAT_COUNT, orderedTasks, taskOrder } from '../../shared/conversationQueue';
 import type { AccountQueue, AgentTask, Conversation, TaskInput, TaskPhase } from '../../shared/types';
 export type { AgentTask } from '../../shared/types';
 const queueKey = (accountId: string, conversationId?: string) => conversationId ? `${accountId}:conversation:${conversationId}` : accountId;
@@ -341,7 +341,7 @@ export class AgentGateway {
     const hash = options.requestHash ?? requestHash({ input, ...options, idempotencyKey: undefined });
     const duplicate = this.findRequest(accountId, options.idempotencyKey, hash);
     if (duplicate) return duplicate;
-    return this.createTasks(accountId, input, { ...options, requestHash: hash }, 1)[0];
+    return this.createTasks(accountId, [input], { ...options, requestHash: hash })[0];
   }
   createRepeatedTasks(accountId: string, prompt: unknown, count: unknown,
     options: Pick<TaskOptions, 'conversationId' | 'idempotencyKey' | 'replyTimeoutMs' | 'idleTimeoutMs'>): AgentTask[] {
@@ -364,15 +364,46 @@ export class AgentGateway {
         return task;
       });
     }
-    return this.createTasks(accountId, input, { ...normalized, requestHash: hash }, count, key);
+    return this.createTasks(accountId, Array.from({ length: count }, () => input), { ...normalized, requestHash: hash }, key);
   }
-  private createTasks(accountId: string, input: TaskInput, options: TaskOptions, count: number, batchKey?: string): AgentTask[] {
+  createRepeatedBatch(accountId: string, value: unknown, repeatCount: unknown,
+    options: Pick<TaskOptions, 'conversationId' | 'idempotencyKey' | 'replyTimeoutMs' | 'idleTimeoutMs'>): AgentTask[] {
+    if (this.stopped) throw new AppError('Runtime is stopping', 503);
+    if (!Array.isArray(value) || value.length < 2 || value.length > MAX_QUEUE_BATCH_SIZE)
+      throw new AppError(`多条发送需要 2 至 ${MAX_QUEUE_BATCH_SIZE} 条消息`);
+    if (typeof repeatCount !== 'number' || !Number.isSafeInteger(repeatCount) || repeatCount < 1 || repeatCount > MAX_QUEUE_REPEAT_COUNT)
+      throw new AppError(`整组重复次数必须是 1 至 ${MAX_QUEUE_REPEAT_COUNT} 的整数`);
+    const totalCount = value.length * repeatCount;
+    if (!Number.isSafeInteger(totalCount) || totalCount > MAX_QUEUE_BATCH_SIZE)
+      throw new AppError(`单次最多加入 ${MAX_QUEUE_BATCH_SIZE} 条队列项，请减少消息行数或重复次数`);
+    const key = text(options.idempotencyKey, 'Idempotency key', 120);
+    const conversation = options.conversationId ? this.db.read<Conversation>('conversations', options.conversationId) : undefined;
+    if (!conversation || conversation.accountId !== accountId || conversation.surface !== 'dot') throw new AppError('请选择当前账号的 Dot 会话');
+    const prompts = value.map(prompt => parseTask({ type: 'prompt', prompt, submit: true }));
+    const normalized = { conversationId: conversation.id, targetUrl: conversation.url, background: true,
+      replyTimeoutMs: options.replyTimeoutMs, idleTimeoutMs: options.idleTimeoutMs };
+    const hash = requestHash({ method: 'tasks.repeatBatch', prompts, repeatCount, ...normalized });
+    const existing = this.db.read<RequestRecord>('request_keys', `${accountId}:${key}`);
+    if (existing) {
+      if (existing.hash !== hash || !existing.taskIds) throw new AppError('IDEMPOTENCY_CONFLICT: key was already used for different input', 409);
+      return existing.taskIds.map(id => {
+        const task = this.db.read<AgentTask>('tasks', id);
+        if (!task) throw new AppError(`REQUEST_ALREADY_HANDLED: task ${id} history was cleared; it will not be submitted again`, 409);
+        return task;
+      });
+    }
+    const tasks = Array.from({ length: repeatCount }, () => prompts).flat();
+    return this.createTasks(accountId, tasks, { ...normalized, requestHash: hash }, key);
+  }
+  private createTasks(accountId: string, inputs: TaskInput[], options: TaskOptions, batchKey?: string): AgentTask[] {
+    if (!inputs.length) throw new AppError('At least one task is required');
+    const count = inputs.length;
     const now = Date.now();
     const queue = options.conversationId ? this.db.read<AccountQueue>('account_queues', queueKey(accountId, options.conversationId)) : undefined;
     const conversation = options.conversationId ? this.db.read<Conversation>('conversations', options.conversationId) : undefined;
     const interval = queue?.timing && conversation?.accountId === accountId && conversation.surface === 'dot' &&
-      options.background === true && input.type === 'prompt' && input.submit;
-    const common = { accountId, input, ...options, status: 'pending' as const, phase: 'queued' as const,
+      options.background === true && inputs[0].type === 'prompt' && inputs[0].submit;
+    const common = { accountId, ...options, status: 'pending' as const, phase: 'queued' as const,
       replyTimeoutMs: duration(options.replyTimeoutMs, 600000), prepareTimeoutMs: duration(options.prepareTimeoutMs, 60000), idleTimeoutMs: duration(options.idleTimeoutMs, 600000),
       createdAt: now, updatedAt: now };
     const tasks: AgentTask[] = [];
@@ -383,7 +414,7 @@ export class AgentGateway {
       const sequence = this.db.get<number>('taskSequence') ?? 0;
       if (!Number.isSafeInteger(sequence + count)) throw new AppError('任务序号已超出可保存范围');
       for (let index = 0; index < count; index++) {
-        const task: AgentTask = { ...common, sendMode: interval ? 'dot_interval' : undefined,
+        const task: AgentTask = { ...common, input: inputs[index], sendMode: interval ? 'dot_interval' : undefined,
           id: randomUUID(), seq: sequence + index + 1, queueOrder: sequence + index + 1 };
         this.persist(task); tasks.push(task);
       }
@@ -430,6 +461,21 @@ export class AgentGateway {
   removeQueued(accountId: string, conversationId: string, id: string, expectedUpdatedAt: unknown): AgentTask {
     this.pendingTask(accountId, conversationId, id, expectedUpdatedAt);
     return this.cancel(id);
+  }
+  clearQueued(accountId: string, conversationId: string): number {
+    const activeIds = new Set([...this.running.values()].map(slot => slot.id));
+    const pending = this.listTasks().filter(task => task.accountId === accountId && task.conversationId === conversationId &&
+      task.status === 'pending' && !task.sendIntentAt && (!task.attention || !!task.resolvedAt) && !activeIds.has(task.id));
+    if (!pending.length) return 0;
+    this.db.transaction(() => {
+      for (const task of pending) this.persist({ ...task, status: 'cancelled', attention: undefined,
+        error: 'Cancelled before send intent', updatedAt: Math.max(Date.now(), task.updatedAt + 1) });
+    });
+    // Waiters must only observe cancellations after the entire clear commits.
+    for (const task of pending) for (const waiter of [...this.waiters]) waiter(task.id);
+    this.changed();
+    this.schedule();
+    return pending.length;
   }
   reorder(accountId: string, conversationId: string, value: unknown): AgentTask[] {
     if (!Array.isArray(value)) throw new AppError('items must contain the pending task IDs and versions');

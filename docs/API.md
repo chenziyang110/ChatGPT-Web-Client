@@ -112,9 +112,11 @@ Success is `{ok:true,result:...}`. Errors use `{ok:false,error:"..."}` and non-2
 | `conversations.open` | `{accountId,conversation}` | Select the target's existing page or open a separate page |
 | `tasks.create` | `{accountId,input,conversation?,url?,current?,new?,alias?,idempotencyKey?,replyTimeoutMs?,idleTimeoutMs?,background?}` | Pinned queued task; choose at most one target selector; timeout values are integer milliseconds, 1000–3600000 |
 | `tasks.repeat` | `{accountId,conversation,prompt,count,idempotencyKey,replyTimeoutMs?,idleTimeoutMs?}` | Dot only: atomically append `count` independent background sends of the same prompt; returns `AgentTask[]`. Requires an existing Dot target, a positive integer count (1–1000 per request), and a saved request key |
+| `tasks.repeatBatch` | `{accountId,conversation,prompts,repeatCount,idempotencyKey,replyTimeoutMs?,idleTimeoutMs?}` | Dot only: atomically append an ordered list of at least two non-empty prompts as a repeated group; returns `AgentTask[]`. The total number of entries per request is at most 1000; this does not limit the existing queue |
 | `tasks.list/get/cancel/clear` | `{}`, `{id}`, `{id}`, `{}` | History, detail, cancellation, or clear resolved history |
 | `tasks.edit` | `{accountId,conversation,id,expectedUpdatedAt,prompt}` | Edit a pending prompt; maximum 32000 characters |
 | `tasks.removeQueued` | `{accountId,conversation,id,expectedUpdatedAt}` | Cancel a still-pending item; stale controls cannot cancel a running task |
+| `tasks.clearQueued` | `{accountId,conversation}` | Cancel every not-yet-sent pending item in one conversation and return `{count}`; running, sent or human-review tasks remain unchanged |
 | `queues.reorder` | `{accountId,conversation,items:[{id,updatedAt}]}` | Reorder the complete set of pending items in one conversation |
 | `queues.move` | `{accountId,conversation,id,expectedUpdatedAt,neighborId,expectedNeighborUpdatedAt}` | Swap two adjacent pending items without sending the whole queue |
 | `queues.status/pause/resume/takeover` | `{}`, `{accountId,conversation?}`, `{accountId,conversation?,acknowledged?}`, `{accountId,conversation?}` | Account-wide or conversation-specific queue controls |
@@ -143,9 +145,13 @@ Editing, removal and reordering require the latest `updatedAt` from task reads. 
 
 ### Timed Dot queues
 
-The Dot composer supports **×1**, **×5**, **×10** and a custom send count. Repetition appends separate tasks to the selected account and conversation. Each item retains ordinary edit/remove controls and the queue's current timing policy. The 1000-item bound applies to one batch, not the total queue length.
+The Dot composer supports **×1**, **×5**, **×10** and a custom send count. Enable **one message per line** to split the draft into any number of non-empty prompts. The repeat count applies to the whole ordered group: `A, B, C` ×10 queues `A, B, C, A, B, C...` for 30 entries. The full batch is appended atomically to the selected account and conversation. Each item retains ordinary edit/remove controls and the queue's current timing policy. A single batch can contain at most 1000 entries; this does not cap the queue's total length.
 
-`tasks.repeat` commits the whole batch and its request key together. Retrying identical parameters with the same key returns the original tasks; different text, count, target or timeout values return `IDEMPOTENCY_CONFLICT`. If a member's history was cleared, the original key cannot recreate it. Save the key before sending the request, and use a new key for an intentional new batch. The generic CLI `rpc` command exposes the same method.
+In line-splitting mode, Enter inserts a new line and Ctrl/Command+Enter enqueues the group. Blank lines are ignored. The selected mode and repeat count are separate for each account/conversation and survive switching tabs during the app session. Ordinary mode keeps a multiline draft as one message.
+
+The queue header's clear button asks for confirmation before cancelling unstarted items in the current conversation. Executing tasks, persisted send intents, unresolved human-review items and other conversations remain intact. Cancellation records and request keys persist, so replaying an old batch request cannot recreate cancelled messages. A failed clear rolls back the entire operation before notifying task waiters.
+
+`tasks.repeat` and `tasks.repeatBatch` commit the whole batch and its request key together. Retrying identical parameters with the same key returns the original tasks; different prompts, count, target or timeout values return `IDEMPOTENCY_CONFLICT`. If a member's history was cleared, the original key cannot recreate it. Save the key before sending the request, and use a new key for an intentional new batch. The generic CLI `rpc` command exposes both methods.
 
 The Dot queue panel offers 10, 20, 30 minutes or a custom integer number of minutes (1–1440). Save the setting explicitly. The first queued background message waits one interval; each later message waits from the previous confirmed submission, regardless of Dot's background work or immediate acknowledgement. This setting does not change foreground Agent prompts, Chat or Work queues. Timed task results carry `submittedOnly:true` and `responseUnavailable:true`: delivery is confirmed, remote work completion is not.
 

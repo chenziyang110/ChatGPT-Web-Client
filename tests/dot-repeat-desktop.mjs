@@ -174,6 +174,10 @@ try {
   assert.equal(await multiline().isChecked(), true);
   assert.equal(await repetition().inputValue(), '10');
   const clear = () => panel().getByRole('button', { name: '清空当前会话待发送队列', exact: true });
+  await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1024, 600));
+  await until(async () => await panel().locator('.cq-list').evaluate(element => element.getBoundingClientRect().height >= 160));
+  assert.equal(await panel().evaluate(element => element.querySelector('.cq-list').getBoundingClientRect().bottom <= element.querySelector('.cq-composer').getBoundingClientRect().top + 1), true, 'The composer cannot overlap queue actions in compact windows');
+  assert.equal(await ui.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await clear().click();
   await panel().getByRole('group', { name: '清空队列确认', exact: true }).getByRole('button', { name: '取消', exact: true }).press('Escape');
   assert.equal(await panel().getByRole('group', { name: '清空队列确认', exact: true }).count(), 0);

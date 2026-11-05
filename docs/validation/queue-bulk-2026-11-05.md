@@ -15,4 +15,6 @@ Dot's optional line-splitting mode treats each non-empty trimmed line as a promp
 - `npm audit --json` reported zero vulnerabilities across all dependency categories.
 - `git diff --check` passed.
 
+The initial v1.4.36 release candidate was stopped before publication when Windows and macOS matrix checks exposed a compact-window layout failure: the queue list could collapse beneath the composer, intercepting the clear-confirm click. A local 1024×600 reproduction failed with the same pointer interception. The fix reserves 160px for the list, prevents fixed sections from shrinking into one another, and allows the whole panel to scroll. The desktop regression now asserts list height and non-overlap before using real confirmation clicks at that size. The corrected candidate uses v1.4.37; the failed v1.4.36 tag is not moved or published.
+
 Desktop checks used isolated temporary profiles and owned offline webpage fixtures with the production Electron runtime and native editor/send operations. No business messages were submitted to logged-in production accounts. This change was built locally; it has not been released.

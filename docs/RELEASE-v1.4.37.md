@@ -1,4 +1,4 @@
-# v1.4.36
+# v1.4.37
 
 会话队列新增清空按钮，Dot 支持一次加入多条不同消息并按整组重复。
 
@@ -8,6 +8,8 @@
 - 整批保存并保留防重复记录，失败重试及重启不会重复追加消息。每条沿用当前定时或工作结束后发送规则，可单独编辑、排序和移除。
 - 单次批次最多 1000 条，可继续分批追加，队列总长度不受此限制。清空失败时整批回滚，保存完成后才通知等待中的调用。
 
+- 修复较矮窗口中队列列表被输入区遮挡的问题，清空确认和消息操作可滚动访问。
+
 完整依赖审计为 0 项告警。Windows NSIS 和 Linux AppImage 支持软件内更新；macOS 和 Linux tar.gz 使用对应安装包更新。
 
-验证使用独立临时资料及离线网页，未向真实业务会话提交测试消息。详情：[批量队列验证记录](https://github.com/chenziyang110/ChatGPT-Web-Client/blob/v1.4.36/docs/validation/queue-bulk-2026-11-05.md)。
+验证使用独立临时资料及离线网页，未向真实业务会话提交测试消息。详情：[批量队列验证记录](https://github.com/chenziyang110/ChatGPT-Web-Client/blob/v1.4.37/docs/validation/queue-bulk-2026-11-05.md)。

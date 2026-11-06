@@ -194,6 +194,11 @@ try {
     }
   }
   const errorCard = '<div>无法加载此 ChatGPT 对话<button>再试一次</button></div>';
+  await page.evaluate(html => { history.replaceState({}, '', '/g/g-p-6aedd1cd55308191bd405e8f082c8a31-project/c/thread'); document.body.innerHTML = `<main>${html}</main>`; }, errorCard);
+  for (const kind of ['inspect', 'activity', 'diagnose']) assert.equal((await execute({ kind })).loadFailure, 'conversation', 'Project fetch failures retain ordinary recovery semantics');
+  await page.evaluate(() => history.replaceState({}, '', '/g/g-p-6aedd1cd55308191bd405e8f082c8a31-project'));
+  assert.equal((await execute({ kind: 'inspect' })).loadFailure, undefined, 'A project homepage is not a bound conversation');
+  await page.evaluate(() => history.replaceState({}, '', '/c/diagnostic-fixture'));
   for (const [name, html] of [
     ['assistant quote', `<main><article><div data-message-author-role="assistant">${errorCard}</div></article></main>`],
     ['quoted block', `<main><article><blockquote>${errorCard}</blockquote></article></main>`],

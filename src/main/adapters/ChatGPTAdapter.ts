@@ -6,6 +6,7 @@ import { HOME_URL, isChatUrl } from '../../core/validation';
 import type { BrowserReadiness, Conversation, ConversationSurface, DotWorkState, TaskInput } from '../../shared/types';
 import { COMPLETION_STABLE_MS, replyToken } from '../../core/notifications/ConversationNotifications';
 import { ReplyTurnTracker, type ConversationMessage } from './ReplyTurnTracker';
+import { parseConversationPath } from '../../shared/conversationRoute';
 
 type Message = ConversationMessage;
 export interface Page { url: string; title: string; readiness: BrowserReadiness; surface?: ConversationSurface; dotWork?: DotWorkState; composerBusy?: boolean; editor: boolean; draft: string; busy: boolean; messages: Message[]; error?: string; failure?: 'thinking' | 'interrupted'; loadFailure?: 'conversation' | 'reply_connection'; connectionKey?: string }
@@ -14,7 +15,7 @@ interface Operation { kind: 'inspect' | 'diagnose' | 'activity' | 'follow_latest
 // Electron otherwise replaces page exceptions with an unhelpful "Script failed
 // to execute" rejection. Catch inside the page before crossing that boundary.
 export function pageOperationScript(operation: Operation): string {
-  return `(operation => { try { return { workspacePageResult: true, ok: true, value: (${pageOperation.toString()})(operation) }; }
+  return `(operation => { try { return { workspacePageResult: true, ok: true, value: (${pageOperation.toString()})(operation, (${parseConversationPath.toString()})) }; }
     catch (error) { return { workspacePageResult: true, ok: false, error: error.message }; } })(${JSON.stringify(operation)})`;
 }
 export function pageOperationResult<T>(result: unknown): T {
@@ -40,13 +41,12 @@ export function replyPageUrl(value: string, allowOptimistic = false): string | u
   const url = new URL(value);
   if (url.searchParams.getAll('temporary-chat').some(flag => flag !== 'false' && flag !== '0')) return;
   if (url.pathname === '/') return HOME_URL;
-  const dot = /^\/dots\/([a-zA-Z0-9_-]{1,128}(?:~[a-zA-Z0-9_-]{1,128})?)\/?$/.exec(url.pathname);
-  if (dot) return `${HOME_URL}dots/${dot[1]}`;
+  const route = parseConversationPath(url.pathname);
+  if (route) return `${url.origin}${route.pathname}`;
   let pathname: string;
   try { pathname = decodeURI(url.pathname).replace(/%3A/ig, ':'); } catch { return; }
   if (allowOptimistic && /^\/c\/(?:WEB|local-chatgpt):[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\/?$/.test(pathname)) return `${url.origin}${pathname.replace(/\/$/, '')}`;
-  const match = /^\/c\/([a-zA-Z0-9_-]{1,128})\/?$/.exec(url.pathname);
-  return match ? `${HOME_URL}c/${match[1]}` : undefined;
+  return undefined;
 }
 
 function changedReplyTarget(expected: string, actual: string): Error {
@@ -56,8 +56,8 @@ function changedReplyTarget(expected: string, actual: string): Error {
   return new Error(`TARGET_CHANGED: conversation moved after sending; expected ${expected}, observed ${route}`);
 }
 
-// Serialized into the sandboxed website. Keep this function self-contained.
-export function pageOperation(operation: Operation): unknown {
+// Serialized with the route parser into the sandboxed website. Keep dependencies explicit.
+export function pageOperation(operation: Operation, parseRoute: typeof parseConversationPath): unknown {
   let stage = 'inspect';
   try {
     if (location.origin !== 'https://chatgpt.com') throw new Error('LOGIN_REQUIRED: sign in to ChatGPT');
@@ -197,7 +197,8 @@ export function pageOperation(operation: Operation): unknown {
     // A committed ChatGPT document can show a conversation-fetch failure while
     // Chromium reports a successful load. This is unavailable history, not a
     // terminal reply. Require its own Retry card outside every message wrapper.
-    const conversationRoute = /^\/c\/[a-zA-Z0-9_-]{1,128}\/?$/.test(location.pathname) &&
+    const route = parseRoute(location.pathname);
+    const conversationRoute = !!route && route.kind !== 'dot' &&
       !new URLSearchParams(location.search).getAll('temporary-chat').some(flag => flag !== 'false' && flag !== '0');
     const loadFailureLabel = /^(?:无法加载此\s*ChatGPT\s*对话|Unable to load (?:this ChatGPT )?conversation|Could not load (?:this ChatGPT )?conversation)[.!。]?$/i;
     const messageWrapper = '[data-message-author-role], [data-chatgpt-search-unit-key], [data-user-message-bubble], article, [data-testid^="conversation-turn-"], [data-turn-key]';
@@ -696,6 +697,8 @@ export class ChatGPTAdapter {
       if (now - lastSample > Math.max(2000, interval * 2 + 500)) { since = now; failureSince = now; }
       lastSample = now;
       const replyUrl = replyPageUrl(page.url, !boundUrl && !!conversation);
+      if (!boundUrl && conversation && replyUrl && parseConversationPath(new URL(replyUrl).pathname)?.kind === 'project')
+        throw changedReplyTarget(HOME_URL, page.url);
       const optimistic = !!replyUrl && /\/c\/(WEB|local-chatgpt):/.test(replyUrl);
       if (!replyUrl || (observedConversationUrl && replyUrl !== observedConversationUrl)) throw changedReplyTarget(observedConversationUrl ?? HOME_URL, page.url);
       if (optimistic) {

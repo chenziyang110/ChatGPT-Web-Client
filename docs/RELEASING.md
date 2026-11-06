@@ -25,6 +25,12 @@ Agent 位于 Windows / Linux 的 `resources/agent/` 或 macOS 的 `Contents/Reso
 
 不要上传整个 release 目录中的调试文件、测试截图或用户数据。工作流只提取指定安装包扩展名，再由发布清单进行严格检查。
 
+### 仅发布 Windows
+
+明确选择仅发布 Windows 时，可在 Windows 本机完成对应测试、构建，并用 `npx electron-builder --win --x64 --arm64 --publish never` 打包。将两份对应版本的 exe 复制到独立发布目录，再运行 `node scripts/release-manifest.mjs --windows --directory <发布目录>`。此模式严格要求 x64、ARM64 两个安装包，仅生成两份 Windows 更新清单及 SHA256SUMS.txt；默认不带 `--windows` 的全平台校验规则保持不变。
+
+上传时明确指定这五个文件。发布说明应标注仅 Windows，其他系统继续使用上一份有对应安装包的版本；旧客户端仅按 Latest 版本号提示更新，不能将其他系统的下载与更新宣称为可用。本次选择本机构建时，应记录实际执行的检查，不宣称六目标云端验收。
+
 ## 更新与限制
 
 v1.0.0 起，安装版启动 10 秒后及每 6 小时请求本仓库 GitHub Latest Release；设置中可关闭或手动检查。只通知更高稳定版本，跳过预发布/草稿。v1.4.0 起，Windows NSIS / Linux AppImage 支持显式下载、取消、失败重试和安装并重启。更新请求不携带账户 Cookie、令牌或对话。

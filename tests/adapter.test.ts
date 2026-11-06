@@ -207,6 +207,7 @@ test('reply normalization still rejects another conversation, temporary chats an
     ['https://chatgpt.com/c/first?model=pro', 'https://chatgpt.com/c/another?model=pro'],
     ['https://chatgpt.com/c/WEB:11111111-1111-4111-8111-111111111111', 'https://chatgpt.com/c/WEB:22222222-2222-4222-8222-222222222222'],
     ['https://chatgpt.com/c/first', 'https://chatgpt.com/c/WEB:11111111-1111-4111-8111-111111111111'],
+    ['https://chatgpt.com/g/g-p-project/c/unexpected'],
     ['https://chatgpt.com/?temporary-chat=true'],
     ['https://example.com/c/first?token=do-not-record'],
   ];
@@ -220,9 +221,10 @@ test('reply normalization still rejects another conversation, temporary chats an
 });
 
 
-test('recovered send receipt reads the original reply without filling or clicking Send again', async () => {
+for (const url of ['https://chatgpt.com/c/recovered', 'https://chatgpt.com/g/g-p-project/c/recovered'])
+test(`recovered send receipt reads the original reply without filling or clicking Send again: ${url}`, async () => {
   const db = new Database(':memory:'); const conversations = new Conversations(db);
-  const url = 'https://chatgpt.com/c/recovered'; const conversation = conversations.register('account',url);
+  const conversation = conversations.register('account',url);
   const controller = new AbortController(); const operations:string[]=[];
   const task:AgentTask={ id:'recovery', accountId:'account', conversationId:conversation.id, background:true,
     input:{type:'prompt',prompt:'Original question',submit:true}, status:'running', createdAt:1, updatedAt:1,

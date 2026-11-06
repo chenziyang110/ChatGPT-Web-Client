@@ -2,14 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { Database } from '../storage/Database';
 import { AppError, chatUrl, text } from '../validation';
 import type { Conversation, ConversationSurface } from '../../shared/types';
+import { parseConversationPath } from '../../shared/conversationRoute';
 
 export function conversationUrl(value: unknown): { url: string; remoteId: string; surface?: ConversationSurface } {
   const parsed = new URL(chatUrl(value));
-  const dot = /^\/dots\/([a-zA-Z0-9_-]{1,128}(?:~[a-zA-Z0-9_-]{1,128})?)\/?$/.exec(parsed.pathname);
-  if (dot && !parsed.search && !parsed.hash) return { url: `https://chatgpt.com/dots/${dot[1]}`, remoteId: `dot:${dot[1]}`, surface: 'dot' };
-  const match = /^\/c\/([a-zA-Z0-9_-]{1,128})\/?$/.exec(parsed.pathname);
-  if (!match || parsed.search || parsed.hash) throw new AppError('Use a personal https://chatgpt.com/c/<id> or /dots/<id> URL. Shared and temporary chats are not supported.');
-  return { url: `https://chatgpt.com/c/${match[1]}`, remoteId: match[1] };
+  const route = parseConversationPath(parsed.pathname);
+  if (!route || parsed.search || parsed.hash) throw new AppError('Use a personal https://chatgpt.com/c/<id>, /g/g-p-<project>/c/<id> or /dots/<id> URL. Shared and temporary chats are not supported.');
+  return { url: `https://chatgpt.com${route.pathname}`, remoteId: route.remoteId, ...(route.kind === 'dot' ? { surface: 'dot' as const } : {}) };
 }
 export class ConversationManager {
   constructor(private readonly db: Database) {}
@@ -57,6 +56,7 @@ export class ConversationManager {
   bind(accountId: string, id: string, value: unknown): Conversation {
     const existing = this.get(accountId, id);
     const target = conversationUrl(value);
+    if (!existing.url && target.remoteId.startsWith('project:')) throw new AppError('Project conversations require an existing conversation URL');
     if ((existing.surface === 'dot') !== (target.surface === 'dot')) throw new AppError('Conversation surface changed unexpectedly', 409);
     if (existing.url && existing.url !== target.url) throw new AppError('Conversation changed unexpectedly', 409);
     const collision = this.list(accountId).find(item => item.id !== id && item.url === target.url);

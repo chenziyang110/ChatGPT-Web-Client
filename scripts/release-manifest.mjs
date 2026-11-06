@@ -3,18 +3,24 @@ import { readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export async function releaseManifest(directory, version) {
+export async function releaseManifest(directory, version, scope = 'all') {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Stable version required');
-  const expected = ['x64', 'arm64'].flatMap(arch => [
+  if (!['all', 'windows'].includes(scope)) throw new Error('Unknown release scope');
+  const expected = ['x64', 'arm64'].flatMap(arch => scope === 'windows' ? [
+    `ChatGPT-Web-Client-${version}-win-${arch}.exe`
+  ] : [
     `ChatGPT-Web-Client-${version}-win-${arch}.exe`,
     `ChatGPT-Web-Client-${version}-mac-${arch}.dmg`,
     `ChatGPT-Web-Client-${version}-mac-${arch}.zip`,
     `ChatGPT-Web-Client-${version}-linux-${arch === 'x64' ? 'x86_64' : arch}.AppImage`,
     `ChatGPT-Web-Client-${version}-linux-${arch}.tar.gz`
   ]).sort();
-  const metadataNames = ['latest-x64.yml', 'latest-arm64.yml', 'latest-linux.yml', 'latest-linux-arm64.yml'];
+  const metadataNames = scope === 'windows' ? ['latest-x64.yml', 'latest-arm64.yml']
+    : ['latest-x64.yml', 'latest-arm64.yml', 'latest-linux.yml', 'latest-linux-arm64.yml'];
   const actual = (await readdir(directory)).filter(name => name !== 'SHA256SUMS.txt' && !metadataNames.includes(name)).sort();
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error('Release must contain exactly all 10 installers/archives for six platform targets');
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(scope === 'windows'
+    ? 'Windows release must contain exactly both x64 and ARM64 installers'
+    : 'Release must contain exactly all 10 installers/archives for six platform targets');
   const lines = [];
   const metadata = [];
   for (const name of expected) {
@@ -40,5 +46,8 @@ export async function releaseManifest(directory, version) {
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const { version } = JSON.parse(await readFile('package.json', 'utf8'));
-  console.log(await releaseManifest('release', version));
+  const directoryArg = process.argv.indexOf('--directory');
+  if (directoryArg !== -1 && (!process.argv[directoryArg + 1] || process.argv[directoryArg + 1].startsWith('--'))) throw new Error('Release directory required');
+  console.log(await releaseManifest(directoryArg === -1 ? 'release' : process.argv[directoryArg + 1], version,
+    process.argv.includes('--windows') ? 'windows' : 'all'));
 }

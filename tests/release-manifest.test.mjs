@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { releaseManifest } from '../scripts/release-manifest.mjs';
@@ -25,4 +25,28 @@ test('publishing refuses incomplete, empty or unexpected artifacts', async () =>
   await writeFile(file, ''); await assert.rejects(releaseManifest(dir, '1.1.0'), /Empty/);
   await writeFile(path.join(dir, 'private-log.txt'), 'must not publish');
   await assert.rejects(releaseManifest(dir, '1.1.0'), /exactly/);
+});
+
+test('Windows-only release validates both architectures and emits only Windows channels', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'workspace-win-manifest-'));
+  await assert.rejects(releaseManifest(dir, '1.4.38', 'windows'), /exactly/);
+  const name = arch => `ChatGPT-Web-Client-1.4.38-win-${arch}.exe`;
+  await writeFile(path.join(dir, name('x64')), 'x64 installer');
+  await assert.rejects(releaseManifest(dir, '1.4.38', 'windows'), /exactly/);
+  await writeFile(path.join(dir, name('arm64')), 'arm64 installer');
+  assert.equal((await releaseManifest(dir, '1.4.38', 'windows')).length, 2);
+  assert.equal((await readdir(dir)).length, 5);
+  const sums = (await readFile(path.join(dir, 'SHA256SUMS.txt'), 'utf8')).trim().split('\n');
+  assert.equal(sums.length, 4);
+  for (const arch of ['x64', 'arm64']) {
+    const manifest = JSON.parse(await readFile(path.join(dir, `latest-${arch}.yml`), 'utf8'));
+    assert.equal(manifest.version, '1.4.38'); assert.equal(manifest.files[0].url, name(arch));
+  }
+  await assert.rejects(releaseManifest(dir, '1.4.38'), /exactly/);
+  await assert.rejects(releaseManifest(dir, '1.4.38', 'other'), /scope/);
+  await writeFile(path.join(dir, name('arm64')), '');
+  await assert.rejects(releaseManifest(dir, '1.4.38', 'windows'), /Empty/);
+  await writeFile(path.join(dir, name('arm64')), 'arm64 installer');
+  await writeFile(path.join(dir, 'latest-linux.yml'), '{}');
+  await assert.rejects(releaseManifest(dir, '1.4.38', 'windows'), /exactly/);
 });

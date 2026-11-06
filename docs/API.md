@@ -25,7 +25,9 @@ Enable **Local Agent API** in the desktop Settings. The CLI reads `agent-runtime
 
 ## Account and conversation targeting
 
-Account references accept UUID, unique alias, or an unambiguous display name. Conversation references are scoped to the selected account and accept local UUID, alias, remote ID, or a registered URL. Only ordinary personal `https://chatgpt.com/c/<id>` conversations are supported for prompt automation. Shared links, temporary chats, project/custom-GPT paths and specialized tool workflows are outside this first version.
+Account references accept UUID, unique alias, or an unambiguous display name. Conversation references are scoped to the selected account and accept local UUID, alias, remote ID, or a registered URL. Prompt automation supports Chat/Work `/c/<id>`, existing project chats `/g/g-p-<project>/c/<id>`, and Your dot `/dots/<id>` routes on `https://chatgpt.com`. Project homepages, custom GPTs, shared links and temporary chats are not supported targets.
+
+Existing project chats retain their complete project route and a separate `project:<project-token>:<conversation-id>` remote identity. A plain `/c/<id>` or another project with the same trailing ID is a different destination. Open the desired existing project chat before queueing; reserving a new ordinary conversation does not authorize creating or moving a conversation into a project. The full project token (including any slug) is retained; a changed route requires selecting/registering the new destination rather than silently retargeting existing tasks.
 
 The conversation list is a **local registry** populated by registration and visited account pages. It does not enumerate all server-side ChatGPT history. Registration records a target; login/access is checked when executing.
 
@@ -105,7 +107,7 @@ Success is `{ok:true,result:...}`. Errors use `{ok:false,error:"..."}` and non-2
 | `accounts.list/create/rename/switch/remove` | `{}`, `{name}`, `{id,name}`, `{id}`, `{id,confirmName}` | Account operations; deletion requires no unresolved tasks |
 | `accounts.alias` | `{id,alias}` | Stable account alias |
 | `conversations.list` | `{accountId?}` | Locally registered conversations |
-| `conversations.register` | `{accountId,url,alias?,surface?}` | Register a personal `/c/<id>` or `/dots/<id>` target; surface is `chat`, `work` or `dot` (Dot inferred from its URL) |
+| `conversations.register` | `{accountId,url,alias?,surface?}` | Register a `/c/<id>`, existing `/g/g-p-<project>/c/<id>` or `/dots/<id>` target; surface is `chat`, `work` or `dot` (Dot inferred from its URL) |
 | `conversations.create` | `{accountId,alias?,surface?}` | Reserve a new Chat/Work conversation; `surface` defaults to `chat`. Open Your dot and register its existing URL instead of creating an unbound Dot target |
 | `conversations.get` | `{accountId,conversation}` | Resolve a target within its account |
 | `conversations.forPage` | `{accountId,pageId}` | Pin the exact live page and detected Chat/Work/Dot surface, including an empty Chat/Work home |

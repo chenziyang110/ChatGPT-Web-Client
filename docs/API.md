@@ -104,7 +104,7 @@ Success is `{ok:true,result:...}`. Errors use `{ok:false,error:"..."}` and non-2
 | --- | --- | --- |
 | `workspace.status` | `{}` | Accounts, active page, conversations, queues, tasks and API status without token |
 | `agent.prompt` | `{accountId,conversation?,url?,current?}` | Read-only Agent handoff: prompt, resolved target, scope, API-enabled flag, example RPC request and optional CLI argument arrays |
-| `accounts.list/create/rename/switch/remove` | `{}`, `{name}`, `{id,name}`, `{id}`, `{id,confirmName}` | Account operations; deletion requires no unresolved tasks |
+| `accounts.list/create/rename/switch/remove` | `{}`, `{name}`, `{id,name}`, `{id}`, `{id,confirmName}` | Account operations. Confirmed deletion stops local execution and clears the account's local data, including unresolved tasks. Sent messages remain in ChatGPT. |
 | `accounts.alias` | `{id,alias}` | Stable account alias |
 | `conversations.list` | `{accountId?}` | Locally registered conversations |
 | `conversations.register` | `{accountId,url,alias?,surface?}` | Register a `/c/<id>`, existing `/g/g-p-<project>/c/<id>` or `/dots/<id>` target; surface is `chat`, `work` or `dot` (Dot inferred from its URL) |

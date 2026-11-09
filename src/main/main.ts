@@ -91,6 +91,7 @@ else void app.whenReady().then(async () => {
   let browser: BrowserRuntime;
   let notifications: ConversationNotifications;
   const openCompletedConversation = (notice: import('../shared/types').ConversationNotice) => {
+    if (browser.isDeletingAccount(notice.accountId)) return;
     revealWindow(win);
     try {
       accounts.activate(notice.accountId);
@@ -177,7 +178,9 @@ else void app.whenReady().then(async () => {
     if (name === 'tasks.decide') return workspace.decideTask(params);
     if (name === 'browser.preview') return browser.preview(identifier(params.accountId), params.pageId === undefined ? undefined : identifier(params.pageId));
     if (name === 'browser.newConversation') {
-      const account = accounts.activate(accounts.resolve(params.accountId).id);
+      const account = accounts.resolve(params.accountId);
+      if (browser.isDeletingAccount(account.id)) throw new AppError('账号正在删除', 409);
+      accounts.activate(account.id);
       await browser.newConversation(account.id);
       return browser.page();
     }

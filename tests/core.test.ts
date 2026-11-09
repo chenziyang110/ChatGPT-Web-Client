@@ -251,7 +251,7 @@ test('confirmed account deletion cancels unsent waiting and queued tasks without
   } finally { await gateway.stop(); db.close(); }
 });
 
-test('deletion refuses unresolved sends before cancelling any queued work', async () => {
+test('confirmed deletion discards unresolved sends and queued work without review', async () => {
   const db = new Database(':memory:'); const accounts = new AccountManager(db); const account = accounts.create('Review');
   let wiped = false;
   const gateway = new AgentGateway(db, async (_id, _input, _signal, context) => { context.intent(); throw new Error('Lost acknowledgement'); }, () => {});
@@ -261,8 +261,52 @@ test('deletion refuses unresolved sends before cancelling any queued work', asyn
     const sent = gateway.createTask(account.id, { type: 'prompt', prompt: 'Sent once', submit: true }, { targetUrl: 'https://chatgpt.com/c/a' });
     await eventually(() => gateway.get(sent.id).status === 'uncertain' && !gateway.isRunning(account.id));
     const queued = gateway.createTask(account.id, { type: 'snapshot' }, { targetUrl: 'https://chatgpt.com/c/a' });
-    await assert.rejects(workspace.call('accounts.remove', { id: account.id, confirmName: account.name }), /先在任务中心核对/);
-    assert.equal(wiped, false); assert.equal(accounts.get(account.id).id, account.id);
-    assert.equal(gateway.get(queued.id).status, 'pending'); assert.equal(gateway.get(sent.id).resolvedAt, undefined);
+    assert.deepEqual(await workspace.call('accounts.remove', { id: account.id, confirmName: account.name }), { removed: true });
+    assert.equal(wiped, true);
+    assert.deepEqual(accounts.list(), []);
+    assert.throws(() => gateway.get(queued.id), /Task not found/);
+    assert.throws(() => gateway.get(sent.id), /Task not found/);
   } finally { await gateway.stop(); db.close(); }
+});
+
+test('deleting an account aborts active work, releases its slot and ignores late results', { timeout: 5000 }, async () => {
+  const db = new Database(':memory:');
+  const accounts = new AccountManager(db);
+  const account = accounts.create('Remove');
+  const other = accounts.create('Keep');
+  const conversations = new ConversationManager(db);
+  const conversation = conversations.register(account.id, 'https://chatgpt.com/c/a');
+  let finish!: () => void;
+  const reply = new Promise<void>(resolve => { finish = resolve; });
+  let activeSignal: AbortSignal | undefined;
+  const gateway = new AgentGateway(db, async (id, _input, signal, context) => {
+    if (id !== account.id) return 'other task completed';
+    context.intent();
+    activeSignal = signal;
+    await reply;
+    return 'late reply';
+  }, () => {}, 1);
+  const workspace = new Workspace(accounts, gateway, {
+    activate: () => {}, navigate: async () => {}, control: () => {}, page: () => null,
+    remove: async id => { assert.equal(id, account.id); assert.equal(activeSignal?.aborted, true); }
+  }, () => {}, () => ({ enabled: false, endpoint: null, discoveryFile: '' }), conversations);
+  try {
+    const running = gateway.createTask(account.id, { type: 'prompt', prompt: 'Sent', submit: true },
+      { conversationId: conversation.id, targetUrl: conversation.url, idempotencyKey: 'sent' });
+    await eventually(() => !!activeSignal);
+    const pending = gateway.createTask(account.id, { type: 'snapshot' }, { conversationId: conversation.id });
+    const waiting = assert.rejects(gateway.wait(running.id), /Task not found/);
+    const unrelated = gateway.createTask(other.id, { type: 'snapshot' });
+    await workspace.call('accounts.remove', { id: account.id, confirmName: account.name });
+    await waiting;
+    assert.throws(() => gateway.get(pending.id), /Task not found/);
+    assert.equal(gateway.isRunning(account.id), false);
+    assert.equal(gateway.queues().some(queue => queue.accountId === account.id), false);
+    assert.equal(db.records('request_keys').length, 0);
+    assert.deepEqual(conversations.list(account.id), []);
+    await eventually(() => gateway.get(unrelated.id).status === 'done');
+    finish();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(gateway.listTasks().map(task => task.id), [unrelated.id]);
+  } finally { finish(); await gateway.stop(); db.close(); }
 });

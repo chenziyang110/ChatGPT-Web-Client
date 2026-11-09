@@ -539,7 +539,24 @@ export class AgentGateway {
       this.changed();
       return removable.length;
     }
-    removeHistory(accountId?: string): void {
+  discardAccountTasks(accountId: string): void {
+    const active = [...this.running].filter(([, slot]) => this.get(slot.id).accountId === accountId);
+    this.db.transaction(() => {
+      this.db.removeWhere('tasks', 'accountId', accountId);
+      this.db.removeWhere('account_queues', 'accountId', accountId);
+      this.db.removeWhere('request_keys', 'accountId', accountId);
+    });
+    for (const [key, slot] of active) {
+      this.running.delete(key);
+      slot.controller.abort(new Error('Account deleted'));
+      this.releaseExecution(slot.id);
+    }
+    this.dispatched.delete(accountId);
+    for (const waiter of [...this.waiters]) waiter();
+    this.changed();
+    this.schedule();
+  }
+  removeHistory(accountId?: string): void {
     if (this.runningAccounts().some(id => !accountId || id === accountId) || this.listTasks().some(task => (!accountId || task.accountId === accountId) && (['pending', 'running', 'blocked', 'waiting_user'].includes(task.status) || (task.status === 'uncertain' && !task.resolvedAt)))) {
       throw new AppError('Resolve or cancel active tasks before clearing history', 409);
     }
@@ -616,6 +633,9 @@ export class AgentGateway {
   }
   private async run(task: AgentTask, controller: AbortController): Promise<void> {
     let timer: ReturnType<typeof setTimeout>;
+    const key = queueKey(task.accountId, task.conversationId);
+    const clearDeadline = () => clearTimeout(timer);
+    controller.signal.addEventListener('abort', clearDeadline, { once: true });
     const conversationTasks = task.conversationId
       ? orderedTasks(this.listTasks().filter(item => item.accountId === task.accountId && item.conversationId === task.conversationId)) : [];
     const predecessor = conversationTasks[conversationTasks.findIndex(item => item.id === task.id) - 1];
@@ -675,6 +695,8 @@ export class AgentGateway {
       controller.signal.throwIfAborted();
       if (this.get(task.id).status === 'running') this.update(task.id, { status: 'done', phase: 'completed', result });
     } catch (error) {
+      // Account deletion detaches the slot and removes its records immediately.
+      if (this.running.get(key)?.controller !== controller) return;
       const current = this.get(task.id);
       if (current.status === 'running') {
         if (error instanceof QueuePausedError && !current.sendIntentAt) {
@@ -712,9 +734,12 @@ export class AgentGateway {
       }
     } finally {
       clearTimeout(timer!);
+      controller.signal.removeEventListener('abort', clearDeadline);
       this.releaseExecution(task.id);
-      this.running.delete(queueKey(task.accountId, task.conversationId));
-      this.changed(); this.schedule();
+      if (this.running.get(key)?.controller === controller) {
+        this.running.delete(key);
+        this.changed(); this.schedule();
+      }
     }
   }
   async stop(): Promise<void> {

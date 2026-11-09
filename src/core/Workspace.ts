@@ -136,21 +136,14 @@ export class Workspace {
       case 'accounts.remove': {
         const account = this.accounts.resolve(params.id);
         if (params.confirmName !== account.name) throw new AppError('Account name confirmation does not match');
-        if (this.tasks.isRunning(account.id)) throw new AppError('此账号正在执行任务，请先点击“接管”，等待自动操作停止后再删除', 409);
-        const accountTasks = this.tasks.listTasks().filter(task => task.accountId === account.id);
-        if (accountTasks.some(task => task.status === 'uncertain' && !task.resolvedAt || task.sendIntentAt && ['pending', 'running', 'blocked', 'waiting_user'].includes(task.status))) {
-          throw new AppError('此账号有可能已经发送的消息，请先在任务中心核对并结束对应任务，再删除账号', 409);
-        }
-        // The exact-name deletion confirmation includes discarding unsent work.
-        // Validate every blocker first so a refused deletion never cancels tasks.
-        for (const task of accountTasks) if (['pending', 'blocked', 'waiting_user'].includes(task.status)) this.tasks.cancel(task.id);
+        this.tasks.discardAccountTasks(account.id);
         await this.browser.remove(account.id);
-        this.tasks.removeHistory(account.id);
         this.conversations.removeAccount(account.id);
         this.notifications?.removeAccount(account.id);
+        const wasActive = this.accounts.activeId() === account.id;
         this.accounts.remove(account.id);
         const next = this.accounts.activeId();
-        if (next) this.browser.activate(next);
+        if (next && wasActive) this.browser.activate(next);
         result = { removed: true }; break;
       }
       case 'browser.navigate': {

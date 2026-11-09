@@ -81,6 +81,7 @@ export class BrowserRuntime {
   private locks: AgentTask[] = [];
   private automaticRecoveryTasks: AgentTask[] = [];
   private readonly owners = new Map<string, PageOwner>();
+  private readonly deletingAccounts = new Set<string>();
   private readonly selected = new Map<string, string>();
   private readonly restoredTabAccounts = new Set<string>();
   private readonly taskPages = new Map<string, string>();
@@ -830,6 +831,7 @@ export class BrowserRuntime {
     this.saveTabs(owner.accountId);
   }
   private createView(accountId: string, url: string, conversationId?: string, customLink = false): string {
+    if (this.deletingAccounts.has(accountId)) throw new AppError('账号正在删除', 409);
     if ([...this.owners.values()].filter(owner => owner.accountId === accountId).length >= 20) throw new AppError('此账号已打开 20 个会话，请关闭不再使用的会话后继续', 409);
     const id = randomUUID();
     this.accounts.get(accountId);
@@ -1270,18 +1272,24 @@ export class BrowserRuntime {
     else if (action === 'forward' && contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward();
     else if (!['back', 'forward'].includes(action)) throw new AppError('Unknown browser action');
   }
+  isDeletingAccount(id: string): boolean { return this.deletingAccounts.has(id); }
   async remove(id: string): Promise<void> {
     const account = this.accounts.get(id);
-    for (const [pageId, owner] of [...this.owners]) if (owner.accountId === id) this.closeView(pageId);
-    const isolated = session.fromPartition(account.partition);
-    // Close all web contents before wiping profile state so they cannot rewrite it.
-    await isolated.closeAllConnections();
-    await isolated.clearStorageData();
-    await isolated.clearCache();
-    await isolated.clearAuthCache();
-    await isolated.clearCodeCaches({});
-    isolated.flushStorageData();
-    this.errors.delete(id);
+    this.deletingAccounts.add(id);
+    try {
+      for (const [pageId, owner] of [...this.owners]) if (owner.accountId === id) this.closeView(pageId);
+      const isolated = session.fromPartition(account.partition);
+      // Old notifications cannot reopen this account while its profile is being wiped.
+      await isolated.closeAllConnections();
+      await isolated.clearStorageData();
+      await isolated.clearCache();
+      await isolated.clearAuthCache();
+      await isolated.clearCodeCaches({});
+      isolated.flushStorageData();
+      this.errors.delete(id);
+    } finally {
+      this.deletingAccounts.delete(id);
+    }
   }
   private closeView(id: string): void {
     const owner = this.owners.get(id);

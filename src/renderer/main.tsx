@@ -352,7 +352,7 @@ function App() {
         {modal.kind === 'agent' ? <AgentPromptPanel bridge={bridge} state={state} initial={modal.target} action={action} busy={busy} notifyError={setError} /> : modal.kind === 'task' ? <><p className="hint">{state?.accounts.find(account => account.id === modalTask?.accountId)?.name} · {state?.conversations.find(item => item.id === modalTask?.conversationId)?.title ?? modalTask?.targetUrl ?? '新会话'}</p>{modalTask?.attention && <TaskDecision task={modalTask} busy={busy} choose={choice => choose(modalTask, choice)} />}<p>{statusLabels[(state?.tasks.find(t => t.id === modal.task.id) ?? modal.task).status]}</p>
           <details open={!modalTask?.attention}><summary>任务记录</summary><pre className="task-result">{JSON.stringify(modalTask, null, 2)}</pre></details></>
         : <form onSubmit={accountForm}>
-          <p>{modal.kind === 'remove' ? `这会取消「${modal.account.name}」尚未发送的任务，并清除它的登录状态、浏览器数据和任务记录。输入完整账号名称确认。` : '为账号起一个容易辨认的名字。添加后，在网页中自行登录。'}</p>
+          <p>{modal.kind === 'remove' ? `这会停止「${modal.account.name}」在本机的任务，并清除它的登录状态、浏览器数据和任务记录。已发到 ChatGPT 的消息仍保留。输入完整账号名称确认。` : '为账号起一个容易辨认的名字。添加后，在网页中自行登录。'}</p>
           <label htmlFor="account-name">{modal.kind === 'remove' ? '确认账号名称' : '账号名称'}</label>
           <input id="account-name" autoFocus required maxLength={60} placeholder="例如：个人、工作、研究" value={name} onChange={e => setName(e.target.value)} />
           {modal.kind === 'rename' && <button type="button" className="secondary account-agent-entry" onClick={() => openModal({ kind: 'agent', target: { accountId: modal.account.id } })}><Icon name="terminal" size={16} /> 生成 Agent 提示词</button>}

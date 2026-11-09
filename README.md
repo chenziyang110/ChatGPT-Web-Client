@@ -12,9 +12,9 @@
 
 ## 下载与开始
 
-**Windows 最新正式版 v1.4.38**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，按下表选择系统和 CPU 对应的安装包。
+**Windows 最新正式版 v1.4.39**：前往 [Releases](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/latest)，按下表选择系统和 CPU 对应的安装包。
 
-本版修复项目内普通会话无法排队的问题，**仅发布 Windows x64 / ARM64**。macOS / Linux 请使用 [v1.4.37](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/tag/v1.4.37)。详见 [v1.4.38 发布说明](docs/RELEASE-v1.4.38.md)。
+本版修复账号删除被未完成任务阻塞的问题，**仅发布 Windows x64 / ARM64**。macOS / Linux 请使用 [v1.4.37](https://github.com/chenziyang110/ChatGPT-Web-Client/releases/tag/v1.4.37)。详见 [v1.4.39 发布说明](docs/RELEASE-v1.4.39.md)。
 
 1. 添加账号，在独立的 ChatGPT 网页中自行登录。
 2. 添加其他账号，在侧栏随时切换；各账号的登录状态互相隔离。
@@ -25,7 +25,7 @@ Windows 安装包尚未配置发布者签名，可能显示未知发布者提示
 
 | 系统 | x64（Intel / AMD） | ARM64 | 安装包 |
 | --- | --- | --- | --- |
-| Windows | 支持 | 支持 | v1.4.38 · NSIS `.exe` |
+| Windows | 支持 | 支持 | v1.4.39 · NSIS `.exe` |
 | macOS | Intel Mac | Apple Silicon（M 系列） | v1.4.37 · `.dmg`、`.zip` |
 | Linux | 支持 | 支持 | v1.4.37 · `.AppImage`、`.tar.gz` |
 
@@ -64,6 +64,8 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 签名及公证；首次打�
 支持 **聊天、工作和 Your dot**。工作首页会记录模式，刷新和重启后自动恢复；Dot 绑定自己的频道。面板会显示会话所属账号及工作 / Your dot 标识，主页切换模式时草稿和队列分别保存。
 
 v1.4.38（Windows）已补齐项目中已有聊天的 `/g/g-p-…/c/…` 地址识别：打开项目内的具体会话后，可使用相同的队列面板。项目路径会完整保留，各项目和账号分别排队；项目首页仍需先进入一个具体会话。验证见 [项目会话队列适配](docs/validation/project-queues-2026-11-07.md)。
+
+v1.4.39（Windows）允许在确认账号名称后直接删除账号。删除会立即停止该账号的本机任务并清除对应的队列、会话记录、浏览器资料和通知；已经发到 ChatGPT 的消息仍保留。
 
 #### Dot 的两种发送方式
 
@@ -274,7 +276,7 @@ Linux 无头测试：`xvfb-run --auto-servernum npm run test:desktop`。一次�
 - 使用与开发：[Agent 协作](docs/AGENT_COLLABORATION.md)、[API 与 CLI](docs/API.md)、[发布流程](docs/RELEASING.md)、[macOS 安装](docs/MACOS.md)
 - 产品与技术：[产品需求](docs/PRODUCT_REQUIREMENTS.md)、[会话自动化方案](docs/CONVERSATION_AUTOMATION_PROPOSAL.md)、[架构](docs/ARCHITECTURE.md)、[技术栈](docs/TECH_STACK.md)、[路线图](docs/ROADMAP.md)、[验证记录](docs/VALIDATION.md)
 - 视觉与平台记录：[视觉规范](docs/BRAND.md)、[macOS 签名调查](docs/MACOS-SIGNATURE-INVESTIGATION.md)
-- 发布记录：[v1.0.0](docs/RELEASE-v1.0.0.md)、[v1.1.0](docs/RELEASE-v1.1.0.md)、[v1.1.1](docs/RELEASE-v1.1.1.md)、[v1.2.0](docs/RELEASE-v1.2.0.md)、[v1.3.0](docs/RELEASE-v1.3.0.md)、[v1.3.1](docs/RELEASE-v1.3.1.md)、[v1.4.0](docs/RELEASE-v1.4.0.md)、[v1.4.1](docs/RELEASE-v1.4.1.md)、[v1.4.2](docs/RELEASE-v1.4.2.md)、[v1.4.3](docs/RELEASE-v1.4.3.md)、[v1.4.4](docs/RELEASE-v1.4.4.md)、[v1.4.5](docs/RELEASE-v1.4.5.md)、[v1.4.6](docs/RELEASE-v1.4.6.md)、[v1.4.7](docs/RELEASE-v1.4.7.md)、[v1.4.8](docs/RELEASE-v1.4.8.md)、[v1.4.9](docs/RELEASE-v1.4.9.md)、[v1.4.10](docs/RELEASE-v1.4.10.md)、[v1.4.11](docs/RELEASE-v1.4.11.md)、[v1.4.12](docs/RELEASE-v1.4.12.md)、[v1.4.13](docs/RELEASE-v1.4.13.md)、[v1.4.14](docs/RELEASE-v1.4.14.md)、[v1.4.29](docs/RELEASE-v1.4.29.md)、[v1.4.31](docs/RELEASE-v1.4.31.md)、[v1.4.34](docs/RELEASE-v1.4.34.md)、[v1.4.35](docs/RELEASE-v1.4.35.md)、[v1.4.37](docs/RELEASE-v1.4.37.md)、[v1.4.38](docs/RELEASE-v1.4.38.md)
+- 发布记录：[v1.0.0](docs/RELEASE-v1.0.0.md)、[v1.1.0](docs/RELEASE-v1.1.0.md)、[v1.1.1](docs/RELEASE-v1.1.1.md)、[v1.2.0](docs/RELEASE-v1.2.0.md)、[v1.3.0](docs/RELEASE-v1.3.0.md)、[v1.3.1](docs/RELEASE-v1.3.1.md)、[v1.4.0](docs/RELEASE-v1.4.0.md)、[v1.4.1](docs/RELEASE-v1.4.1.md)、[v1.4.2](docs/RELEASE-v1.4.2.md)、[v1.4.3](docs/RELEASE-v1.4.3.md)、[v1.4.4](docs/RELEASE-v1.4.4.md)、[v1.4.5](docs/RELEASE-v1.4.5.md)、[v1.4.6](docs/RELEASE-v1.4.6.md)、[v1.4.7](docs/RELEASE-v1.4.7.md)、[v1.4.8](docs/RELEASE-v1.4.8.md)、[v1.4.9](docs/RELEASE-v1.4.9.md)、[v1.4.10](docs/RELEASE-v1.4.10.md)、[v1.4.11](docs/RELEASE-v1.4.11.md)、[v1.4.12](docs/RELEASE-v1.4.12.md)、[v1.4.13](docs/RELEASE-v1.4.13.md)、[v1.4.14](docs/RELEASE-v1.4.14.md)、[v1.4.29](docs/RELEASE-v1.4.29.md)、[v1.4.31](docs/RELEASE-v1.4.31.md)、[v1.4.34](docs/RELEASE-v1.4.34.md)、[v1.4.35](docs/RELEASE-v1.4.35.md)、[v1.4.37](docs/RELEASE-v1.4.37.md)、[v1.4.38](docs/RELEASE-v1.4.38.md)、[v1.4.39](docs/RELEASE-v1.4.39.md)
 
 ## 账号会话通知与快捷键
 

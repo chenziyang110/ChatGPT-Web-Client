@@ -603,12 +603,20 @@ try {
   assert.equal(advice.accountId, personal.id);
   assert.equal(advice.result.url, 'https://chatgpt.com/c/restored');
   assert.equal(advice.result.response, 'Fixture reply: 请分析问题并给出验证步骤。\n仅使用本地测试页面。');
-  await rpc('accounts.remove', { id: personal.id, confirmName: 'Personal' });
+  const heldDuringDeletion = await rpc('tasks.create', { accountId: personal.id, url: advice.result.url,
+    input: { type: 'prompt', prompt: 'HOLD: reply during account deletion', submit: true } });
+  await waitForState(async id => Boolean((await window.workspace.call('tasks.get', { id })).submittedAt), heldDuringDeletion.id);
+  await page.getByRole('button', { name: '管理 Personal', exact: true }).click();
+  await page.getByRole('button', { name: '删除账号', exact: true }).click();
+  await page.getByLabel('确认账号名称', { exact: true }).fill('Personal');
+  await page.getByRole('button', { name: '确认删除', exact: true }).click();
+  await waitForState(async id => !(await window.workspace.call('accounts.list')).some(account => account.id === id), personal.id);
   state = await rpc('workspace.status');
   assert.equal(state.activeAccountId, work.id);
   assert.equal((await rpc('notifications.list', { accountId: work.id })).filter(item => item.unread).length, 0);
   assert.equal((await rpc('notifications.list')).some(item => item.accountId === personal.id), false, 'Deleting an account clears only its receipts');
   assert.equal(state.accounts.length, 1);
+  assert.equal(state.tasks.some(task => task.accountId === personal.id), false);
   const deletedCookies = await desktop.evaluate(({ session }, partition) => session.fromPartition(partition).cookies.get({}), personal.partition);
   assert.deepEqual(deletedCookies, []);
   await rpc('settings.api', { enabled: false });
